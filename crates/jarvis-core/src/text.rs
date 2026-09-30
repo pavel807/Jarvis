@@ -312,23 +312,33 @@ pub fn plural_form(n: u64, one: &str, few: &str, many: &str) -> String {
 }
 
 /// Словарь произношения: слово -> как писать для TTS.
-/// Используйте, чтобы чинить ударения отдельных слов (espeak-ng не умеет
-/// различать омографы; тут помогает запись «как слышится»).
+/// Используйте, чтобы чинить ударения отдельных слов.
 pub fn apply_pronunciation(input: &str) -> String {
-    // ё восстанавливаем для частых слов — Piper читает её правильно.
-    const MAP: &[(&str, &str)] = &[
-        ("ее", "её"),
-        ("еще", "ещё"),
-        ("все таки", "всё-таки"),
-        ("зато", "зато"),
-        ("что то", "что-то"),
-        ("как то", "как-то"),
-        ("где то", "где-то"),
-        ("сколько нибудь", "сколько-нибудь"),
-    ];
+    use std::sync::LazyLock;
+
+    // ё восстанавливаем для частых слов — синтез читает её правильно.
+    // Регексы компилируются один раз: нормализация гоняется на каждое
+    // предложение перед озвучкой.
+    static MAP: LazyLock<Vec<(regex::Regex, &'static str)>> = LazyLock::new(|| {
+        [
+            ("ее", "её"),
+            ("еще", "ещё"),
+            ("все таки", "всё-таки"),
+            ("что то", "что-то"),
+            ("как то", "как-то"),
+            ("где то", "где-то"),
+            ("сколько нибудь", "сколько-нибудь"),
+        ]
+        .iter()
+        .map(|(from, to)| {
+            let re = regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(from))).unwrap();
+            (re, *to)
+        })
+        .collect()
+    });
+
     let mut s = input.to_string();
-    for (from, to) in MAP {
-        let re = regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(from))).unwrap();
+    for (re, to) in MAP.iter() {
         s = re.replace_all(&s, *to).to_string();
     }
     s
@@ -361,11 +371,39 @@ fn number_words(raw: &str) -> String {
 
 /// Главная функция: превращает цифры и обозначения единиц в устную русскую речь.
 pub fn normalize_for_tts(input: &str) -> String {
+    use std::sync::LazyLock;
+
+    // Регексы статические: normalize_for_tts вызывается на каждое предложение.
+    static SIGN_RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(?i)([+\-−])\s*(\d)").unwrap());
+
+    static UNIT_RULES: LazyLock<Vec<(regex::Regex, [&'static str; 3])>> = LazyLock::new(|| {
+        [
+            (r"(?i)(\d+(?:[.,]\d+)?)\s*м\s*/\s*с\b", ["метр в секунду", "метра в секунду", "метров в секунду"]),
+            (r"(?i)(\d+(?:[.,]\d+)?)\s*км\s*/\s*ч\b", ["километр в час", "километра в час", "километров в час"]),
+            (r"(?i)(\d+(?:[.,]\d+)?)\s*км\s*/\s*с\b", ["километр в секунду", "километра в секунду", "километров в секунду"]),
+            (r"(?i)(\d+(?:[.,]\d+)?)\s*(?:°|градус(?:ов|а)?)\s*[cс]\b", ["градус Цельсия", "градуса Цельсия", "градусов Цельсия"]),
+            (r"(?i)(\d+(?:[.,]\d+)?)\s*(?:%|процент(?:ов|а)?)", ["процент", "процента", "процентов"]),
+            (r"(?i)(\d+(?:[.,]\d+)?)\s*кг\b", ["килограмм", "килограмма", "килограммов"]),
+            (r"(?i)(\d+(?:[.,]\d+)?)\s*км\b", ["километр", "километра", "километров"]),
+            (r"(?i)(\d+(?:[.,]\d+)?)\s*м\b", ["метр", "метра", "метров"]),
+            (r"(?i)(\d+(?:[.,]\d+)?)\s*(?:₽|руб(?:лей|ля|.)?)", ["рубль", "рубля", "рублей"]),
+        ]
+        .iter()
+        .map(|(pattern, forms)| (regex::Regex::new(pattern).unwrap(), *forms))
+        .collect()
+    });
+
+    static TIME_RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\b(\d{1,2}):(\d{2})\b").unwrap());
+
+    static NUM_RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\b\d+(?:[.,]\d+)?\b").unwrap());
+
     let mut s = input.to_string();
 
     // Знаки чисел: «+» не произносим, «−» читаем как «минус».
-    let sign_re = regex::Regex::new(r"(?i)([+\-−])\s*(\d)").unwrap();
-    s = sign_re
+    s = SIGN_RE
         .replace_all(&s, |caps: &regex::Captures| {
             let sign = caps[1].chars().next().unwrap();
             if sign == '+' {
@@ -376,22 +414,8 @@ pub fn normalize_for_tts(input: &str) -> String {
         })
         .to_string();
 
-    // Единицы с числом: (регекс, формы существительного, род числа не нужен —
-    // мужской род числительного подходит для всех этих единиц).
-    let unit_rules: &[(&str, [&str; 3])] = &[
-        (r"(?i)(\d+(?:[.,]\d+)?)\s*м\s*/\s*с\b", ["метр в секунду", "метра в секунду", "метров в секунду"]),
-        (r"(?i)(\d+(?:[.,]\d+)?)\s*км\s*/\s*ч\b", ["километр в час", "километра в час", "километров в час"]),
-        (r"(?i)(\d+(?:[.,]\d+)?)\s*км\s*/\s*с\b", ["километр в секунду", "километра в секунду", "километров в секунду"]),
-        (r"(?i)(\d+(?:[.,]\d+)?)\s*(?:°|градус(?:ов|а)?)\s*[cс]\b", ["градус Цельсия", "градуса Цельсия", "градусов Цельсия"]),
-        (r"(?i)(\d+(?:[.,]\d+)?)\s*(?:%|процент(?:ов|а)?)", ["процент", "процента", "процентов"]),
-        (r"(?i)(\d+(?:[.,]\d+)?)\s*кг\b", ["килограмм", "килограмма", "килограммов"]),
-        (r"(?i)(\d+(?:[.,]\d+)?)\s*км\b", ["километр", "километра", "километров"]),
-        (r"(?i)(\d+(?:[.,]\d+)?)\s*м\b", ["метр", "метра", "метров"]),
-        (r"(?i)(\d+(?:[.,]\d+)?)\s*(?:₽|руб(?:лей|ля|.)?)", ["рубль", "рубля", "рублей"]),
-    ];
-
-    for (pattern, forms) in unit_rules {
-        let re = regex::Regex::new(pattern).unwrap();
+    // Единицы с числом: формы существительного по правилам plural_form.
+    for (re, forms) in UNIT_RULES.iter() {
         s = re
             .replace_all(&s, |caps: &regex::Captures| {
                 let (n, has_frac) = parse_num(&caps[1]);
@@ -412,8 +436,7 @@ pub fn normalize_for_tts(input: &str) -> String {
     }
 
     // Время ЧЧ:ММ -> «двенадцать тридцать».
-    let time_re = regex::Regex::new(r"\b(\d{1,2}):(\d{2})\b").unwrap();
-    s = time_re
+    s = TIME_RE
         .replace_all(&s, |caps: &regex::Captures| {
             let h: u64 = caps[1].parse().unwrap_or(0);
             let m: u64 = caps[2].parse().unwrap_or(0);
@@ -422,8 +445,7 @@ pub fn normalize_for_tts(input: &str) -> String {
         .to_string();
 
     // Оставшиеся числа словами.
-    let num_re = regex::Regex::new(r"\b\d+(?:[.,]\d+)?\b").unwrap();
-    s = num_re
+    s = NUM_RE
         .replace_all(&s, |caps: &regex::Captures| number_words(&caps[0]))
         .to_string();
 

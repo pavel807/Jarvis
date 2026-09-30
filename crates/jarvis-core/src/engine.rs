@@ -7,7 +7,7 @@
 use crate::audio::{calculate_rms, resample_audio, spawn_stream};
 use crate::commands::{execute_command, get_global_config, CommandsConfig};
 use crate::events::{EventTx, JarvisEvent};
-use crate::llm::{self, SharedLlm};
+use crate::llm::{self, ChatTurn, SharedLlm};
 use crate::paths;
 use crate::settings::Settings;
 use crate::stt::Stt;
@@ -20,7 +20,7 @@ use rand::Rng;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender, TryRecvError};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// Сколько секунд аудио держим в pre-roll истории перед началом речи.
@@ -47,8 +47,11 @@ pub struct EngineHandles {
     pub paused: Arc<AtomicBool>,
     /// Флаг горячей подмены модели wake word (после обучения).
     pub wakeword_reload: Arc<AtomicBool>,
-    /// Отмена генерации LLM (сбрасывается перед каждым вопросом).
+    /// Отмена генерации LLM (сбрасывается в начале обработки фразы).
     pub llm_cancel: Arc<AtomicBool>,
+    /// Контекст голосового диалога: пары «вопрос → ответ».
+    /// Чистится при возврате в режим wake word.
+    pub llm_history: Arc<Mutex<Vec<ChatTurn>>>,
     pub llm: SharedLlm,
     pub events: EventTx,
 }
@@ -67,7 +70,14 @@ pub fn spawn_stt_worker(
 
     std::thread::spawn(move || {
         while let Ok(job) = rx.recv() {
+            let started = Instant::now();
             let res = stt.transcribe(&job.samples);
+            let secs = job.samples.len() as f32 / wake::SAMPLE_RATE as f32;
+            println!(
+                "📝 STT: {:.1?} на {:.1} с аудио",
+                started.elapsed(),
+                secs
+            );
             let _ = out_tx.send(res);
         }
     });
@@ -132,12 +142,14 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 
     let (stt_tx, stt_rx) = spawn_stt_worker(stt);
 
-    let wake_threshold = h
-        .settings
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .wake_threshold;
-    let mut det = wake::create_detector(&paths::wakeword_model(), wake_threshold)?;
+    let (wake_threshold, ww_model) = {
+        let s = h
+            .settings
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        (s.wake_threshold, s.wakeword_model.clone())
+    };
+    let mut det = wake::create_detector(&paths::wakeword_model_file(&ww_model), wake_threshold)?;
 
     let mut wi16 = VecDeque::<i16>::new();
     let history_capacity = wake::SAMPLE_RATE * HISTORY_BUFFER_SECS;
@@ -159,12 +171,14 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
         // --- 0. Горячая подмена модели wake word и снимок настроек ---
         if h.wakeword_reload.load(Ordering::SeqCst) && state == AppState::WaitingForWakeWord {
             h.wakeword_reload.store(false, Ordering::SeqCst);
+            let snap = h
+                .settings
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             match wake::create_detector(
-                &paths::wakeword_model(),
-                h.settings
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .wake_threshold,
+                &paths::wakeword_model_file(&snap.wakeword_model),
+                snap.wake_threshold,
             ) {
                 Ok(d) => {
                     det = d;
@@ -252,6 +266,11 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                             followup_deadline = None;
                             audio_history.clear();
                             wi16.clear();
+                            // Диалог завершён — контекст LLM не нужен.
+                            h.llm_history
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clear();
                             let _ = h.events.send(JarvisEvent::StateChanged {
                                 state: "wake_word".into(),
                             });
@@ -320,6 +339,10 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                     command_buffer.clear();
                     wi16.clear();
                     audio_history.clear();
+                    h.llm_history
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clear();
 
                     has_speech_started = false;
                     silence_samples = 0;
@@ -444,6 +467,11 @@ fn followup_expired_or_none(deadline: Option<Instant>) -> bool {
 
 /// Обработка распознанной фразы: повтор / социальный ответ / команда / LLM.
 fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outcome {
+    // Новая генерация — новая отмена. Сброс именно здесь, на потоке движка,
+    // до старта любого фонового потока с LLM: иначе отмена, нажатая в момент
+    // старта запроса, затиралась бы внутри llm::ask.
+    h.llm_cancel.store(false, Ordering::SeqCst);
+
     // 1. РЕЖИМ ПОВТОРЕНИЯ («скажи ...»)
     if let Some(phrase_to_repeat) = extract_repeat_text(text) {
         println!("🗣️ Озвучивание текста: \"{}\"", phrase_to_repeat);
@@ -479,7 +507,16 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
 
             let reply_error = global_cfg.reply_error.clone();
             let err_path = paths::resolve_data_path(&reply_error).to_string_lossy().to_string();
-            execute_command(&cmd, text, &h.audio_tx, &h.events, &h.llm, &err_path);
+            execute_command(
+                &cmd,
+                text,
+                &h.audio_tx,
+                &h.events,
+                &h.llm,
+                Arc::clone(&h.llm_cancel),
+                Arc::clone(&h.llm_history),
+                &err_path,
+            );
             println!("🛑 Команда СТОП: речь остановлена.");
             return Outcome::Wake;
         }
@@ -492,7 +529,16 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
 
         let reply_error = global_cfg.reply_error.clone();
         let err_path = paths::resolve_data_path(&reply_error).to_string_lossy().to_string();
-        execute_command(&cmd, text, &h.audio_tx, &h.events, &h.llm, &err_path);
+        execute_command(
+            &cmd,
+            text,
+            &h.audio_tx,
+            &h.events,
+            &h.llm,
+            Arc::clone(&h.llm_cancel),
+            Arc::clone(&h.llm_history),
+            &err_path,
+        );
         return Outcome::Followup;
     }
 
@@ -508,13 +554,6 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
 
         if web_auto {
             println!("🌐 Вопрос требует свежих данных, ищу в интернете: \"{}\"", prompt);
-            let sound_num = rng.gen_range(1..=4);
-            let sound_path = paths::resolve_data_path(
-                &global_cfg.reply_success.replace("{}", &sound_num.to_string()),
-            );
-            let _ = h
-                .audio_tx
-                .send(AudioMessage::PlayWav(sound_path.to_string_lossy().to_string()));
 
             let _ = h
                 .audio_tx
@@ -523,6 +562,8 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
             let audio_tx = h.audio_tx.clone();
             let events = h.events.clone();
             let llm = Arc::clone(&h.llm);
+            let history = Arc::clone(&h.llm_history);
+            let cancel = Arc::clone(&h.llm_cancel);
             let query = prompt.clone();
 
             std::thread::spawn(move || match crate::web::search(&query, 5) {
@@ -532,9 +573,10 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
                             llm,
                             llm::WEB_SYSTEM_PROMPT,
                             web_prompt,
+                            history,
                             audio_tx,
                             events,
-                            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                            cancel,
                         );
                     }
                 }
@@ -546,16 +588,27 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
 
         println!("🤖 Вопрос к LLM: \"{}\"", prompt);
 
-        let sound_num = rng.gen_range(1..=4);
-        let sound_path = paths::resolve_data_path(&global_cfg.reply_success.replace("{}", &sound_num.to_string()));
-        let _ = h
-            .audio_tx
-            .send(AudioMessage::PlayWav(sound_path.to_string_lossy().to_string()));
+        // Звук-подтверждение — по настройке: в очереди плеера он стоит перед
+        // речью и отодвигает первый звук ответа.
+        if h.settings
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .ack_before_llm
+        {
+            let sound_num = rng.gen_range(1..=4);
+            let sound_path = paths::resolve_data_path(
+                &global_cfg.reply_success.replace("{}", &sound_num.to_string()),
+            );
+            let _ = h
+                .audio_tx
+                .send(AudioMessage::PlayWav(sound_path.to_string_lossy().to_string()));
+        }
 
         llm::ask(
             Arc::clone(&h.llm),
             llm::SYSTEM_PROMPT,
             prompt,
+            Arc::clone(&h.llm_history),
             h.audio_tx.clone(),
             h.events.clone(),
             Arc::clone(&h.llm_cancel),

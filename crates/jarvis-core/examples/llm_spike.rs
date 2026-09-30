@@ -1,4 +1,4 @@
-//! Спайк: проверка openbmb/MiniCPM5-1B через candle (Metal) на разных языках.
+//! Спайк: проверка Qwen/Qwen3-1.7B через candle (Metal) на разных языках.
 //!
 //! Запуск: cargo run --release --example llm_spike -p jarvis-core
 
@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
         ("RU", "Какая столица России? Ответь кратко."),
     ] {
         let started = Instant::now();
-        match llm::generate_blocking(&shared, llm::SYSTEM_PROMPT, question, &cancel) {
+        match llm::generate_blocking(&shared, llm::SYSTEM_PROMPT, &[], question, &cancel) {
             Ok(answer) => {
                 println!("\n=== {lang} ({:.1?}) ===", started.elapsed());
                 println!("{}", answer.trim());

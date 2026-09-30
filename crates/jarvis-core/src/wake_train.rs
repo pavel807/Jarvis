@@ -254,10 +254,10 @@ pub fn test_wakeword(rpw: &Path, wav: &Path) -> Result<f32> {
 }
 
 /// Подменяет активную модель wake word обученной, архивируя старую.
+/// `active` — путь активной модели (имя берётся из настроек).
 /// Движок подхватит новую модель при следующем переходе в режим wake word
 /// (флаг `wakeword_reload` в EngineHandles).
-pub fn apply_wakeword(trained: &Path) -> Result<PathBuf> {
-    let active = paths::wakeword_model();
+pub fn apply_wakeword(trained: &Path, active: &Path) -> Result<PathBuf> {
     if active.exists() {
         let backup = active.with_extension(format!(
             "rpw.bak.{}",
@@ -266,11 +266,11 @@ pub fn apply_wakeword(trained: &Path) -> Result<PathBuf> {
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
         ));
-        fs::rename(&active, &backup).with_context(|| format!("Бэкап {:?}", backup))?;
+        fs::rename(active, &backup).with_context(|| format!("Бэкап {:?}", backup))?;
         println!("🗄️ Прошлая модель сохранена как {:?}", backup);
     }
-    fs::copy(trained, &active).with_context(|| format!("Копирование в {:?}", active))?;
-    Ok(active)
+    fs::copy(trained, active).with_context(|| format!("Копирование в {:?}", active))?;
+    Ok(active.to_path_buf())
 }
 
 fn read_wav_i16_16k(path: &Path) -> Result<Vec<i16>> {

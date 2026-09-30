@@ -11,7 +11,7 @@ use jarvis_core::stt::{self, Stt};
 use jarvis_core::tts::{self, SharedTtsState};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::channel;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 fn main() -> Result<()> {
     println!("🎙️ Запуск Jarvis CLI (GigaAM v3 + Qwen3-TTS + Rustpotter + Qwen3)...");
@@ -104,6 +104,7 @@ fn main() -> Result<()> {
         paused,
         wakeword_reload,
         llm_cancel,
+        llm_history: Arc::new(Mutex::new(Vec::new())),
         llm: shared_llm,
         events: events_tx,
     };

@@ -41,8 +41,10 @@ pub fn tts_cache_dir() -> PathBuf {
     resources_dir().join("tts_cache")
 }
 
-pub fn wakeword_model() -> PathBuf {
-    models_dir().join("jarvis_model_2.rpw")
+/// Активная модель wake word: имя файла задаётся настройкой
+/// `wakeword_model` в settings.toml (см. `Settings::default`).
+pub fn wakeword_model_file(name: &str) -> PathBuf {
+    models_dir().join(name)
 }
 
 /// Путь из конфигов (относительные пути отсчитываются от корня данных).

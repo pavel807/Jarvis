@@ -1,11 +1,11 @@
-//! Локальный LLM (openbmb/MiniCPM5-1B на candle + Metal): фоновая загрузка,
+//! Локальный LLM (Qwen/Qwen3-1.7B на candle + Metal): фоновая загрузка,
 //! потоковая генерация с озвучкой по предложениям и отменой.
 //!
 //! Модули:
 //! - [`config`] — конфиг модели и загрузка файлов с Hugging Face;
-//! - [`template`] — ChatML-промпт;
+//! - [`template`] — ChatML-промпт (включая историю диалога);
 //! - [`sampler`] — repeat penalty + top-p сэмплинг;
-//! - [`model`] — реализация архитектуры (GQA, явный head_dim, KV-кэш).
+//! - [`model`] — реализация архитектуры (GQA, QK-norm, явный head_dim, KV-кэш).
 
 pub mod config;
 pub mod model;
@@ -22,6 +22,11 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
+
+pub use template::ChatTurn;
+
+/// Сколько последних реплик (вопрос + ответ = 2 записи) держим в контексте.
+pub const MAX_HISTORY_ENTRIES: usize = 6;
 
 /// Памятка: ответ будет озвучен TTS, поэтому — короткий устный русский текст.
 pub const SYSTEM_PROMPT: &str = "Ты Джарвис — голосовой ассистент на устройстве пользователя. Отвечай только на русском языке, кратко и разговорно: 2-4 предложения, максимум 300 символов. Без markdown, без списков, без эмодзи и без служебных символов — твой ответ озвучивается синтезом речи. Если вопрос неясен, коротко переспроси.";
@@ -110,6 +115,7 @@ impl LlmEngine {
     pub fn generate_streaming(
         &mut self,
         system: &str,
+        history: &[ChatTurn],
         user: &str,
         cancel: &AtomicBool,
         on_sentence: impl FnMut(&str),
@@ -117,6 +123,7 @@ impl LlmEngine {
     ) -> Result<String> {
         self.generate_streaming_with_params(
             system,
+            history,
             user,
             None,
             cancel,
@@ -129,17 +136,23 @@ impl LlmEngine {
     pub fn generate_streaming_with_params(
         &mut self,
         system: &str,
+        history: &[ChatTurn],
         user: &str,
         params_override: Option<config::GenerationParams>,
         cancel: &AtomicBool,
         mut on_sentence: impl FnMut(&str),
         mut on_progress: impl FnMut(&str),
     ) -> Result<String> {
-        let prompt = template::build_chat_prompt(system, user, if self.prompt_bos {
-            Some(template::MINICPM_BOS)
-        } else {
-            None
-        });
+        let prompt = template::build_chat_prompt(
+            system,
+            history,
+            user,
+            if self.prompt_bos {
+                Some(template::MINICPM_BOS)
+            } else {
+                None
+            },
+        );
         let encoding = self
             .tokenizer
             .encode(prompt, false)
@@ -383,6 +396,7 @@ pub fn spawn_llm_loader(shared: &SharedLlm, events: &EventTx) {
                 let started = Instant::now();
                 let _ = engine.generate_streaming_with_params(
                     SYSTEM_PROMPT,
+                    &[],
                     "Привет",
                     Some(warm_params),
                     &cancel,
@@ -434,17 +448,32 @@ fn wait_for_engine(
 }
 
 /// Задать вопрос LLM. Не блокирует вызывающего: генерация идёт в фоне,
-/// готовые предложения отправляются в плеер, отмена — через `cancel`.
+/// готовые предложения отправляются в плеер.
+///
+/// `history` — общий буфер диалога: снапшот читается перед генерацией,
+/// успешный обмен дописывается в конец (не более [`MAX_HISTORY_ENTRIES`]).
+/// Отмена — через `cancel`; сбрасывать флаг должен тот, кто инициирует
+/// запрос, до вызова `ask` (сброс внутри не делал бы смысла: отмена,
+/// нажатая до старта потока, была бы затёрта).
 pub fn ask(
     shared: SharedLlm,
     system: &'static str,
     prompt: String,
+    history: Arc<Mutex<Vec<ChatTurn>>>,
     audio_tx: Sender<AudioMessage>,
     events: EventTx,
     cancel: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
-        cancel.store(false, Ordering::SeqCst);
+        let history_snapshot: Vec<ChatTurn> = {
+            let buf = history.lock().unwrap_or_else(|e| e.into_inner());
+            buf.iter()
+                .rev()
+                .take(MAX_HISTORY_ENTRIES)
+                .rev()
+                .cloned()
+                .collect()
+        };
 
         let Some(mut guard) = wait_for_engine(&shared, Duration::from_secs(LLM_WAIT_TIMEOUT_SECS))
         else {
@@ -461,6 +490,7 @@ pub fn ask(
         let started = Instant::now();
         let result = engine.generate_streaming(
             system,
+            &history_snapshot,
             &prompt,
             &cancel,
             |sentence| {
@@ -481,6 +511,12 @@ pub fn ask(
                     started.elapsed(),
                     text.chars().count()
                 );
+                {
+                    let mut buf = history.lock().unwrap_or_else(|e| e.into_inner());
+                    buf.push((prompt, text.clone()));
+                    let excess = buf.len().saturating_sub(MAX_HISTORY_ENTRIES);
+                    buf.drain(..excess);
+                }
                 let _ = events.send(JarvisEvent::LlmDone { text });
             }
             Err(e) => {
@@ -542,6 +578,7 @@ pub fn try_normalize(shared: &SharedLlm, text: &str) -> Option<String> {
 
     let result = engine.generate_streaming_with_params(
         NORMALIZE_SYSTEM_PROMPT,
+        &[],
         text,
         Some(params),
         &cancel,
@@ -557,13 +594,14 @@ pub fn try_normalize(shared: &SharedLlm, text: &str) -> Option<String> {
 pub fn generate_blocking(
     shared: &SharedLlm,
     system: &str,
+    history: &[ChatTurn],
     user: &str,
     cancel: &AtomicBool,
 ) -> Result<String> {
     let mut guard = wait_for_engine(shared, Duration::from_secs(LLM_WAIT_TIMEOUT_SECS))
         .context("LLM недоступна")?;
     let engine = guard.as_mut().context("LLM недоступна")?;
-    engine.generate_streaming(system, user, cancel, |_| {}, |_| {})
+    engine.generate_streaming(system, history, user, cancel, |_| {}, |_| {})
 }
 
 #[cfg(test)]

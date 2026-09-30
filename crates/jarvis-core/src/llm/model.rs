@@ -1,9 +1,10 @@
-//! Реализация Llama-совместимой архитектуры (openbmb/MiniCPM5-1B) на candle.
+//! Реализация Llama-совместимой архитектуры (Qwen/Qwen3-1.7B) на candle.
 //!
-//! Отличие от `candle-transformers::models::llama`: у MiniCPM5 head_dim (128)
+//! Отличие от `candle-transformers::models::llama`: у Qwen3 head_dim (128)
 //! не равен hidden_size / num_attention_heads (96), поэтому проекции и RoPE
 //! считаются по явному head_dim из config.json. RoPE в конвенции HF
-//! (rotate_half), как у чекпоинтов transformers.
+//! (rotate_half), как у чекпоинтов transformers. QK-нормализация грузится
+//! по наличию весов — код совместим и с llama-моделями без неё.
 
 use super::config::ModelConfig;
 use anyhow::{bail, Context, Result};

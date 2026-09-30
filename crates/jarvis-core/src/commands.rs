@@ -1,15 +1,16 @@
 //! Команды из commands.toml: загрузка, hot-reload, fuzzy-матчинг, выполнение.
 
 use crate::events::{EventTx, JarvisEvent};
-use crate::llm::{self, SharedLlm};
+use crate::llm::{self, ChatTurn, SharedLlm};
 use crate::text::{clean_text, word_similarity};
 use crate::tts::AudioMessage;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
 pub const SIMILARITY_THRESHOLD: f32 = 0.72;
@@ -43,6 +44,26 @@ pub struct GlobalConfig {
 
 fn default_reply_ack() -> String {
     "resources/audio/reply1.wav".to_string()
+}
+
+impl Default for GlobalConfig {
+    fn default() -> Self {
+        Self {
+            reply_success: "resources/audio/ok{}.wav".to_string(),
+            reply_error: "resources/audio/reply1.wav".to_string(),
+            reply_unknown: "resources/audio/reply1.wav".to_string(),
+            reply_ack: "resources/audio/reply1.wav".to_string(),
+        }
+    }
+}
+
+impl Default for CommandsConfig {
+    fn default() -> Self {
+        Self {
+            global: GlobalConfig::default(),
+            commands: Vec::new(),
+        }
+    }
 }
 
 impl CommandsConfig {
@@ -211,6 +232,8 @@ pub fn execute_command(
     audio_tx: &Sender<AudioMessage>,
     events: &EventTx,
     llm: &SharedLlm,
+    llm_cancel: Arc<AtomicBool>,
+    llm_history: Arc<Mutex<Vec<ChatTurn>>>,
     reply_error: &str,
 ) {
     let action_type = cmd.action_type.trim();
@@ -278,9 +301,10 @@ pub fn execute_command(
                                 llm,
                                 llm::WEB_SYSTEM_PROMPT,
                                 prompt,
+                                llm_history,
                                 audio_tx,
                                 events,
-                                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                                llm_cancel,
                             );
                         }
                         None => {

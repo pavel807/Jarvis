@@ -25,6 +25,8 @@ pub struct Settings {
     // --- Wake word ---
     /// Порог срабатывания детектора RustPotter.
     pub wake_threshold: f32,
+    /// Имя файла активной модели wake word внутри `models/`.
+    pub wakeword_model: String,
 
     // --- LLM ---
     pub llm_enabled: bool,
@@ -40,17 +42,23 @@ pub struct Settings {
     pub tts_voice: String,
     /// Скорость речи: 1.0 — естественно, меньше — медленнее.
     pub tts_speed: f32,
+
+    // --- Отклик ---
+    /// Звук-подтверждение перед ответом LLM. Выключен по умолчанию:
+    /// он стоит в очереди плеера перед речью и отодвигает первый звук ответа.
+    pub ack_before_llm: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             silence_rms_threshold: 0.018,
-            silence_timeout_secs: 1.3,
+            silence_timeout_secs: 0.7,
             min_command_duration_secs: 0.5,
             max_command_duration_secs: 8.0,
             followup_window_secs: 8,
             wake_threshold: 0.6,
+            wakeword_model: "jarvis_model_2.rpw".to_string(),
             llm_enabled: true,
             web_search_auto: true,
             llm_normalize: true,
@@ -58,6 +66,7 @@ impl Default for Settings {
             llm_max_tokens: 256,
             tts_voice: "ryan".to_string(),
             tts_speed: 1.0,
+            ack_before_llm: false,
         }
     }
 }

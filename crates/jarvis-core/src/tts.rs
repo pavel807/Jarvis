@@ -163,11 +163,15 @@ impl TtsEngine {
         &self.voice
     }
 
-    /// Потоковый синтез: сессия выдаёт чанки аудио (~800 мс) по мере
-    /// генерации, не дожидаясь готовности всей фразы.
+    /// Потоковый синтез: сессия выдаёт чанки аудио по мере генерации,
+    /// не дожидаясь готовности всей фразы.
+    ///
+    /// chunk_frames 5 (~400 мс) вместо дефолтных 10: первый звук начинает
+    /// звучать раньше, а накладные расходы декодера на лишний вызов малы.
     pub fn stream_session(&self, text: &str) -> Result<StreamingSession<'_>> {
         let options = SynthesisOptions {
             temperature: TTS_TEMPERATURE,
+            chunk_frames: 5,
             ..Default::default()
         };
         self.model
@@ -462,7 +466,9 @@ fn stream_to_output(
     // генерируются на 24 кГц, но ресемплируются в очередь так, будто они
     // записаны на 24 кГц * speed — тот же приём, что и у кэш-WAV.
     let src_rate = (jarvis_tts::audio::SAMPLE_RATE as f32 * speed).round() as usize;
+    let started = Instant::now();
     let mut session = tts.stream_session(text)?;
+    let mut first_chunk_logged = false;
 
     loop {
         let chunk = match session.next_chunk() {
@@ -474,6 +480,11 @@ fn stream_to_output(
             return Ok(());
         }
         let audio = chunk;
+
+        if !first_chunk_logged {
+            println!("🔊 TTS: первый чанк за {:.0?}", started.elapsed());
+            first_chunk_logged = true;
+        }
 
         if wav.is_some() {
             let mut ok = true;
