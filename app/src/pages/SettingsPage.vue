@@ -10,6 +10,7 @@ interface Settings {
   max_command_duration_secs: number;
   followup_window_secs: number;
   wake_threshold: number;
+  wakeword_model: string;
   llm_enabled: boolean;
   web_search_auto: boolean;
   llm_normalize: boolean;
@@ -17,15 +18,17 @@ interface Settings {
   llm_max_tokens: number;
   tts_voice: string;
   tts_speed: number;
+  ack_before_llm: boolean;
 }
 
 const settings = reactive<Settings>({
   silence_rms_threshold: 0.018,
-  silence_timeout_secs: 1.3,
+  silence_timeout_secs: 0.7,
   min_command_duration_secs: 0.5,
   max_command_duration_secs: 8,
   followup_window_secs: 8,
   wake_threshold: 0.6,
+  wakeword_model: "jarvis_model_2.rpw",
   llm_enabled: true,
   web_search_auto: true,
   llm_normalize: true,
@@ -33,12 +36,21 @@ const settings = reactive<Settings>({
   llm_max_tokens: 256,
   tts_voice: "ryan",
   tts_speed: 1.0,
+  ack_before_llm: false,
 });
 
+// Голоса приходят из бэкенда (tts::TTS_VOICES), чтобы списки не расходились.
+const voices = ref<[string, string][]>([]);
 const saved = ref(false);
+
+function voiceLabel(id: string, desc: string): string {
+  const title = id.charAt(0).toUpperCase() + id.slice(1).replace(/_/g, " ");
+  return `${title} — ${desc}`;
+}
 
 onMounted(async () => {
   Object.assign(settings, await invoke<Settings>("get_settings"));
+  voices.value = await invoke<[string, string][]>("tts_voices");
 });
 
 async function save() {
@@ -106,6 +118,10 @@ async function save() {
           <input type="checkbox" v-model="settings.llm_normalize" style="width: auto" />
           Нейро-нормализация озвучки: числа, единицы и сокращения через ИИ
         </label>
+        <label style="display: flex; align-items: center; gap: 8px; margin: 0">
+          <input type="checkbox" v-model="settings.ack_before_llm" style="width: auto" />
+          Звук-подтверждение перед ответом ИИ (выкл. = быстрее первый звук)
+        </label>
       </div>
       <div class="row">
         <div style="flex: 1; min-width: 180px">
@@ -123,15 +139,7 @@ async function save() {
       <h2>Голос TTS (Qwen3-TTS)</h2>
       <label>Голос</label>
       <select v-model="settings.tts_voice">
-        <option value="ryan">Ryan — мужской, тёплый</option>
-        <option value="aiden">Aiden — мужской, средний</option>
-        <option value="eric">Eric — мужской, глубокий</option>
-        <option value="dylan">Dylan — мужской, молодой</option>
-        <option value="uncle_fu">Uncle Fu — мужской, низкий</option>
-        <option value="serena">Serena — женский, мягкий</option>
-        <option value="vivian">Vivian — женский, тёплый</option>
-        <option value="ono_anna">Ono Anna — женский, высокий</option>
-        <option value="sohee">Sohee — женский, средний</option>
+        <option v-for="[id, desc] in voices" :key="id" :value="id">{{ voiceLabel(id, desc) }}</option>
       </select>
       <label>Скорость речи ({{ settings.tts_speed.toFixed(2) }}× — меньше = спокойнее)</label>
       <input type="range" min="0.7" max="1.2" step="0.05" v-model.number="settings.tts_speed" style="width: 100%" />

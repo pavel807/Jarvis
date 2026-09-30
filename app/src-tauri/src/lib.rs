@@ -4,13 +4,14 @@
 use jarvis_core::commands::{spawn_config_watcher, CommandsConfig};
 use jarvis_core::engine::{run_engine, EngineHandles};
 use jarvis_core::events::JarvisEvent;
-use jarvis_core::llm::{self, spawn_llm_loader, SharedLlmState};
+use jarvis_core::llm::{self, spawn_llm_loader, ChatTurn, SharedLlmState};
 use jarvis_core::paths;
 use jarvis_core::settings::{spawn_settings_watcher, Settings};
 use jarvis_core::stt::{self, Stt};
 use jarvis_core::tts::{self, AudioMessage, SharedTtsState};
 use jarvis_core::wake_train;
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, RwLock};
@@ -28,7 +29,12 @@ pub struct Shared {
     pub stop_audio_flag: Arc<AtomicBool>,
     pub paused: Arc<AtomicBool>,
     pub wakeword_reload: Arc<AtomicBool>,
+    /// Отмена голосовой генерации LLM (команда «замолчи»).
     pub llm_cancel: Arc<AtomicBool>,
+    /// Токен отмены текущего запроса из чата UI.
+    pub chat_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    /// История диалога чата UI.
+    pub chat_history: Arc<Mutex<Vec<ChatTurn>>>,
     pub record_cancel: Arc<AtomicBool>,
     pub engine_running: Arc<AtomicBool>,
     pub audio_tx: std::sync::mpsc::Sender<AudioMessage>,
@@ -46,10 +52,15 @@ impl Shared {
         shared_llm: Arc<SharedLlmState>,
         settings: Arc<RwLock<Settings>>,
     ) -> Self {
+        // Битый commands.toml не должен валить приложение: работаем
+        // без команд, ошибку видно в журнале.
+        let commands = CommandsConfig::load(&paths::commands_file()).unwrap_or_else(|e| {
+            eprintln!("⚠️ {e:#}; использую пустой список команд");
+            CommandsConfig::default()
+        });
+
         Self {
-            commands: Arc::new(RwLock::new(
-                CommandsConfig::load(&paths::commands_file()).expect("Не удалось загрузить commands.toml"),
-            )),
+            commands: Arc::new(RwLock::new(commands)),
             settings,
             shared_tts,
             tts_failed,
@@ -59,6 +70,8 @@ impl Shared {
             paused: Arc::new(AtomicBool::new(false)),
             wakeword_reload: Arc::new(AtomicBool::new(false)),
             llm_cancel: Arc::new(AtomicBool::new(false)),
+            chat_cancel: Mutex::new(None),
+            chat_history: Arc::new(Mutex::new(Vec::new())),
             record_cancel: Arc::new(AtomicBool::new(false)),
             engine_running: Arc::new(AtomicBool::new(false)),
             audio_tx,
@@ -144,6 +157,7 @@ fn spawn_engine(shared: &Arc<Shared>, events_tx: std::sync::mpsc::Sender<JarvisE
             paused: Arc::clone(&shared_engine.paused),
             wakeword_reload: Arc::clone(&shared_engine.wakeword_reload),
             llm_cancel: Arc::clone(&shared_engine.llm_cancel),
+            llm_history: Arc::clone(&shared_engine.chat_history),
             llm: Arc::clone(&shared_engine.shared_llm),
             events: events_tx,
         };
@@ -269,19 +283,35 @@ fn llm_ask(shared: State<'_, Arc<Shared>>, app: AppHandle, prompt: String) {
         }
     });
 
+    // Свежий токен на каждый запрос: «Стоп» отменяет текущий вопрос,
+    // и гонки с обнулением флага внутри генерации нет.
+    let cancel = Arc::new(AtomicBool::new(false));
+    *shared
+        .chat_cancel
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&cancel));
+
     llm::ask(
         Arc::clone(&shared.shared_llm),
         llm::SYSTEM_PROMPT,
         prompt,
+        Arc::clone(&shared.chat_history),
         shared.audio_tx.clone(),
         tx,
-        Arc::clone(&shared.llm_cancel),
+        cancel,
     );
 }
 
 #[tauri::command]
 fn llm_cancel(shared: State<'_, Arc<Shared>>) {
-    shared.llm_cancel.store(true, Ordering::SeqCst);
+    if let Some(cancel) = shared
+        .chat_cancel
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        cancel.store(true, Ordering::SeqCst);
+    }
     let _ = shared.audio_tx.send(AudioMessage::Stop);
 }
 
@@ -293,7 +323,7 @@ struct WwSamples {
 }
 
 #[tauri::command]
-fn ww_samples() -> WwSamples {
+async fn ww_samples() -> WwSamples {
     let (train_dir, test_dir) = wake_train::sample_dirs();
     let fmt = |dir: &std::path::Path| -> Vec<(String, f64)> {
         tts::list_wav_samples(dir)
@@ -373,9 +403,29 @@ impl Drop for RecordGuard {
     }
 }
 
+/// Проверяет, что путь (после разрешения симлинков) лежит внутри базового
+/// каталога. Пути из webview нельзя принимать на веру.
+fn ensure_under_dir(path: &Path, base: &Path) -> Result<PathBuf, String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("Не удалось разрешить путь {:?}: {e}", path))?;
+    let base_canonical = base
+        .canonicalize()
+        .map_err(|e| format!("Не удалось разрешить каталог {:?}: {e}", base))?;
+    if canonical.starts_with(&base_canonical) {
+        Ok(canonical)
+    } else {
+        Err(format!(
+            "Путь {:?} вне каталога {:?}",
+            path, base_canonical
+        ))
+    }
+}
+
 #[tauri::command]
 fn ww_delete(path: String) -> Result<(), String> {
-    std::fs::remove_file(&path).map_err(|e| e.to_string())
+    let file = ensure_under_dir(Path::new(&path), &paths::train_dir())?;
+    std::fs::remove_file(&file).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -411,18 +461,35 @@ fn ww_build(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn ww_apply(shared: State<'_, Arc<Shared>>, path: Option<String>) -> Result<(), String> {
     let trained = match path {
-        Some(p) => std::path::PathBuf::from(p),
-        None => paths::models_dir().join("jarvis_model_trained.rpw"),
+        Some(p) => ensure_under_dir(Path::new(&p), &paths::models_dir())
+            .or_else(|_| ensure_under_dir(Path::new(&p), &paths::train_dir()))?,
+        None => {
+            // Дефолт: результат последнего обучения (см. ww_build).
+            paths::models_dir().join("jarvis_model_trained.rpw")
+        }
     };
-    wake_train::apply_wakeword(&trained).map_err(|e| e.to_string())?;
+    if trained.extension().is_some_and(|x| x != "rpw") {
+        return Err("Ожидался файл модели .rpw".into());
+    }
+
+    // Активный слот задаётся настройкой wakeword_model.
+    let active = {
+        let s = shared.settings.read().unwrap_or_else(|e| e.into_inner());
+        paths::wakeword_model_file(&s.wakeword_model)
+    };
+    wake_train::apply_wakeword(&trained, &active).map_err(|e| e.to_string())?;
     shared.wakeword_reload.store(true, Ordering::SeqCst);
     Ok(())
 }
 
 #[tauri::command]
-fn ww_test(path: String) -> Result<f32, String> {
-    let active = paths::wakeword_model();
-    wake_train::test_wakeword(&active, std::path::Path::new(&path)).map_err(|e| e.to_string())
+fn ww_test(shared: State<'_, Arc<Shared>>, path: String) -> Result<f32, String> {
+    let wav = ensure_under_dir(Path::new(&path), &paths::train_dir())?;
+    let active = {
+        let s = shared.settings.read().unwrap_or_else(|e| e.into_inner());
+        paths::wakeword_model_file(&s.wakeword_model)
+    };
+    wake_train::test_wakeword(&active, &wav).map_err(|e| e.to_string())
 }
 
 // ---------- Трей и запуск ----------
@@ -440,8 +507,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, TRAY_QUIT, "Выход", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &toggle, &quit])?;
 
-    TrayIconBuilder::with_id("jarvis-tray")
-        .icon(app.default_window_icon().unwrap().clone())
+    let mut tray = TrayIconBuilder::with_id("jarvis-tray")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -458,8 +524,13 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             if let tauri::tray::TrayIconEvent::Click { .. } = event {
                 show_main(tray.app_handle());
             }
-        })
-        .build(app)?;
+        });
+    // Иконка может отсутствовать (например, при сборке без icons/) —
+    // не паникуем, трай просто будет без иконки.
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
 
     Ok(())
 }
@@ -472,16 +543,35 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+/// Каталог данных приложения для случая, когда собранный .app запущен вне
+/// репозитория: `~/Library/Application Support/Jarvis` (macOS) или `~/.jarvis`.
+fn app_data_dir() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        #[cfg(target_os = "macos")]
+        return home
+            .join("Library/Application Support/Jarvis");
+        #[cfg(not(target_os = "macos"))]
+        return home.join(".jarvis");
+    }
+    PathBuf::from(".")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Пути к данным: репозиторий относительно src-tauri (../..).
+    // Корень данных Jarvis. Приоритет: переменная окружения JARVIS_HOME →
+    // корень репозитория, известный на этапе сборки (dev-запуск) → каталог
+    // данных приложения (собранный .app).
     if std::env::var_os("JARVIS_HOME").is_none() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let root = manifest
+        let repo = manifest
             .parent()
             .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+            .map(|p| p.to_path_buf());
+
+        let root = match repo {
+            Some(r) if r.join("commands.toml").exists() => r,
+            _ => app_data_dir(),
+        };
         unsafe {
             std::env::set_var("JARVIS_HOME", root);
         }
@@ -503,8 +593,13 @@ pub fn run() {
             let stop_audio_flag = Arc::new(AtomicBool::new(false));
 
             let shared_llm: Arc<SharedLlmState> = Arc::new(SharedLlmState::new());
+            // Битый settings.toml не должен валить приложение: откатываемся
+            // на значения по умолчанию.
             let settings = Arc::new(RwLock::new(
-                Settings::load(&paths::settings_file()).expect("Не удалось загрузить settings.toml"),
+                Settings::load(&paths::settings_file()).unwrap_or_else(|e| {
+                    eprintln!("⚠️ {e:#}; использую настройки по умолчанию");
+                    Settings::default()
+                }),
             ));
             settings.read().unwrap_or_else(|e| e.into_inner()).apply();
 

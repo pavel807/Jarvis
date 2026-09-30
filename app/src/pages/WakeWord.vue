@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { store } from "../store";
 import PageIcon from "../components/PageIcon.vue";
 
@@ -70,9 +70,11 @@ async function runTest() {
   }
 }
 
+let unlisten: UnlistenFn | null = null;
+
 onMounted(async () => {
   await refresh();
-  await listen("engine-event", (e: { payload: { type: string } }) => {
+  unlisten = await listen("engine-event", (e: { payload: { type: string } }) => {
     if (e.payload.type === "record_saved") {
       store.recording = false;
       refresh();
@@ -83,6 +85,12 @@ onMounted(async () => {
       building.value = false;
     }
   });
+});
+
+onUnmounted(() => {
+  // Без отписки каждый вход на страницу вешал бы ещё один обработчик.
+  unlisten?.();
+  unlisten = null;
 });
 </script>
 
