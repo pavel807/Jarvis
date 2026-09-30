@@ -1,0 +1,31 @@
+[package]
+name = "jarvis-tts"
+version.workspace = true
+edition = "2021"
+description = "Qwen3-TTS 0.6B CustomVoice на чистом Rust (candle 0.11, Metal) — production-движок TTS Jarvis"
+license = "MIT"
+
+# Вендорено из TrevorS/qwen3-tts-rs (MIT) и сокращено до 0.6B CustomVoice:
+# без Base/VoiceDesign/клонирования голоса, hub, CLI и CUDA. Только preset-голосы.
+
+[features]
+# candle-core в workspace собран с metal; флаг включает Metal-пути в коде.
+default = ["metal"]
+metal = []
+
+[dependencies]
+candle-core.workspace = true
+candle-nn.workspace = true
+tokenizers.workspace = true
+hound.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing = "0.1"
+
+[lints.rust]
+# Код упоминает отключённые флаги исходного проекта (cuda/hub/profiling).
+unexpected_cfgs = { level = "allow" }
+
+[dev-dependencies]
+tempfile = "3"

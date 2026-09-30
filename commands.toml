@@ -1,0 +1,236 @@
+[global]
+reply_success = "resources/audio/ok{}.wav"
+reply_error = "resources/audio/reply1.wav"
+reply_unknown = "resources/audio/reply1.wav"
+reply_ack = "resources/audio/reply1.wav"
+fuzzy_min_score = 0.72
+
+# --- Поиск: сначала веб-поиск с суммаризацией через LLM, затем открытие Гугла ---
+
+[[commands]]
+name = "web_search"
+trigger_words = [
+    "поищи в интернете",
+    "найди в интернете",
+    "поиск в интернете",
+    "спроси у интернета",
+    "что нового про",
+    "какие новости про"
+]
+action_type = "web"
+action_value = ""
+
+[[commands]]
+name = "search_google_ai"
+trigger_words = [
+    "найди",
+    "поищи",
+    "загугли",
+    "ищи"
+]
+action_type = "search"
+action_value = "https://www.google.com/search?q={}"
+
+# --- Социальные сети ---
+
+[[commands]]
+name = "youtube"
+trigger_words = [
+    "youtube",
+    "ютуб",
+    "видео",
+    "тикток",
+    "tiktok"
+]
+action_type = "url"
+action_value = "https://www.youtube.com"
+
+[[commands]]
+name = "vk"
+trigger_words = [
+    "vk",
+    "вконтакте",
+    "вконтакт"
+]
+action_type = "url"
+action_value = "https://vk.com"
+
+[[commands]]
+name = "telegram"
+trigger_words = [
+    "telegram",
+    "телеграм",
+    "телега"
+]
+action_type = "url"
+action_value = "https://web.telegram.org"
+
+# --- Видеомонтаж и Графика (Ставим выше общих программ) ---
+
+[[commands]]
+name = "Adobe Premiere Pro"
+trigger_words = [
+    "premiere pro",
+    "премиер про",
+    "премиер",
+    "монтаж",
+    "монтажа",
+    "видеомонтаж"
+]
+action_type = "app"
+action_value = "Adobe Premiere Pro 2026"
+
+[[commands]]
+name = "Adobe After Effects"
+trigger_words = [
+    "after effects",
+    "афтер эффекты",
+    "after",
+    "афтер",
+    "для компьютерной графики"
+]
+action_type = "app"
+action_value = "Adobe After Effects 2026"
+
+[[commands]]
+name = "Adobe Illustrator"
+trigger_words = [
+    "illustrator",
+    "иллюстратор",
+    "дизайн",
+    "дизайнер"
+]
+action_type = "app"
+action_value = "Adobe Illustrator"
+
+# --- Офис ---
+
+[[commands]]
+name = "excel"
+trigger_words = [
+    "excel",
+    "эксель",
+    "таблица"
+]
+action_type = "app"
+action_value = "Microsoft Excel"
+action_fallback = "/Applications/Microsoft Excel.app"
+
+# --- Разработка ---
+
+[[commands]]
+name = "ide"
+trigger_words = [
+    "zed",
+    "зед",
+    "code",
+    "vscode",
+    "иде",
+    "редактор",
+    "среда разработки"
+]
+action_type = "app"
+action_value = "Zed"
+action_fallback = "/Applications/Zed.app"
+
+[[commands]]
+name = "github"
+trigger_words = [
+    "github",
+    "гитхаб",
+    "гитхабу",
+    "гитхабе",
+    "git"
+]
+action_type = "url"
+action_value = "https://github.com"
+
+# --- Сервисы ---
+
+[[commands]]
+name = "google"
+trigger_words = [
+    "google",
+    "гугл",
+    "поиск"
+]
+action_type = "url"
+action_value = "https://www.google.com"
+
+[[commands]]
+name = "mail"
+trigger_words = [
+    "mail",
+    "мейл",
+    "почта",
+    "почту"
+]
+action_type = "url"
+action_value = "https://mail.google.com"
+
+[[commands]]
+name = "Yandex Music"
+trigger_words = [
+    "яндекс музыка",
+    "яндекс",
+    "спотифай",
+    "музыка"
+]
+action_type = "url"
+action_value = "https://music.yandex.ru"
+
+[[commands]]
+name = "kinopoisk"
+trigger_words = [
+    "запусти кинопоиск",
+    "кино"
+]
+action_type = "url"
+action_value = "https://www.kinopoisk.ru"
+
+[[commands]]
+name = "sdo"
+trigger_words = [
+    "sdo",
+    "сдо",
+    "сво",
+    "информатика"
+]
+action_type = "url"
+action_value = "https://sdo.1580.ru/course/view.php?id=188"
+
+# --- Системные ---
+
+[[commands]]
+name = "finder"
+trigger_words = [
+    "finder",
+    "файлы",
+    "папка",
+    "проводник"
+]
+action_type = "app"
+action_value = "Finder"
+
+[[commands]]
+name = "Замолчать"
+trigger_words = [
+    "замолчи",
+    "заткнись",
+    "стоп",
+    "хватит",
+    "молчать",
+    "тишина",
+    "отмена"
+]
+action_type = "stop"
+action_value = ""
+
+[[commands]]
+name = "Завершение работы"
+trigger_words = [
+    "заверши работу",
+    "закончить работу",
+]
+action_type = "exit"
+action_value = ""

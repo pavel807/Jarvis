@@ -1,0 +1,13 @@
+/target
+/models
+/train
+/resources/tts_cache/
+.DS_Store
+
+# Tauri / frontend
+/app/node_modules/
+/app/dist/
+/app/src-tauri/target/
+/app/src-tauri/gen/
+.zcode/
+*.toml.tmp
