@@ -166,12 +166,16 @@ impl TtsEngine {
     /// Потоковый синтез: сессия выдаёт чанки аудио по мере генерации,
     /// не дожидаясь готовности всей фразы.
     ///
-    /// chunk_frames 5 (~400 мс) вместо дефолтных 10: первый звук начинает
-    /// звучать раньше, а накладные расходы декодера на лишний вызов малы.
+    /// max_length масштабируется по длине текста (~1 фрейм на символ при
+    /// 12 Гц): дефолтные 2048 фреймов (163 с) позволяли изредка «убегающей»
+    /// генерации без EOS занимать минуты. Первая порция всегда мала
+    /// (см. FIRST_CHUNK_FRAMES), установившийся чанк — 10 фреймов.
     pub fn stream_session(&self, text: &str) -> Result<StreamingSession<'_>> {
+        let max_length = ((text.chars().count() as f32 * 1.2) as usize + 32).clamp(96, 384);
         let options = SynthesisOptions {
             temperature: TTS_TEMPERATURE,
-            chunk_frames: 5,
+            max_length,
+            chunk_frames: 10,
             ..Default::default()
         };
         self.model
@@ -537,7 +541,7 @@ pub fn spawn_audio_player(
             }
         };
 
-        while let Ok(msg) = rx.recv() {
+        'player: while let Ok(msg) = rx.recv() {
             match msg {
                 AudioMessage::Stop => {
                     stop_audio_flag.store(true, Ordering::SeqCst);
@@ -563,15 +567,47 @@ pub fn spawn_audio_player(
                     is_speaking.store(false, Ordering::SeqCst);
                 }
 
-                AudioMessage::SynthesizeAndPlay(text) => {
+                AudioMessage::SynthesizeAndPlay(first) => {
                     if stop_audio_flag.load(Ordering::SeqCst) {
                         continue;
                     }
-
-                    let raw_text = text.trim().to_string();
-                    if raw_text.is_empty() {
+                    if first.trim().is_empty() {
                         continue;
                     }
+
+                    // Склеиваем уже готовые в очереди фразы в одну партию:
+                    // одна сессия синтеза вместо отдельной на каждое
+                    // предложение убирает паузы (префилл + первый чанк +
+                    // пересоздание кэш-форм) между соседними предложениями.
+                    let mut raws: Vec<String> = vec![first.trim().to_string()];
+                    let mut deferred_wav: Option<String> = None;
+                    while raws.iter().map(|t| t.chars().count()).sum::<usize>() < 350 {
+                        match rx.try_recv() {
+                            Ok(AudioMessage::SynthesizeAndPlay(more)) => {
+                                if !more.trim().is_empty() {
+                                    raws.push(more.trim().to_string());
+                                }
+                            }
+                            Ok(AudioMessage::PlayWav(path)) => {
+                                // Звук должен прозвучать после речи — откладываем.
+                                deferred_wav = Some(path);
+                                break;
+                            }
+                            Ok(AudioMessage::Stop) => {
+                                stop_audio_flag.store(true, Ordering::SeqCst);
+                                while rx.try_recv().is_ok() {}
+                                if let Some(o) = &output {
+                                    o.clear();
+                                }
+                                stop_audio_flag.store(false, Ordering::SeqCst);
+                                is_speaking.store(false, Ordering::SeqCst);
+                                continue 'player;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+
+                    let raw_text = raws.join(" ");
 
                     // Правила — мгновенно; нейро-нормализация (LLM) — для цифр,
                     // единиц и сокращений, если включена и модель свободна.
@@ -665,10 +701,6 @@ pub fn spawn_audio_player(
                                 eprintln!("⚠️ Не удалось сохранить кэш речи: {e}");
                                 let _ = fs::remove_file(&cache_path);
                             }
-                            // Короткая пауза, чтобы предложения не сливались
-                            // в сплошной поток.
-                            player.enqueue(&vec![0.0f32; device_rate * 12 / 100]);
-                            player.wait_drain(&stop_audio_flag);
                         }
                         Err(e) => {
                             eprintln!("⚠️ Ошибка синтеза речи: {e}");
@@ -677,6 +709,18 @@ pub fn spawn_audio_player(
                             }
                         }
                     }
+
+                    // Отложенный звук (например, ack) — после речи.
+                    if let Some(p) = deferred_wav {
+                        if let Err(e) = play_via(&output, &p, &stop_audio_flag) {
+                            eprintln!("⚠️ Ошибка воспроизведения файла ({}): {e}", p);
+                        }
+                    }
+
+                    // Короткая пауза, чтобы предложения не сливались
+                    // в сплошной поток.
+                    player.enqueue(&vec![0.0f32; device_rate * 12 / 100]);
+                    player.wait_drain(&stop_audio_flag);
 
                     // Прерванный стопом синтез оставляет неполный кэш-файл.
                     if stop_audio_flag.load(Ordering::SeqCst) && can_cache {

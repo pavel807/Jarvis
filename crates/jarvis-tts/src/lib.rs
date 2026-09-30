@@ -905,6 +905,11 @@ pub const CODEC_EOS_TOKEN_ID: u32 = codec_tokens::CODEC_EOS;
 /// Number of audio samples per codec frame at 24kHz (1920 = 80ms per frame at 12Hz).
 pub const SAMPLES_PER_FRAME: usize = 1920;
 
+/// Frames in the first streaming chunk: a small first chunk gets audio
+/// playing ~0.3s sooner; steady-state chunks stay at `chunk_frames` because
+/// the decoder is expensive per call and large chunks lower the RTF.
+const FIRST_CHUNK_FRAMES: usize = 3;
+
 
 
 
@@ -922,8 +927,13 @@ pub struct StreamingSession<'a> {
     current_token: Option<u32>,
     current_token_tensor: Option<Tensor>,
     frames_generated: usize,
-    frame_buffer: FrameCodes,
+    /// Frames of the current chunk, kept on GPU ([16] U32 each) and decoded
+    /// with a single transfer at the chunk boundary.
+    frame_buffer: Vec<Tensor>,
     chunk_frames: usize,
+    chunks_emitted: usize,
+    /// Cached `arange(vocab)` for GPU-side penalty mask updates.
+    penalty_arange: Tensor,
     done: bool,
     // Trailing text state for residual VQ + text fusion
     trailing_text_hidden: Tensor,
@@ -997,6 +1007,9 @@ impl<'a> StreamingSession<'a> {
             &model.device,
         )?;
 
+        let penalty_arange =
+            Tensor::arange(0u32, codec_tokens::CODEC_VOCAB_SIZE as u32, &model.device)?;
+
         // Sample first token with full penalty pipeline
         let vocab_size = codec_tokens::CODEC_VOCAB_SIZE;
         let mut penalty_mask = Tensor::zeros((1, vocab_size), DType::F32, &model.device)?;
@@ -1027,6 +1040,8 @@ impl<'a> StreamingSession<'a> {
             frames_generated: 0,
             frame_buffer: Vec::new(),
             chunk_frames,
+            chunks_emitted: 0,
+            penalty_arange,
             done,
             trailing_text_hidden,
             trailing_text_len,
@@ -1041,30 +1056,34 @@ impl<'a> StreamingSession<'a> {
     /// Generate the next chunk of audio.
     ///
     /// Returns `Some(AudioBuffer)` for each chunk, or `None` when generation is complete.
+    ///
+    /// The whole chunk is generated without GPU→CPU syncs: the penalty mask
+    /// is updated on the GPU (one-hot via `eq` + max), and the sampled tokens
+    /// are read in a single transfer at the chunk boundary, where EOS also
+    /// truncates any frames generated past it. Per-frame syncs stalled the
+    /// Metal pipeline and dominated the RTF.
     pub fn next_chunk(&mut self) -> Result<Option<AudioBuffer>> {
         if self.done {
-            // Flush remaining buffer
-            if !self.frame_buffer.is_empty() {
-                let codes = self.model.codes_to_tensor(&self.frame_buffer)?;
-                self.frame_buffer.clear();
-                let audio = self.model.decoder.decode(&codes)?;
-                return Ok(Some(AudioBuffer::from_tensor(audio, 24000)?));
-            }
-            return Ok(None);
+            return self.decode_gpu_frames();
         }
 
-        // Generate frames until we have enough for a chunk
-        while self.frame_buffer.len() < self.chunk_frames
+        // The first chunk is deliberately small (fast time-to-first-audio),
+        // steady-state chunks use the full size (decoder amortization).
+        let target = if self.chunks_emitted == 0 {
+            self.chunk_frames.min(FIRST_CHUNK_FRAMES)
+        } else {
+            self.chunk_frames
+        };
+
+        let mut sampled_tokens: Vec<Tensor> = Vec::new();
+
+        while self.frame_buffer.len() < target
             && self.frames_generated < self.config.max_new_tokens
         {
-            let (token_id, token_tensor) =
-                match (self.current_token, self.current_token_tensor.take()) {
-                    (Some(id), Some(t)) => (id, t),
-                    _ => {
-                        self.done = true;
-                        break;
-                    }
-                };
+            let Some(token_tensor) = self.current_token_tensor.take() else {
+                self.done = true;
+                break;
+            };
 
             // Embedding lookup using GPU-resident token tensor (no CPU→GPU roundtrip)
             let semantic_embed = self
@@ -1079,11 +1098,10 @@ impl<'a> StreamingSession<'a> {
                 &mut self.cp_kv_caches,
             )?;
 
-            // Build frame on GPU, then transfer for frame_buffer
-            let semantic_t = Tensor::new(&[token_id], self.model.device())?;
-            let frame_tensor = Tensor::cat(&[&semantic_t, &acoustic_codes_tensor], 0)?;
-            let frame_codes: Vec<u32> = frame_tensor.to_vec1()?;
-            self.frame_buffer.push(frame_codes);
+            // Frame = [semantic_token, acoustic_0..14], stays on GPU.
+            let frame_tensor =
+                Tensor::cat(&[&token_tensor.reshape(1)?, &acoustic_codes_tensor], 0)?;
+            self.frame_buffer.push(frame_tensor);
 
             let frame_idx = self.frames_generated;
             self.frames_generated += 1;
@@ -1123,32 +1141,67 @@ impl<'a> StreamingSession<'a> {
             )?;
             let next_token_tensor =
                 generation::sample(&logits_2d, &self.config, &mut self.sampling_ctx)?;
-            let next_token_id: u32 = next_token_tensor.flatten_all()?.to_vec1::<u32>()?[0];
-            Qwen3TTS::update_penalty_mask(
-                &mut self.penalty_mask,
-                next_token_id,
-                codec_tokens::CODEC_VOCAB_SIZE,
-            )?;
+            let next_token_flat = next_token_tensor.flatten_all()?;
+
+            // Repetition penalty mask update on the GPU: one-hot(token) | mask.
+            // (arange - token) == 0 builds the one-hot without a CPU sync;
+            // candle's cmp ops require equal shapes, so compare against zeros.
+            let diff = self
+                .penalty_arange
+                .broadcast_sub(&next_token_flat.reshape((1,))?)?;
+            let zeros = Tensor::zeros(diff.shape(), DType::U32, diff.device())?;
+            let one_hot = diff.eq(&zeros)?.to_dtype(DType::F32)?.unsqueeze(0)?;
+            self.penalty_mask = self.penalty_mask.maximum(&one_hot)?;
             self.token_count += 1;
 
-            if self.config.eos_token_id == Some(next_token_id) {
-                self.current_token = None;
-                self.current_token_tensor = None;
-                self.done = true;
-            } else {
-                self.current_token = Some(next_token_id);
-                self.current_token_tensor = Some(next_token_tensor);
+            sampled_tokens.push(next_token_flat);
+            // Continue from the sampled token within this chunk; the boundary
+            // read below may still truncate everything after an EOS.
+            self.current_token_tensor = Some(next_token_tensor);
+        }
+
+        // --- Chunk boundary: the single GPU→CPU sync of the chunk. ---
+        if !sampled_tokens.is_empty() {
+            let tokens: Vec<u32> = Tensor::cat(&sampled_tokens, 0)?.to_vec1()?;
+            let eos_at = self
+                .config
+                .eos_token_id
+                .and_then(|eos| tokens.iter().position(|&t| t == eos));
+            match eos_at {
+                Some(k) => {
+                    // Frames 0..=k are real; anything generated past EOS in
+                    // this batch is garbage and gets dropped.
+                    self.frame_buffer.truncate(k + 1);
+                    self.done = true;
+                    self.current_token = None;
+                    self.current_token_tensor = None;
+                }
+                None => {
+                    // current_token_tensor already holds the last sampled
+                    // token, restored inside the loop.
+                    if let Some(last) = tokens.last() {
+                        self.current_token = Some(*last);
+                    }
+                }
             }
         }
 
-        // Decode the buffered frames
+        self.decode_gpu_frames()
+    }
+
+    /// Decode accumulated GPU frames with a single transfer: stack [16] U32
+    /// frame tensors → [n, 16] → [1, 16, n] I64, the decoder's layout.
+    fn decode_gpu_frames(&mut self) -> Result<Option<AudioBuffer>> {
         if self.frame_buffer.is_empty() {
             return Ok(None);
         }
-
-        let codes = self.model.codes_to_tensor(&self.frame_buffer)?;
+        let codes = Tensor::stack(&self.frame_buffer, 0)?
+            .transpose(0, 1)?
+            .unsqueeze(0)?
+            .to_dtype(DType::I64)?;
         self.frame_buffer.clear();
         let audio = self.model.decoder.decode(&codes)?;
+        self.chunks_emitted += 1;
         Ok(Some(AudioBuffer::from_tensor(audio, 24000)?))
     }
 
