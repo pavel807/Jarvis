@@ -180,12 +180,14 @@ impl OutputPlayer {
         let stream = device.build_output_stream(
             config,
             move |data: &mut [f32], _| {
+                // Zero-copy: пишем прямо в буфер устройства, без
+                // промежуточного Vec на каждый вызов колбэка.
                 let mut q = cb_queue.lock().unwrap_or_else(|e| e.into_inner());
                 let take = data.len().min(q.len());
-                let head: Vec<f32> = q.drain(..take).collect();
+                data[..take].copy_from_slice(&q[..take]);
+                q.drain(..take);
                 drop(q);
                 cb_consumed.fetch_add(take, Ordering::Relaxed);
-                data[..take].copy_from_slice(&head);
                 for c in data[take..].iter_mut() {
                     *c = 0.0;
                 }
@@ -218,19 +220,23 @@ impl OutputPlayer {
             return;
         }
         let out_channels = self.channels;
-        let interleaved: Vec<f32> = if out_channels == 1 {
-            mono.to_vec()
-        } else {
-            mono.iter()
-                .flat_map(|&s| std::iter::repeat_n(s, out_channels))
-                .collect()
-        };
-        let n = interleaved.len();
-        self.queue
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend_from_slice(&interleaved);
-        drop(interleaved);
+        let n = mono.len() * out_channels;
+        {
+            // Zero-copy для моно (наш случай): данные уходят в очередь
+            // одним extend, без промежуточного interleaved-вектора.
+            let mut q = self
+                .queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if out_channels == 1 {
+                q.extend_from_slice(mono);
+            } else {
+                q.reserve(n);
+                for &s in mono {
+                    q.extend(std::iter::repeat_n(s, out_channels));
+                }
+            }
+        }
         self.pushed.fetch_add(n, Ordering::SeqCst);
     }
 
