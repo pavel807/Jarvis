@@ -85,17 +85,11 @@ fn main() -> Result<()> {
     let ipa = piper.phonemize(phrase)?;
     println!("--- Варианты ритма для «{phrase}» ---");
 
-    let variants: Vec<(&str, &str, String, PiperParams)> = vec![
-        (
-            "v1",
-            "как сейчас",
-            ipa.clone(),
-            PiperParams::default(),
-        ),
+    let variants: Vec<(&str, &str, PiperParams)> = vec![
+        ("v1", "как сейчас (слова склеены)", PiperParams::default()),
         (
             "v2",
             "выразительнее (noise 1.0)",
-            ipa.clone(),
             PiperParams {
                 noise_scale: Some(1.0),
                 ..Default::default()
@@ -104,29 +98,22 @@ fn main() -> Result<()> {
         (
             "v3",
             "медленнее (темп 1.15)",
-            ipa.clone(),
             PiperParams {
                 length_scale: Some(1.15),
                 ..Default::default()
             },
         ),
-        (
-            "v4",
-            "без пауз между словами",
-            ipa.replace(' ', ""),
-            PiperParams::default(),
-        ),
     ];
 
-    for (id, label, phonemes, params) in variants {
-        let samples = piper.synthesize_phonemes(&phonemes, 1.0, params)?;
+    for (id, label, params) in variants {
+        let samples = piper.synthesize_with(phrase, 1.0, params)?;
         let audio = samples.len() as f64 / sr as f64;
         let file = format!("resources/piper_{id}.wav");
         save_wav(&file, &samples, sr)?;
         println!("  {id}: {label:<38} {audio:.2} с -> {file}");
     }
 
-    println!("\n🔊 Послушай resources/piper_v1.wav ... piper_v4.wav и скажи, какой ритм лучше.");
+    println!("\n🔊 Послушай resources/piper_v1.wav ... piper_v3.wav при желании сравнить ручки.");
 
     Ok(())
 }

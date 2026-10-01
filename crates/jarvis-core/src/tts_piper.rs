@@ -168,14 +168,19 @@ impl PiperEngine {
 
     /// Текст -> IPA-фенемы espeak-ng (голос ru, со стресс-метками — так
     /// обучены голоса piper). Публично: используется проверкой качества.
+    ///
+    /// Пробелы и границы клауз espeak удаляются:ruslan medium произносит
+    /// межсловные паузы слишком рвано (выбор пользователя — «склеенные»
+    /// слова, вариант v4). Знаки препинания остаются и дают паузы.
     pub fn phonemize(&self, text: &str) -> Result<String> {
         let espeak = self.espeak.lock().unwrap_or_else(|e| e.into_inner());
         let ipa = espeak
             .text_to_phonemes(text)
             .map_err(|e| anyhow::anyhow!("Ошибка фонемизации espeak-ng: {e}"))?;
-        // Границы клауз espeak отдаёт переводами строк; пробел есть в
-        // словаре голоса и читается как короткая пауза.
-        Ok(ipa.replace('\n', " "))
+        Ok(ipa
+            .chars()
+            .filter(|&c| c != ' ' && c != '\n')
+            .collect())
     }
 
     /// Один forward: фенемы -> ids -> waveform.
@@ -277,27 +282,33 @@ fn phonemes_to_ids(map: &HashMap<char, Vec<i64>>, phonemes: &str) -> Vec<i64> {
     ids
 }
 
-/// Делит фенемную строку на куски <= MAX_CHUNK_PHONEMES по границам слов.
+/// Делит фенемную строку на куски <= MAX_CHUNK_PHONEMES. Пробелов после
+/// склейки слов нет, поэтому режем по знакам паузы (запятая, точка и т.д.),
+/// в крайнем случае — жёстко.
 fn split_phonemes(phonemes: &str) -> Vec<String> {
-    if phonemes.chars().count() <= MAX_CHUNK_PHONEMES {
+    let chars: Vec<char> = phonemes.chars().collect();
+    if chars.len() <= MAX_CHUNK_PHONEMES {
         return vec![phonemes.to_string()];
     }
 
+    const LOOKBACK: usize = 80;
+    let pause = |c: char| matches!(c, ',' | '.' | '!' | '?' | ':' | ';');
+
     let mut chunks = Vec::new();
-    let mut current = String::new();
-    for word in phonemes.split(' ') {
-        if !current.is_empty()
-            && current.chars().count() + word.chars().count() + 1 > MAX_CHUNK_PHONEMES
-        {
-            chunks.push(std::mem::take(&mut current));
-        }
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(word);
-    }
-    if !current.is_empty() {
-        chunks.push(current);
+    let mut start = 0;
+    while start < chars.len() {
+        let limit = (start + MAX_CHUNK_PHONEMES).min(chars.len());
+        let cut = if limit == chars.len() {
+            limit
+        } else {
+            (limit.saturating_sub(LOOKBACK)..limit)
+                .rev()
+                .find(|&i| pause(chars[i]))
+                .map(|i| i + 1)
+                .unwrap_or(limit)
+        };
+        chunks.push(chars[start..cut].iter().collect());
+        start = cut;
     }
     chunks
 }
