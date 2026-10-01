@@ -172,15 +172,22 @@ impl KokoroEngine {
                 .chars()
                 .any(|c| ('а'..='я').contains(&c) || matches!(c, 'ё' | 'Ё'));
             let ipa = if is_cyr {
-                let token = self
+                // Токены в живой речи приходят с пунктуацией («дела,»,
+                // «дела?») — анализ ударения ведём по буквенному ядру,
+                // а фонемизируем токен целиком.
+                let analysis: String = token
+                    .chars()
+                    .filter(|&c| c.is_alphabetic() || c == '-')
+                    .collect();
+                let analysis = self
                     .stress
                     .as_ref()
-                    .map(|s| s.yo_restore(token))
-                    .unwrap_or_else(|| token.to_string());
+                    .map(|s| s.yo_restore(&analysis))
+                    .unwrap_or(analysis);
                 let stressed_ordinal = self
                     .stress
                     .as_ref()
-                    .and_then(|s| s.stressed_vowel_ordinal(&token));
+                    .and_then(|s| s.stressed_vowel_ordinal(&analysis));
                 let ru = self
                     .espeak_ru
                     .lock()
@@ -188,7 +195,7 @@ impl KokoroEngine {
                     .text_to_phonemes(&token)
                     .unwrap_or_default();
                 if std::env::var_os("JARVIS_STRESS_DEBUG").is_some() {
-                    eprintln!("[stress] {token:?} -> ordinal {stressed_ordinal:?} raw {ru:?}");
+                    eprintln!("[stress] {token:?} (ядро {analysis:?}) -> ordinal {stressed_ordinal:?} raw {ru:?}");
                 }
                 let ipa = match stressed_ordinal {
                     Some(ord) => kokoro_g2p::apply_stress_ordinal(&ru, ord),
