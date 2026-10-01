@@ -33,10 +33,6 @@ pub fn settings_file() -> PathBuf {
     base_dir().join("settings.toml")
 }
 
-pub fn tts_models_dir() -> PathBuf {
-    models_dir().join("Qwen3-TTS")
-}
-
 pub fn tts_cache_dir() -> PathBuf {
     resources_dir().join("tts_cache")
 }

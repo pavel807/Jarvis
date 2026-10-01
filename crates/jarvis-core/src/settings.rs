@@ -38,11 +38,7 @@ pub struct Settings {
     pub llm_max_tokens: usize,
 
     // --- TTS ---
-    /// Движок синтеза: kokoro (быстрый, качественный, EN+RU) | piper (быстрый) | qwen3 (Metal).
-    pub tts_engine: String,
-    /// Голос активного движка: kokoro — dima | sveta | masha,
-    /// piper — ruslan | denis | dmitri | irina,
-    /// qwen3 — ryan | aiden | eric | dylan | uncle_fu | serena | vivian | ono_anna | sohee.
+    /// Голос kokoro-ru: dima | sveta | masha.
     pub tts_voice: String,
     /// Скорость речи: 1.0 — естественно, меньше — медленнее.
     pub tts_speed: f32,
@@ -68,7 +64,6 @@ impl Default for Settings {
             llm_normalize: true,
             llm_temperature: 0.6,
             llm_max_tokens: 256,
-            tts_engine: "kokoro".to_string(),
             tts_voice: "dima".to_string(),
             tts_speed: 1.0,
             ack_before_llm: false,
@@ -98,9 +93,8 @@ impl Settings {
         Ok(())
     }
 
-    /// Применяет настройки к подсистемам (движок/голос TTS, параметры LLM).
+    /// Применяет настройки к подсистемам (голос TTS, параметры LLM).
     pub fn apply(&self) {
-        crate::tts::set_current_engine(&self.tts_engine);
         crate::tts::set_current_voice(self.tts_voice.clone());
         crate::tts::set_current_speed(self.tts_speed);
         crate::llm::config::update_generation_params(crate::llm::config::GenerationParams {

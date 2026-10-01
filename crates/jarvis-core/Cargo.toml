@@ -25,7 +25,6 @@ ort = "2.0.0-rc.12"
 espeak-ng = { version = "0.2", default-features = false, features = ["bundled-data-ru", "bundled-data-en"] }
 ureq.workspace = true
 regex.workspace = true
-jarvis-tts.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

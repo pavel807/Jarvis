@@ -16,7 +16,6 @@ interface Settings {
   llm_normalize: boolean;
   llm_temperature: number;
   llm_max_tokens: number;
-  tts_engine: string;
   tts_voice: string;
   tts_speed: number;
   ack_before_llm: boolean;
@@ -35,13 +34,12 @@ const settings = reactive<Settings>({
   llm_normalize: true,
   llm_temperature: 0.6,
   llm_max_tokens: 256,
-  tts_engine: "piper",
-  tts_voice: "ruslan",
+  tts_voice: "dima",
   tts_speed: 1.0,
   ack_before_llm: false,
 });
 
-// Голоса приходят из бэкенда для активного движка, чтобы списки не расходились.
+// Голоса приходят из бэкенда, чтобы списки не расходились.
 const voices = ref<[string, string][]>([]);
 const saved = ref(false);
 
@@ -51,7 +49,7 @@ function voiceLabel(id: string, desc: string): string {
 }
 
 async function loadVoices() {
-  voices.value = await invoke<[string, string][]>("tts_voices", { engine: settings.tts_engine });
+  voices.value = await invoke<[string, string][]>("tts_voices");
 }
 
 onMounted(async () => {
@@ -142,13 +140,7 @@ async function save() {
     </div>
 
     <div class="card">
-      <h2>Голос TTS</h2>
-      <label>Движок</label>
-      <select v-model="settings.tts_engine" @change="loadVoices">
-        <option value="kokoro">Kokoro — быстрый, качественный, EN+RU (CPU)</option>
-        <option value="piper">Piper — очень быстрый (CPU)</option>
-        <option value="qwen3">Qwen3-TTS — естественная интонация (Metal)</option>
-      </select>
+      <h2>Голос (Kokoro-ru)</h2>
       <label>Голос</label>
       <select v-model="settings.tts_voice">
         <option v-for="[id, desc] in voices" :key="id" :value="id">{{ voiceLabel(id, desc) }}</option>
@@ -156,7 +148,7 @@ async function save() {
       <label>Скорость речи ({{ settings.tts_speed.toFixed(2) }}× — меньше = спокойнее)</label>
       <input type="range" min="0.7" max="1.2" step="0.05" v-model.number="settings.tts_speed" style="width: 100%" />
       <p class="dim" style="margin-top: 8px">
-        Движок и голос применяются при сохранении (модель скачивается при первом запуске).
+        Голос применяется при сохранении. Kokoro понимает смешанную речь EN+RU.
       </p>
     </div>
 

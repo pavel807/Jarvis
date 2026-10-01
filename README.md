@@ -7,9 +7,6 @@
 
 ```
 Cargo workspace
-├── crates/jarvis-tts    — production-движок TTS: Qwen3-TTS 0.6B CustomVoice,
-│                          вендорено из TrevorS/qwen3-tts-rs (MIT) и сокращено
-│                          до 0.6B; candle 0.11 + Metal, mmap-загрузка весов
 ├── crates/jarvis-core   — движок: wake word, STT, TTS, LLM, команды, события
 ├── crates/jarvis-cli    — headless-запуск из терминала
 └── app/                 — GUI (Tauri 2 + Vue 3)
@@ -20,11 +17,10 @@ Cargo workspace
 Подсистемы:
 - **Wake word** — RustPotter (NN-модель `.rpw`), обучение прямо из интерфейса.
 - **STT** — GigaAM v3 (ONNX int8, русский).
-- **TTS** — три движка на выбор (переключение в настройках на лету):
-  **Kokoro-ru** (ONNX CPU, RTF ~0.15, корректные ударения и смешанная
-  речь EN+RU — по умолчанию), **Piper** (ONNX CPU, RTF ~0.02, самый
-  быстрый), **Qwen3-TTS 0.6B CustomVoice** (candle + Metal, самая
-  естественная интонация, RTF ~1.3). Кэш синтеза с LRU-очисткой.
+- **TTS** — Kokoro-ru 82M (StyleTTS2-lite) на ONNX Runtime, CPU: быстрый
+  (RTF ~0.15), корректные ударения, смешанная речь EN+RU (латинские слова
+  фонемизируются espeak en-us). Голоса dima/sveta/masha, модель ~311 МБ
+  скачивается один раз в `models/kokoro-ru/`. Кэш синтеза с LRU-очисткой.
 - **LLM** — Qwen3-1.7B на candle + Metal, собственная реализация инференса
   (GQA, QK-norm, явный head_dim, KV-кэш), стриминг ответа в TTS по предложениям,
   контекст диалога в пределах follow-up сессии (чистится при возврате к wake word).

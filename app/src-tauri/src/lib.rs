@@ -130,13 +130,13 @@ fn spawn_engine(shared: &Arc<Shared>, events_tx: std::sync::mpsc::Sender<JarvisE
     std::thread::spawn(move || {
         stt::init_env();
 
-        let (tts_engine, tts_voice) = {
+        let tts_voice = {
             let s = shared_engine.settings.read().unwrap_or_else(|e| e.into_inner());
             s.apply();
-            (s.tts_engine.clone(), s.tts_voice.clone())
+            s.tts_voice.clone()
         };
 
-        tts::spawn_tts_loader(&shared_engine.shared_tts, &shared_engine.tts_failed, &tts_engine, &tts_voice);
+        tts::spawn_tts_loader(&shared_engine.shared_tts, &shared_engine.tts_failed, &tts_voice);
         spawn_llm_loader(&shared_engine.shared_llm, &events_tx);
 
         let models_dir = paths::models_dir();
@@ -236,10 +236,8 @@ fn get_settings(shared: State<'_, Arc<Shared>>) -> Settings {
 
 #[tauri::command]
 fn save_settings(shared: State<'_, Arc<Shared>>, settings: Settings) -> Result<(), String> {
-    let engine = settings.tts_engine.clone();
     let voice = settings.tts_voice.clone();
-    let engine_changed =
-        tts::current_engine() != engine || tts::current_voice() != voice;
+    let voice_changed = tts::current_voice() != voice;
     settings
         .save(&paths::settings_file())
         .map_err(|e| e.to_string())?;
@@ -249,8 +247,8 @@ fn save_settings(shared: State<'_, Arc<Shared>>, settings: Settings) -> Result<(
         .write()
         .unwrap_or_else(|e| e.into_inner()) = settings;
 
-    if engine_changed {
-        tts::set_voice(&shared.shared_tts, &shared.tts_failed, &engine, &voice);
+    if voice_changed {
+        tts::set_voice(&shared.shared_tts, &shared.tts_failed, &voice);
     }
     Ok(())
 }
@@ -261,21 +259,11 @@ fn get_logs(shared: State<'_, Arc<Shared>>) -> Vec<String> {
 }
 
 #[tauri::command]
-fn tts_voices(engine: Option<String>) -> Vec<(String, String)> {
-    match engine.as_deref() {
-        Some("piper") => tts::PIPER_VOICES
-            .iter()
-            .map(|(id, desc)| (id.to_string(), desc.to_string()))
-            .collect(),
-        Some("kokoro") => tts::KOKORO_VOICES
-            .iter()
-            .map(|(id, desc)| (id.to_string(), desc.to_string()))
-            .collect(),
-        _ => tts::TTS_VOICES
-            .iter()
-            .map(|(id, desc)| (id.to_string(), desc.to_string()))
-            .collect(),
-    }
+fn tts_voices() -> Vec<(String, String)> {
+    tts::KOKORO_VOICES
+        .iter()
+        .map(|(id, desc)| (id.to_string(), desc.to_string()))
+        .collect()
 }
 
 #[tauri::command]

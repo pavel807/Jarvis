@@ -2888,7 +2888,6 @@ dependencies = [
  "espeak-ng",
  "hf-hub",
  "hound",
- "jarvis-tts",
  "open",
  "ort",
  "rand 0.8.8",
@@ -2902,21 +2901,6 @@ dependencies = [
  "transcribe-rs",
  "ureq",
  "urlencoding",
-]
-
-[[package]]
-name = "jarvis-tts"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "candle-core",
- "candle-nn",
- "hound",
- "serde",
- "serde_json",
- "tempfile",
- "tokenizers 0.21.4",
- "tracing",
 ]
 
 [[package]]

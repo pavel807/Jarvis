@@ -344,6 +344,65 @@ pub fn apply_pronunciation(input: &str) -> String {
     s
 }
 
+/// Порядковое числительное среднего рода (для дат): 24 -> «двадцать четвёртое».
+pub fn date_ordinal_words(n: u64) -> String {
+    const ORD: [&str; 20] = [
+        "нулевое", "первое", "второе", "третье", "четвёртое", "пятое", "шестое",
+        "седьмое", "восьмое", "девятое", "десятое", "одиннадцатое", "двенадцатое",
+        "тринадцатое", "четырнадцатое", "пятнадцатое", "шестнадцатое",
+        "семнадцатое", "восемнадцатое", "девятнадцатое",
+    ];
+    const TENS_ORD: [&str; 10] = [
+        "", "", "двадцатое", "тридцатое", "сороковое", "пятидесятое",
+        "шестидесятое", "семидесятое", "восьмидесятое", "девяностое",
+    ];
+    if n < 20 {
+        return ORD[n as usize].to_string();
+    }
+    let t = (n / 10) as usize;
+    let rest = n % 10;
+    if rest == 0 {
+        return TENS_ORD[t].to_string();
+    }
+    format!("{} {}", TENS[t], ORD[rest as usize])
+}
+
+const MONTHS_GENITIVE: &[&str] = &[
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+];
+
+/// Сегодняшняя дата по-русски: «24 октября 2026, пятница».
+pub fn today_russian() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    // 1970-01-01 — четверг.
+    let weekday = [
+        "четверг", "пятница", "суббота", "воскресенье", "понедельник", "вторник",
+        "среда",
+    ][days.rem_euclid(7) as usize];
+    let month = MONTHS_GENITIVE[(m - 1) as usize];
+    format!("{} {} {}, {}", d, month, y, weekday)
+}
+
+/// Алгоритм civil_from_days (H. Hinnant): дни от эпохи -> (год, месяц, день).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
+}
+
 fn parse_num(raw: &str) -> (u64, bool) {
     let cleaned = raw.replace(',', ".");
     let has_frac = cleaned.contains('.');
@@ -435,6 +494,22 @@ pub fn normalize_for_tts(input: &str) -> String {
             .to_string();
     }
 
+    // Даты: «24 октября», «3-го мая» -> порядковое числительное среднего
+    // рода («двадцать четвёртое октября»), как говорят даты по-русски.
+    static DATE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        let months = MONTHS_GENITIVE.join("|");
+        regex::Regex::new(&format!(
+            r"(?i)\b(\d{{1,2}})(?:-?\s*го)?\s+({months})\b"
+        ))
+        .unwrap()
+    });
+    s = DATE_RE
+        .replace_all(&s, |caps: &regex::Captures| {
+            let n: u64 = caps[1].parse().unwrap_or(0);
+            format!("{} {}", date_ordinal_words(n), &caps[2])
+        })
+        .to_string();
+
     // Время ЧЧ:ММ -> «двенадцать тридцать».
     s = TIME_RE
         .replace_all(&s, |caps: &regex::Captures| {
@@ -479,5 +554,29 @@ mod tts_normalize_tests {
     #[test]
     fn pronunciation_map() {
         assert_eq!(normalize_for_tts("она еще все таки сделает"), "она ещё всё-таки сделает");
+    }
+
+    #[test]
+    fn dates_are_ordinal() {
+        assert_eq!(
+            normalize_for_tts("сегодня 24 октября"),
+            "сегодня двадцать четвёртое октября"
+        );
+        assert_eq!(
+            normalize_for_tts("1 мая праздник"),
+            "первое мая праздник"
+        );
+        assert_eq!(
+            normalize_for_tts("встреча 3-го мая"),
+            "встреча третье мая"
+        );
+    }
+
+    #[test]
+    fn today_russian_sane() {
+        let today = today_russian();
+        // «24 октября 2026, четверг» — месяц и день недели на месте.
+        assert!(MONTHS_GENITIVE.iter().any(|m| today.contains(m)));
+        assert!(today.contains("202"));
     }
 }

@@ -61,7 +61,7 @@ pub struct KokoroEngine {
 
 /// Распаковывает встроенные данные espeak-ng (фонемы + словари ru и en).
 fn ensure_espeak_data() -> Result<PathBuf> {
-    let data_dir = paths::tts_models_dir().join("espeak-ng-data");
+    let data_dir = paths::models_dir().join("espeak-ng-data");
     std::fs::create_dir_all(&data_dir)?;
     if !data_dir.join("phondata").exists() {
         espeak_ng::install_bundled_language(&data_dir, "ru").with_context(|| {
@@ -308,9 +308,10 @@ fn load_style_pack(path: &Path) -> Result<Vec<[f32; 256]>> {
         .collect())
 }
 
-/// Скачивает модель kokoro-ru (~132 МБ q8) и стайл-пак голоса.
+/// Скачивает модель kokoro-ru (~311 МБ fp32) и стайл-пак голоса
+/// в собственную папку models/kokoro-ru/.
 fn ensure_kokoro_model(voice: &str) -> Result<PathBuf> {
-    let dir = paths::tts_models_dir().join("kokoro-ru");
+    let dir = paths::models_dir().join("kokoro-ru");
     let model = dir.join(
         model_file_for(voice)
             .trim_start_matches("onnx/")

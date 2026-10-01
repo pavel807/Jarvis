@@ -465,6 +465,10 @@ pub fn ask(
     cancel: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
+        // Дата в контексте: вопросы «какое сегодня число / какой день
+        // недели» не требуют поиска и получают правильный ответ.
+        let system = format!("{system}\nСегодняшняя дата: {}.", crate::text::today_russian());
+
         let history_snapshot: Vec<ChatTurn> = {
             let buf = history.lock().unwrap_or_else(|e| e.into_inner());
             buf.iter()
@@ -489,7 +493,7 @@ pub fn ask(
 
         let started = Instant::now();
         let result = engine.generate_streaming(
-            system,
+            &system,
             &history_snapshot,
             &prompt,
             &cancel,
