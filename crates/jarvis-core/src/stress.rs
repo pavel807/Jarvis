@@ -25,6 +25,12 @@ use std::sync::Mutex;
 /// Гласные русского текста (для подсчёта порядкового номера).
 const RU_VOWELS: &str = "аеёиоуыэюя";
 
+/// Точечные переопределения словаря ударений (word -> «+»-нотация).
+/// Словарь RUAccent помечает «дела» как глагольную форму «дел+а», но в
+/// современном русском и мн. число, и род. падеж — «де́ла». Новые слова
+/// просто добавляются в таблицу.
+const STRESS_OVERRIDES: &[(&str, &str)] = &[("дела", "д+ела")];
+
 /// Гласные в IPA-выходе espeak (после которого расставляем ˈ).
 pub const IPA_VOWELS: &str = "aeiouyəɐɔɪʊɛɨɵ";
 
@@ -183,25 +189,14 @@ impl RuStress {
             return Some(ord);
         }
 
+        // Ручные переопределения словаря.
+        if let Some((_, forced)) = STRESS_OVERRIDES.iter().find(|(w, _)| *w == lower) {
+            return plus_notation_ordinal(forced);
+        }
+
         // Словарь: «аб+а» -> ударная гласная после '+'.
         if let Some(stressed) = self.accents.get(&lower) {
-            let mut pluses = 0usize;
-            for (i, c) in stressed.char_indices() {
-                if c == '+' {
-                    let after: String = stressed[i + 1..].to_string();
-                    if let Some(first) = after.chars().next() {
-                        if RU_VOWELS.contains(first) {
-                            let before = &stressed[..i];
-                            let idx = before.chars().filter(|c| RU_VOWELS.contains(*c)).count();
-                            return Some(idx + 1);
-                        }
-                    }
-                    pluses += 1;
-                    if pluses > 1 {
-                        break; // несколько '+' — не разбираем, берём NN
-                    }
-                }
-            }
+            return plus_notation_ordinal(stressed);
         }
 
         self.nn_stressed_vowel_ordinal(&lower)
@@ -291,6 +286,29 @@ fn vowel_ordinal(word: &str, pred: impl Fn(char) -> bool) -> Option<usize> {
     None
 }
 
+/// Нотация «аб+а» -> порядковый номер ударной гласной (1-based).
+/// Несколько '+' (варианты) не разбираем — вернём None, возьмёт NN.
+fn plus_notation_ordinal(stressed: &str) -> Option<usize> {
+    let mut pluses = 0usize;
+    for (i, c) in stressed.char_indices() {
+        if c == '+' {
+            let after: String = stressed[i + 1..].to_string();
+            if let Some(first) = after.chars().next() {
+                if RU_VOWELS.contains(first) {
+                    let before = &stressed[..i];
+                    let idx = before.chars().filter(|c| RU_VOWELS.contains(*c)).count();
+                    return Some(idx + 1);
+                }
+            }
+            pluses += 1;
+            if pluses > 1 {
+                return None;
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,5 +335,23 @@ mod tests {
         assert_eq!(vowel_ordinal("замок", |c| c == 'а'), Some(1));
         assert_eq!(vowel_ordinal("ещё", |c| c == 'ё'), Some(2));
         assert_eq!(vowel_ordinal("въезд", |c| c == 'ё'), None);
+    }
+
+    #[test]
+    fn plus_ordinal() {
+        assert_eq!(plus_notation_ordinal("аб+а"), Some(2));
+        assert_eq!(plus_notation_ordinal("д+ела"), Some(1));
+        assert_eq!(plus_notation_ordinal("прив+ет"), Some(2));
+    }
+
+    #[test]
+    fn dela_override() {
+        // «дела» из словаря RUAccent — глагольная форма «дел+а»;
+        // переопределение ставит де́ла (ударная первая гласная).
+        assert_eq!(
+            STRESS_OVERRIDES.iter().find(|(w, _)| *w == "дела"),
+            Some(&("дела", "д+ела"))
+        );
+        assert_eq!(plus_notation_ordinal("д+ела"), Some(1));
     }
 }
