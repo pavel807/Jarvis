@@ -38,7 +38,10 @@ pub struct Settings {
     pub llm_max_tokens: usize,
 
     // --- TTS ---
-    /// Голос Qwen3-TTS: ryan | aiden | eric | dylan | uncle_fu | serena | vivian | ono_anna | sohee
+    /// Движок синтеза: piper (быстрый, CPU, VITS) | qwen3 (нейросетевой, Metal).
+    pub tts_engine: String,
+    /// Голос активного движка: для piper — ruslan | denis | dmitri | irina,
+    /// для qwen3 — ryan | aiden | eric | dylan | uncle_fu | serena | vivian | ono_anna | sohee.
     pub tts_voice: String,
     /// Скорость речи: 1.0 — естественно, меньше — медленнее.
     pub tts_speed: f32,
@@ -64,7 +67,8 @@ impl Default for Settings {
             llm_normalize: true,
             llm_temperature: 0.6,
             llm_max_tokens: 256,
-            tts_voice: "ryan".to_string(),
+            tts_engine: "piper".to_string(),
+            tts_voice: "ruslan".to_string(),
             tts_speed: 1.0,
             ack_before_llm: false,
         }
@@ -93,8 +97,9 @@ impl Settings {
         Ok(())
     }
 
-    /// Применяет настройки к подсистемам (голос TTS, параметры LLM).
+    /// Применяет настройки к подсистемам (движок/голос TTS, параметры LLM).
     pub fn apply(&self) {
+        crate::tts::set_current_engine(&self.tts_engine);
         crate::tts::set_current_voice(self.tts_voice.clone());
         crate::tts::set_current_speed(self.tts_speed);
         crate::llm::config::update_generation_params(crate::llm::config::GenerationParams {

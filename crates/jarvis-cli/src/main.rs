@@ -75,8 +75,11 @@ fn main() -> Result<()> {
     // TTS: ленивая загрузка в фоне + поток-плеер.
     let shared_tts: Arc<SharedTtsState> = Arc::new(SharedTtsState::new());
     let tts_failed = Arc::new(AtomicBool::new(false));
-    let tts_voice = settings.read().unwrap_or_else(|e| e.into_inner()).tts_voice.clone();
-    tts::spawn_tts_loader(&shared_tts, &tts_failed, &tts_voice);
+    let (tts_engine, tts_voice) = {
+        let s = settings.read().unwrap_or_else(|e| e.into_inner());
+        (s.tts_engine.clone(), s.tts_voice.clone())
+    };
+    tts::spawn_tts_loader(&shared_tts, &tts_failed, &tts_engine, &tts_voice);
 
     let audio_tx = tts::spawn_audio_player(
         Arc::clone(&shared_tts),

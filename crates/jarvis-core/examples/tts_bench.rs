@@ -90,5 +90,28 @@ fn main() -> Result<()> {
     bench(&model, "длинная,   max_length 2048, chunk 5", long, 2048, 5)?;
     bench(&model, "длинная,   max_length 512, chunk 5", long, 512, 5)?;
 
+    println!("\n--- Piper (ONNX, CPU) ---");
+    let piper = jarvis_core::tts_piper::PiperEngine::new("ruslan")?;
+    for (label, text) in [
+        ("короткая", short),
+        ("средняя", medium),
+        ("длинная", long),
+    ] {
+        // прогрев ORT
+        let _ = piper.synthesize("Да.", 1.0);
+        let t = Instant::now();
+        let samples = piper.synthesize(text, 1.0)?;
+        let total = t.elapsed().as_secs_f64();
+        let audio = samples.len() as f64 / 22050.0;
+        let sum_sq: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
+        let rms = if samples.is_empty() { 0.0 } else { (sum_sq / samples.len() as f64).sqrt() };
+        println!(
+            "{label:<44} синтез {:>7.1} мс | аудио {audio:>6.2} с | RTF {:>5.3} | RMS {:.3}",
+            total * 1000.0,
+            total / audio,
+            rms,
+        );
+    }
+
     Ok(())
 }

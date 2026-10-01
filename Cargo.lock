@@ -1519,6 +1519,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "espeak-ng"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "213ed87669515192b61f34dc6d6c36adeb75ae424b63e32612a65a1e21e9bee3"
+dependencies = [
+ "bitflags 2.13.1",
+ "espeak-ng-data-dict-ru",
+ "espeak-ng-data-phonemes",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "espeak-ng-data-dict-ru"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3fdd2e2de742f9212265f96df0bff7ad4f8d866493d121b5c922ce65be88277"
+
+[[package]]
+name = "espeak-ng-data-phonemes"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73639acc81fa0d350dd6fef933d4a935b6f8b93ef74455c9eebf1f3873253e0d"
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2854,10 +2878,12 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "cpal",
+ "espeak-ng",
  "hf-hub",
  "hound",
  "jarvis-tts",
  "open",
+ "ort",
  "rand 0.8.8",
  "regex",
  "rustpotter",

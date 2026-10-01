@@ -9,9 +9,11 @@ use crate::audio::OutputPlayer;
 use crate::llm::{self, SharedLlm};
 use crate::paths;
 use crate::settings::Settings;
+use crate::tts_piper::PiperEngine;
 use anyhow::{bail, Context, Result};
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use jarvis_tts::{auto_device, Language, Qwen3TTS, Speaker, StreamingSession, SynthesisOptions};
+pub use crate::tts_piper::PIPER_VOICES;
 use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
@@ -24,8 +26,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// Доступные голоса Qwen3-TTS (пресеты CustomVoice): (идентификатор, описание).
 /// Все голоса мультиязычны и говорят по-русски.
-pub const TTS_VOICES: &[(&str, &str)] = &[
-    ("ryan", "мужской, тёплый"),
+pub const TTS_VOICES: &[(&str, &str)] = &[    ("ryan", "мужской, тёплый"),
     ("aiden", "мужской, средний"),
     ("eric", "мужской, глубокий"),
     ("dylan", "мужской, молодой"),
@@ -54,6 +55,20 @@ pub fn set_current_speed(speed: f32) {
 
 pub fn current_speed() -> f32 {
     *TTS_SPEED.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Активный движок синтеза: "piper" | "qwen3".
+static TTS_ENGINE: RwLock<String> = RwLock::new(String::new());
+
+pub fn current_engine() -> String {
+    TTS_ENGINE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+pub fn set_current_engine(engine: &str) {
+    *TTS_ENGINE.write().unwrap_or_else(|e| e.into_inner()) = engine.to_string();
 }
 
 const TTS_CACHE_MAX_CHARS: usize = 200;
@@ -259,11 +274,18 @@ impl TtsEngine {
 
 /// Состояние фоновой загрузки TTS: None — ещё грузится, Some — готово.
 pub struct SharedTtsState {
-    pub tts: Mutex<Option<Arc<TtsEngine>>>,
+    pub tts: Mutex<Option<Arc<SynthEngine>>>,
     pub condvar: Condvar,
 }
 
 pub type SharedTts = Arc<SharedTtsState>;
+
+/// Активный движок синтеза. Piper — быстрый CPU-бэкенд (RTF < 0.1),
+/// Qwen3 — нейросетевой на Metal с естественной интонацией.
+pub enum SynthEngine {
+    Qwen3(TtsEngine),
+    Piper(PiperEngine),
+}
 
 impl SharedTtsState {
     pub fn new() -> Self {
@@ -275,33 +297,57 @@ impl SharedTtsState {
 }
 
 /// Фоновая загрузка TTS: по завершении заполняет SharedTtsState и уведомляет.
-pub fn spawn_tts_loader(shared: &SharedTts, tts_failed: &Arc<AtomicBool>, voice: &str) {
+pub fn spawn_tts_loader(
+    shared: &SharedTts,
+    tts_failed: &Arc<AtomicBool>,
+    engine: &str,
+    voice: &str,
+) {
     let shared = Arc::clone(shared);
     let tts_failed = Arc::clone(tts_failed);
+    let engine = engine.to_string();
     let voice = voice.to_string();
+    set_current_engine(&engine);
     set_current_voice(voice.clone());
 
     std::thread::spawn(move || {
-        println!("🧠 Загрузка TTS в фоне...");
-        let engine = match TtsEngine::new(&voice) {
-            Ok(e) => Ok(e),
-            Err(first) => {
-                // Повтор: разовые отказы аллокации Metal при старте системы.
-                std::thread::sleep(Duration::from_secs(2));
-                TtsEngine::new(&voice).map_err(|second| {
-                    anyhow::anyhow!("{first}; повторная попытка тоже не удалась: {second}")
-                })
-            }
+        println!("🧠 Загрузка TTS ({engine}, голос «{voice}») в фоне...");
+        let backend = match engine.as_str() {
+            "piper" => PiperEngine::new(&voice).map(SynthEngine::Piper),
+            _ => match TtsEngine::new(&voice) {
+                Ok(e) => Ok(SynthEngine::Qwen3(e)),
+                Err(first) => {
+                    // Повтор: разовые отказы аллокации Metal при старте системы.
+                    std::thread::sleep(Duration::from_secs(2));
+                    TtsEngine::new(&voice)
+                        .map(SynthEngine::Qwen3)
+                        .map_err(|second| {
+                            anyhow::anyhow!("{first}; повторная попытка тоже не удалась: {second}")
+                        })
+                }
+            },
         };
-        match engine {
-            Ok(engine) => {
+        match backend {
+            Ok(SynthEngine::Qwen3(engine)) => {
                 // Прогреваем до публикации движка: wait_for_tts подождёт,
                 // зато ни одна фраза не попадёт на холодные шейдеры.
                 if let Err(e) = engine.warmup() {
                     eprintln!("⚠️ Прогрев TTS не удался (не критично): {e}");
                 }
                 let mut guard = shared.tts.lock().unwrap_or_else(|e| e.into_inner());
-                *guard = Some(Arc::new(engine));
+                *guard = Some(Arc::new(SynthEngine::Qwen3(engine)));
+                shared.condvar.notify_all();
+                println!("✅ TTS готов к озвучке");
+            }
+            Ok(other) => {
+                // Piper: короткий прогрев ORT-ядер на реальном синтезе.
+                if let SynthEngine::Piper(p) = &other {
+                    if let Err(e) = p.synthesize("Да.", 1.0) {
+                        eprintln!("⚠️ Прогрев piper не удался (не критично): {e}");
+                    }
+                }
+                let mut guard = shared.tts.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = Some(Arc::new(other));
                 shared.condvar.notify_all();
                 println!("✅ TTS готов к озвучке");
             }
@@ -314,10 +360,9 @@ pub fn spawn_tts_loader(shared: &SharedTts, tts_failed: &Arc<AtomicBool>, voice:
     });
 }
 
-/// Смена голоса на лету: пересобирает движок в фоне (модель на диске
-/// переиспользуется, загрузка занимает несколько секунд).
-pub fn set_voice(shared: &SharedTts, tts_failed: &Arc<AtomicBool>, voice: &str) {
-    spawn_tts_loader(shared, tts_failed, voice);
+/// Смена движка/голоса на лету: пересобирает движок в фоне.
+pub fn set_voice(shared: &SharedTts, tts_failed: &Arc<AtomicBool>, engine: &str, voice: &str) {
+    spawn_tts_loader(shared, tts_failed, engine, voice);
 }
 
 /// Удаляет самые старые WAV из кэша синтеза при превышении лимита.
@@ -358,9 +403,10 @@ pub fn prune_tts_cache() {
     }
 }
 
-fn tts_cache_path(text: &str, voice: &str, speed: f32) -> PathBuf {
+fn tts_cache_path(engine: &str, text: &str, voice: &str, speed: f32) -> PathBuf {
     let mut hasher = DefaultHasher::new();
 
+    engine.hash(&mut hasher);
     TTS_ENGINE_VERSION.hash(&mut hasher);
     voice.hash(&mut hasher);
     ((speed * 100.0).round() as i64).hash(&mut hasher);
@@ -369,11 +415,22 @@ fn tts_cache_path(text: &str, voice: &str, speed: f32) -> PathBuf {
     paths::tts_cache_dir().join(format!("{:016x}.wav", hasher.finish()))
 }
 
+/// Пишет моно int16 WAV (кэш синтеза / файлы).
+fn write_wav_i16(path: &Path, spec: WavSpec, samples: &[f32]) -> Result<()> {
+    let mut writer = WavWriter::create(path, spec)
+        .with_context(|| format!("Не удалось создать {:?}", path))?;
+    for &s in samples {
+        writer.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
 fn wait_for_tts(
     shared_tts: &SharedTts,
     tts_failed: &AtomicBool,
     timeout: Duration,
-) -> Option<Arc<TtsEngine>> {
+) -> Option<Arc<SynthEngine>> {
     let mut guard = shared_tts.tts.lock().unwrap_or_else(|e| e.into_inner());
     let start = Instant::now();
 
@@ -632,10 +689,11 @@ pub fn spawn_audio_player(
                         continue;
                     }
 
+                    let engine_name = current_engine();
                     let voice = current_voice();
                     let speed = current_speed();
                     let can_cache = text.chars().count() <= TTS_CACHE_MAX_CHARS;
-                    let cache_path = tts_cache_path(&text, &voice, speed);
+                    let cache_path = tts_cache_path(&engine_name, &text, &voice, speed);
 
                     if can_cache && cache_path.exists() {
                         let cache_path_string = cache_path.to_string_lossy().to_string();
@@ -652,7 +710,7 @@ pub fn spawn_audio_player(
                         continue;
                     }
 
-                    let Some(tts) = wait_for_tts(
+                    let Some(backend) = wait_for_tts(
                         &tts_shared,
                         tts_failed.as_ref(),
                         Duration::from_secs(TTS_WAIT_TIMEOUT_SECS),
@@ -673,38 +731,100 @@ pub fn spawn_audio_player(
 
                     is_speaking.store(true, Ordering::SeqCst);
 
-                    // Кэш-файл пишется на лету, по мере генерации чанков.
-                    let mut wav: Option<WavWriter<BufWriter<File>>> = None;
-                    if can_cache {
-                        if let Err(e) = fs::create_dir_all(paths::tts_cache_dir()) {
-                            eprintln!("⚠️ Не удалось создать папку кэша речи: {e}");
-                        }
-                        let spec = WavSpec {
-                            channels: 1,
-                            sample_rate: (jarvis_tts::audio::SAMPLE_RATE as f32 * speed)
-                                .round() as u32,
-                            bits_per_sample: 16,
-                            sample_format: SampleFormat::Int,
-                        };
-                        match WavWriter::create(&cache_path, spec) {
-                            Ok(w) => wav = Some(w),
-                            Err(e) => eprintln!("⚠️ Не удалось открыть кэш-файл речи: {e}"),
-                        }
-                    }
+                    match backend.as_ref() {
+                        SynthEngine::Piper(piper) => {
+                            // Неавторегрессивный движок: вся фраза за один
+                            // проход, RTF < 0.1 — стриминг не нужен.
+                            let started = Instant::now();
+                            match piper.synthesize(&text, speed) {
+                                Ok(samples) if !samples.is_empty() => {
+                                    if can_cache {
+                                        if let Err(e) = fs::create_dir_all(paths::tts_cache_dir())
+                                        {
+                                            eprintln!(
+                                                "⚠️ Не удалось создать папку кэша речи: {e}"
+                                            );
+                                        }
+                                        let spec = WavSpec {
+                                            channels: 1,
+                                            sample_rate: (piper.sample_rate() as f32 * speed)
+                                                .round() as u32,
+                                            bits_per_sample: 16,
+                                            sample_format: SampleFormat::Int,
+                                        };
+                                        if let Err(e) =
+                                            write_wav_i16(&cache_path, spec, &samples)
+                                        {
+                                            eprintln!("⚠️ Не удалось сохранить кэш речи: {e}");
+                                        }
+                                    }
 
-                    let result =
-                        stream_to_output(&tts, &text, player, device_rate, speed, &mut wav, &stop_audio_flag);
-
-                    match result {
-                        Ok(()) => {
-                            if let Some(Err(e)) = wav.map(|w| w.finalize()) {
-                                eprintln!("⚠️ Не удалось сохранить кэш речи: {e}");
-                                let _ = fs::remove_file(&cache_path);
+                                    let src_rate = (piper.sample_rate() as f32 * speed).round()
+                                        as usize;
+                                    let out = if src_rate != device_rate {
+                                        crate::audio::resample_audio(
+                                            &samples,
+                                            src_rate,
+                                            device_rate,
+                                        )
+                                    } else {
+                                        samples
+                                    };
+                                    println!(
+                                        "🔊 TTS(piper): {:.0?} на {:.1} с аудио",
+                                        started.elapsed(),
+                                        out.len() as f32 / device_rate as f32
+                                    );
+                                    player.enqueue(&out);
+                                }
+                                Ok(_) => eprintln!("⚠️ Piper вернул пустое аудио"),
+                                Err(e) => {
+                                    eprintln!("⚠️ Ошибка синтеза речи (piper): {e}");
+                                    if can_cache {
+                                        let _ = fs::remove_file(&cache_path);
+                                    }
+                                }
                             }
                         }
-                        Err(e) => {
-                            eprintln!("⚠️ Ошибка синтеза речи: {e}");
+                        SynthEngine::Qwen3(tts) => {
+                            // Кэш-файл пишется на лету, по мере генерации чанков.
+                            let mut wav: Option<WavWriter<BufWriter<File>>> = None;
                             if can_cache {
+                                if let Err(e) = fs::create_dir_all(paths::tts_cache_dir()) {
+                                    eprintln!("⚠️ Не удалось создать папку кэша речи: {e}");
+                                }
+                                let spec = WavSpec {
+                                    channels: 1,
+                                    sample_rate: (jarvis_tts::audio::SAMPLE_RATE as f32 * speed)
+                                        .round() as u32,
+                                    bits_per_sample: 16,
+                                    sample_format: SampleFormat::Int,
+                                };
+                                match WavWriter::create(&cache_path, spec) {
+                                    Ok(w) => wav = Some(w),
+                                    Err(e) => {
+                                        eprintln!("⚠️ Не удалось открыть кэш-файл речи: {e}")
+                                    }
+                                }
+                            }
+
+                            let result = stream_to_output(
+                                tts,
+                                &text,
+                                player,
+                                device_rate,
+                                speed,
+                                &mut wav,
+                                &stop_audio_flag,
+                            );
+
+                            if let Err(e) = result {
+                                eprintln!("⚠️ Ошибка синтеза речи: {e}");
+                                if can_cache {
+                                    let _ = fs::remove_file(&cache_path);
+                                }
+                            } else if let Some(Err(e)) = wav.map(|w| w.finalize()) {
+                                eprintln!("⚠️ Не удалось сохранить кэш речи: {e}");
                                 let _ = fs::remove_file(&cache_path);
                             }
                         }

@@ -10,6 +10,7 @@ pub mod settings;
 pub mod stt;
 pub mod text;
 pub mod tts;
+pub mod tts_piper;
 pub mod wake;
 pub mod wake_train;
 pub mod web;
