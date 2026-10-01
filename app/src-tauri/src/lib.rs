@@ -137,6 +137,13 @@ fn spawn_engine(shared: &Arc<Shared>, events_tx: std::sync::mpsc::Sender<JarvisE
         };
 
         tts::spawn_tts_loader(&shared_engine.shared_tts, &shared_engine.tts_failed, &tts_voice);
+
+        // Баннер сборки TTS в журнал UI: если его нет в журнале — работает
+        // устаревшая сборка и все фиксы произношения в бинарь не попали.
+        let _ = events_tx.send(JarvisEvent::Log {
+            message: "TTS-сборка: kokoro-ru + нейро-ударитель (v4), голос «{voice}»"
+                .replace("{voice}", &tts_voice),
+        });
         spawn_llm_loader(&shared_engine.shared_llm, &events_tx);
 
         let models_dir = paths::models_dir();

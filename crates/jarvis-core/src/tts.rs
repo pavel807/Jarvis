@@ -84,6 +84,7 @@ pub fn spawn_tts_loader(shared: &SharedTts, tts_failed: &Arc<AtomicBool>, voice:
 
     std::thread::spawn(move || {
         println!("🧠 Загрузка TTS (kokoro, голос «{voice}») в фоне...");
+        println!("🔊 TTS-сборка: jarvis-tts-v4 + нейро-ударитель. Если этой строки нет в консоли — работает устаревший бинарь.");
         match KokoroEngine::new(&voice) {
             Ok(engine) => {
                 let mut guard = shared.tts.lock().unwrap_or_else(|e| e.into_inner());
