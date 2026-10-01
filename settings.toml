@@ -11,5 +11,5 @@ llm_normalize = true
 llm_temperature = 0.6
 llm_max_tokens = 256
 tts_voice = "dima"
-tts_speed = 1.1
+tts_speed = 0.95
 ack_before_llm = false

@@ -161,6 +161,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 
     let mut has_speech_started = false;
     let mut silence_samples = 0;
+    let mut was_speaking = false;
     let mut rng = rand::thread_rng();
 
     let _ = h
@@ -302,7 +303,9 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
         };
 
         // Пока звучит ответ ассистента — не слушаем себя.
-        if h.is_speaking.load(Ordering::SeqCst) {
+        let speaking_now = h.is_speaking.load(Ordering::SeqCst);
+        if speaking_now {
+            was_speaking = true;
             audio_history.clear();
             command_buffer.clear();
             wi16.clear();
@@ -310,6 +313,20 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             has_speech_started = false;
             silence_samples = 0;
             followup_deadline = Some(Instant::now() + Duration::from_secs(settings_snap.followup_window_secs));
+            continue;
+        }
+        if was_speaking {
+            // Речь закончилась: у колонок отгул, микрофон мог снять эхо.
+            // Пауза и сброс накопленного, чтобы эхо не превратилось
+            // в «команду» и не оборвало следующий ответ.
+            was_speaking = false;
+            std::thread::sleep(Duration::from_millis(250));
+            while mic_rx.try_recv().is_ok() {}
+            audio_history.clear();
+            command_buffer.clear();
+            wi16.clear();
+            has_speech_started = false;
+            silence_samples = 0;
             continue;
         }
 
