@@ -23,9 +23,10 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Версия движков синтеза — участвует в хэше кэша. v3: добавлен
-/// нейро-ударитель — старые кэш-файлы с неверными ударениями невалидны.
-const TTS_ENGINE_VERSION: &str = "jarvis-tts-v3";
+/// Версия движков синтеза — участвует в хэше кэша. v4: трёхэшелонный
+/// ударитель (переопределения -> словарь -> нейросеть) — старые кэш-файлы
+/// с неверными ударениями («какАя») невалидны.
+const TTS_ENGINE_VERSION: &str = "jarvis-tts-v4";
 /// Скорость речи по умолчанию: 1.0 — естественно; <1 медленнее.
 pub const DEFAULT_TTS_SPEED: f32 = 1.0;
 const TTS_CACHE_MAX_CHARS: usize = 200;

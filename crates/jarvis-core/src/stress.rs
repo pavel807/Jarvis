@@ -25,6 +25,16 @@ use std::sync::Mutex;
 /// Гласные русского текста (для подсчёта порядкового номера).
 const RU_VOWELS: &str = "аеёиоуыэюя";
 
+const STRESS_OVERRIDES: &[(&str, &str)] = &[
+    ("дела", "д+ела"),
+    ("какая", "как+ая"),
+    ("какие", "как+ие"),
+    ("какое", "как+ое"),
+    ("такая", "так+ая"),
+    ("такие", "так+ие"),
+    ("такое", "так+ое"),
+];
+
 
 /// Гласные в IPA-выходе espeak (после которого расставляем ˈ).
 pub const IPA_VOWELS: &str = "aeiouyəɐɔɪʊɛɨɵ";
@@ -46,6 +56,8 @@ pub struct RuStress {
     session: Mutex<Session>,
     char_vocab: HashMap<char, i64>,
     id2label: HashMap<String, String>,
+    /// Словарь ударений (110 тыс. слов) — первый эшелон, точный.
+    accents: HashMap<String, String>,
     yo_words: HashMap<String, String>,
 }
 
@@ -109,6 +121,7 @@ impl RuStress {
         let config: AccentConfig =
             serde_json::from_str(&std::fs::read_to_string(dir.join("config.json"))?)?;
 
+        let accents = read_gzip_json(&dir.join("accents_nn.json.gz"))?;
         let yo_words = read_gzip_json(&dir.join("yo_words.json.gz"))?;
 
         let session = Session::builder()
@@ -117,7 +130,8 @@ impl RuStress {
             .context("Не удалось загрузить модель ударений")?;
 
         println!(
-            "✅ Ударитель готов (ё-словарь {}, нейросеть OOV) за {:.1?}",
+            "✅ Ударитель готов (словарь {}, ё {}, нейросеть OOV) за {:.1?}",
+            accents.len(),
             yo_words.len(),
             started.elapsed()
         );
@@ -126,6 +140,7 @@ impl RuStress {
             session: Mutex::new(session),
             char_vocab,
             id2label: config.id2label,
+            accents,
             yo_words,
         })
     }
@@ -157,10 +172,10 @@ impl RuStress {
         }
     }
 
-    /// Порядковый номер ударной гласной слова (1-based). Решает нейросеть —
-    /// для любого слова, даже нового (запрос пользователя: «на любом слове,
-    /// даже на новом»). ё всегда ударная; служебные слова не акцентируем.
-    /// None — уверенного предсказания нет, оставляем ударение espeak.
+    /// Порядковый номер ударной гласной слова (1-based). Эшелоны:
+    /// переопределения -> словарь (110 тыс., точный) -> нейросеть (любое
+    /// новое слово). ё всегда ударная; служебные слова не акцентируем.
+    /// None — ни один эшелон не сработал, оставляем ударение espeak.
     pub fn stressed_vowel_ordinal(&self, word: &str) -> Option<usize> {
         let lower = word.to_lowercase();
 
@@ -178,7 +193,38 @@ impl RuStress {
             return Some(ord);
         }
 
+        // Переопределения, затем словарь, затем нейросеть.
+        if let Some((_, forced)) = STRESS_OVERRIDES.iter().find(|(w, _)| *w == lower) {
+            return Self::plus_notation_ordinal(forced);
+        }
+        if let Some(stressed) = self.accents.get(&lower) {
+            return Self::plus_notation_ordinal(stressed);
+        }
+
         self.nn_stressed_vowel_ordinal(&lower)
+    }
+
+    /// Нотация «аб+а» -> порядковый номер ударной гласной (1-based).
+    /// Несколько '+' (варианты) не разбираем — вернём None, возьмёт NN.
+    fn plus_notation_ordinal(stressed: &str) -> Option<usize> {
+        let mut pluses = 0usize;
+        for (i, c) in stressed.char_indices() {
+            if c == '+' {
+                let after: String = stressed[i + 1..].to_string();
+                if let Some(first) = after.chars().next() {
+                    if RU_VOWELS.contains(first) {
+                        let before = &stressed[..i];
+                        let idx = before.chars().filter(|c| RU_VOWELS.contains(*c)).count();
+                        return Some(idx + 1);
+                    }
+                }
+                pluses += 1;
+                if pluses > 1 {
+                    return None;
+                }
+            }
+        }
+        None
     }
 
     /// Нейросеть: char-level RoFormer -> метка STRESS_PRIMARY на гласной.
@@ -269,6 +315,13 @@ fn vowel_ordinal(word: &str, pred: impl Fn(char) -> bool) -> Option<usize> {
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn plus_ordinal() {
+        assert_eq!(RuStress::plus_notation_ordinal("аб+а"), Some(2));
+        assert_eq!(RuStress::plus_notation_ordinal("д+ела"), Some(1));
+        assert_eq!(RuStress::plus_notation_ordinal("как+ая"), Some(2));
+    }
 
     #[test]
     fn vowel_ordinal_basics() {
