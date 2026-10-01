@@ -12,6 +12,7 @@
 use crate::kokoro_g2p;
 use crate::kokoro_vocab::tokenize;
 use crate::paths;
+use crate::stress::RuStress;
 use anyhow::{bail, Context, Result};
 use ort::session::{Session, SessionInputValue, SessionInputs};
 use ort::value::{Tensor, Value};
@@ -56,6 +57,9 @@ pub struct KokoroEngine {
     style_rows: Vec<[f32; 256]>,
     espeak_ru: Mutex<espeak_ng::EspeakNg>,
     espeak_en: Mutex<espeak_ng::EspeakNg>,
+    /// Нейро-ударитель (словарь + RoFormer). None — загрузка не удалась,
+    /// работаем на ударениях espeak.
+    stress: Option<RuStress>,
     voice: String,
 }
 
@@ -112,6 +116,15 @@ impl KokoroEngine {
         let espeak_ru = Mutex::new(init_espeak(&espeak_data, "ru")?);
         let espeak_en = Mutex::new(init_espeak(&espeak_data, "en-us")?);
 
+        // Ударитель: 2 МБ моделей, при неудаче — тихий откат на espeak.
+        let stress = match RuStress::load() {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("⚠️ Ударитель не загружен, ударения ставит espeak: {e:#}");
+                None
+            }
+        };
+
         println!(
             "✅ Kokoro готов ({voice}, {SAMPLE_RATE} Гц) за {:.1?}",
             started.elapsed()
@@ -122,6 +135,7 @@ impl KokoroEngine {
             style_rows,
             espeak_ru,
             espeak_en,
+            stress,
             voice: voice.to_string(),
         })
     }
@@ -148,17 +162,39 @@ impl KokoroEngine {
 
     /// Текст -> IPA: токены делятся по письменности — кириллица через
     /// espeak ru + правила ru_g2p, латиница через espeak en-us.
-    fn phonemize_mixed(&self, text: &str) -> String {
+    /// Перед фонемизацией нейро-ударитель восстанавливает ё и определяет
+    /// ударную гласную: знак ˈ ставится по ней, редукция гласных следует
+    /// правильному ударению.
+    pub fn phonemize_mixed(&self, text: &str) -> String {
         let mut out = String::with_capacity(text.len() * 2);
         for token in text.split_whitespace() {
-            let ipa = if token.chars().any(|c| ('а'..='я').contains(&c) || c == 'ё' || c.is_uppercase() && ('А'..='Я').contains(&c)) {
+            let is_cyr = token
+                .chars()
+                .any(|c| ('а'..='я').contains(&c) || matches!(c, 'ё' | 'Ё'));
+            let ipa = if is_cyr {
+                let token = self
+                    .stress
+                    .as_ref()
+                    .map(|s| s.yo_restore(token))
+                    .unwrap_or_else(|| token.to_string());
+                let stressed_ordinal = self
+                    .stress
+                    .as_ref()
+                    .and_then(|s| s.stressed_vowel_ordinal(&token));
                 let ru = self
                     .espeak_ru
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .text_to_phonemes(token)
+                    .text_to_phonemes(&token)
                     .unwrap_or_default();
-                kokoro_g2p::normalize_ru(&ru)
+                if std::env::var_os("JARVIS_STRESS_DEBUG").is_some() {
+                    eprintln!("[stress] {token:?} -> ordinal {stressed_ordinal:?} raw {ru:?}");
+                }
+                let ipa = match stressed_ordinal {
+                    Some(ord) => kokoro_g2p::apply_stress_ordinal(&ru, ord),
+                    None => ru,
+                };
+                kokoro_g2p::normalize_ru(&ipa)
             } else {
                 self.espeak_en
                     .lock()

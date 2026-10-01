@@ -9,6 +9,7 @@ pub mod kokoro_vocab;
 pub mod llm;
 pub mod paths;
 pub mod settings;
+pub mod stress;
 pub mod stt;
 pub mod text;
 pub mod tts;

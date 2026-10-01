@@ -23,6 +23,7 @@ serde_json.workspace = true
 # espeak-ng — чистый Rust-порт (фонемы и словари ru+en встроены)
 ort = "2.0.0-rc.12"
 espeak-ng = { version = "0.2", default-features = false, features = ["bundled-data-ru", "bundled-data-en"] }
+flate2 = "1"
 ureq.workspace = true
 regex.workspace = true
 

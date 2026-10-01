@@ -11,8 +11,8 @@ use std::path::Path;
 
 fn main() -> Result<()> {
     let voice = "dima";
-    let piper = KokoroEngine::new(voice)?;
-    let sr = piper.sample_rate();
+    let engine = KokoroEngine::new(voice)?;
+    let sr = engine.sample_rate();
 
     let phrases = [
         "Привет! Я Джарвис, твой голосовой ассистент.",
@@ -26,7 +26,7 @@ fn main() -> Result<()> {
     let mut all_out = Vec::new();
     for text in phrases {
         let t = std::time::Instant::now();
-        let samples = piper.synthesize(text, 1.0)?;
+        let samples = engine.synthesize(text, 1.0)?;
         let dt = t.elapsed().as_secs_f64();
         let audio = samples.len() as f64 / sr as f64;
         let peak = samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
@@ -60,6 +60,17 @@ fn main() -> Result<()> {
         writer.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
     }
     writer.finalize()?;
+    println!("🔊 Готово к прослушиванию: {:?}", out_path);
+
+    // --- Демо нейро-ударителя: знак ˈ в IPA показывает ударную гласную ---
+    println!("--- Ударения (IPA) ---");
+    for w in [
+        "звонит", "торты", "щавель", "договор", "каталог", "красивее", "еще",
+    ] {
+        println!("  {w:<12} -> {}", engine.phonemize_mixed(w));
+    }
+
+    let _ = engine.synthesize("Звонит Иван, ещё одна красивее.", 1.0)?;
     println!("🔊 Готово к прослушиванию: {:?}", out_path);
 
     Ok(())

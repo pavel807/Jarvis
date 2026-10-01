@@ -212,6 +212,31 @@ fn lengthen_sch(ps: &str) -> String {
 }
 
 
+/// Гласные в IPA-выходе espeak (по ним считается порядковый номер ударной
+/// гласной и ставится знак ˈ). ʌ/ɑ — аллофоны а/о у espeak.
+pub const IPA_VOWELS: &str = "aeiouyəɐɔɪʊɛɨɵʌɑ";
+
+/// Ставит знак ударения ˈ перед гласной с порядковым номером `ordinal`
+/// (1-based), убирая ударения espeak. Используется нейро-ударителем:
+/// он знает ударную гласную слова, espeak — иногда нет.
+pub fn apply_stress_ordinal(ipa: &str, ordinal: usize) -> String {
+    let mut out = String::with_capacity(ipa.len() + 2);
+    let mut seen = 0usize;
+    for c in ipa.chars() {
+        if c == 'ˈ' || c == 'ˌ' {
+            continue;
+        }
+        if IPA_VOWELS.contains(c) {
+            seen += 1;
+            if seen == ordinal {
+                out.push('ˈ');
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Нормализация IPA-выхода espeak (ru): замены символов, позиционная
 /// редукция безударных гласных (аканье), удлинение щ.
 pub fn normalize_ru(ipa: &str) -> String {

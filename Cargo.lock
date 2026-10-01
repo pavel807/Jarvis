@@ -2886,6 +2886,7 @@ dependencies = [
  "candle-nn",
  "cpal",
  "espeak-ng",
+ "flate2",
  "hf-hub",
  "hound",
  "open",
