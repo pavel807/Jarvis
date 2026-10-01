@@ -1525,10 +1525,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "213ed87669515192b61f34dc6d6c36adeb75ae424b63e32612a65a1e21e9bee3"
 dependencies = [
  "bitflags 2.13.1",
+ "espeak-ng-data-dict-en",
  "espeak-ng-data-dict-ru",
  "espeak-ng-data-phonemes",
  "thiserror 1.0.69",
 ]
+
+[[package]]
+name = "espeak-ng-data-dict-en"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f231805f816e50caa02fc9266ba9e7ba842bc1439ed5dc4adc8aa09a745aa4a"
 
 [[package]]
 name = "espeak-ng-data-dict-ru"

@@ -9,7 +9,6 @@ use hound::{SampleFormat, WavSpec, WavWriter};
 use jarvis_core::tts_piper::{PiperEngine, PiperParams};
 use std::collections::HashMap;
 use std::io::BufWriter;
-use std::path::Path;
 
 fn save_wav(path: &str, samples: &[f32], sr: u32) -> Result<()> {
     let spec = WavSpec {
@@ -82,7 +81,7 @@ fn main() -> Result<()> {
 
     // --- Варианты ритма: одинаковая фраза, разные ручки модели ---
     let phrase = "Открываю ютуб, одну секунду.";
-    let ipa = piper.phonemize(phrase)?;
+    let _ipa = piper.phonemize(phrase)?;
     println!("--- Варианты ритма для «{phrase}» ---");
 
     let variants: Vec<(&str, &str, PiperParams)> = vec![

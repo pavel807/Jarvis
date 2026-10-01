@@ -19,10 +19,10 @@ candle-core.workspace = true
 candle-nn.workspace = true
 tokenizers.workspace = true
 serde_json.workspace = true
-# Piper TTS: ONNX Runtime (общий с transcribe-rs) + чистый Rust-порт espeak-ng
-# (без C-сборки; фонемы и русский словарь встроены через bundled-data-ru)
+# TTS: Piper и Kokoro-ru на ONNX Runtime (общий с transcribe-rs);
+# espeak-ng — чистый Rust-порт (фонемы и словари ru+en встроены)
 ort = "2.0.0-rc.12"
-espeak-ng = { version = "0.2", default-features = false, features = ["bundled-data-ru"] }
+espeak-ng = { version = "0.2", default-features = false, features = ["bundled-data-ru", "bundled-data-en"] }
 ureq.workspace = true
 regex.workspace = true
 jarvis-tts.workspace = true

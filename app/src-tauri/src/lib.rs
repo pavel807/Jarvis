@@ -267,6 +267,10 @@ fn tts_voices(engine: Option<String>) -> Vec<(String, String)> {
             .iter()
             .map(|(id, desc)| (id.to_string(), desc.to_string()))
             .collect(),
+        Some("kokoro") => tts::KOKORO_VOICES
+            .iter()
+            .map(|(id, desc)| (id.to_string(), desc.to_string()))
+            .collect(),
         _ => tts::TTS_VOICES
             .iter()
             .map(|(id, desc)| (id.to_string(), desc.to_string()))

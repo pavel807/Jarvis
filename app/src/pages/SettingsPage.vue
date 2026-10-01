@@ -145,6 +145,7 @@ async function save() {
       <h2>Голос TTS</h2>
       <label>Движок</label>
       <select v-model="settings.tts_engine" @change="loadVoices">
+        <option value="kokoro">Kokoro — быстрый, качественный, EN+RU (CPU)</option>
         <option value="piper">Piper — очень быстрый (CPU)</option>
         <option value="qwen3">Qwen3-TTS — естественная интонация (Metal)</option>
       </select>
