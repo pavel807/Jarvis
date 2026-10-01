@@ -169,18 +169,14 @@ impl PiperEngine {
     /// Текст -> IPA-фенемы espeak-ng (голос ru, со стресс-метками — так
     /// обучены голоса piper). Публично: используется проверкой качества.
     ///
-    /// Пробелы и границы клауз espeak удаляются:ruslan medium произносит
-    /// межсловные паузы слишком рвано (выбор пользователя — «склеенные»
-    /// слова, вариант v4). Знаки препинания остаются и дают паузы.
+    /// Границы клауз espeak (\\n) превращаются в пробелы: границы слов
+    /// нужны модели (без них слова проглатываются).
     pub fn phonemize(&self, text: &str) -> Result<String> {
         let espeak = self.espeak.lock().unwrap_or_else(|e| e.into_inner());
         let ipa = espeak
             .text_to_phonemes(text)
             .map_err(|e| anyhow::anyhow!("Ошибка фонемизации espeak-ng: {e}"))?;
-        Ok(ipa
-            .chars()
-            .filter(|&c| c != ' ' && c != '\n')
-            .collect())
+        Ok(ipa.replace('\n', " "))
     }
 
     /// Один forward: фенемы -> ids -> waveform.
@@ -266,13 +262,24 @@ fn init_espeak() -> Result<espeak_ng::EspeakNg> {
 
 /// BOS + (id фенемы + PAD) для каждого символа + EOS; неизвестные
 /// символы пропускаются (как в piper).
+///
+/// Исключение — пробел: он сам по себе пауза, дополнительный PAD после
+/// него удваивает межсловный разрыв (ruslan звучал рвано). Поэтому
+/// пробел -> только id без PAD; знаки препинания идут как обычные фенемы.
 fn phonemes_to_ids(map: &HashMap<char, Vec<i64>>, phonemes: &str) -> Vec<i64> {
     let first = |c: char| map.get(&c).and_then(|v| v.first()).copied();
     let pad = first(PAD).unwrap_or(0);
+    let space_id = first(' ');
 
     let mut ids = Vec::with_capacity(phonemes.len() * 2 + 2);
     ids.push(first(BOS).unwrap_or(0));
     for ch in phonemes.chars() {
+        if ch == ' ' {
+            if let Some(id) = space_id {
+                ids.push(id);
+            }
+            continue;
+        }
         if let Some(id) = first(ch) {
             ids.push(id);
             ids.push(pad);
