@@ -72,6 +72,16 @@ pub struct PiperEngine {
     voice: String,
 }
 
+/// Переопределение параметров инференса (None = значения из конфига
+/// модели). noise_scale — вариативность/выразительность, length_scale —
+/// темп (больше = медленнее), noise_w — шум формы волны.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PiperParams {
+    pub noise_scale: Option<f32>,
+    pub length_scale: Option<f32>,
+    pub noise_w: Option<f32>,
+}
+
 impl PiperEngine {
     /// Загружает голос (скачивает ~63 МБ при первом запуске).
     pub fn new(voice: &str) -> Result<Self> {
@@ -122,17 +132,36 @@ impl PiperEngine {
     /// Синтез фразы. Длинный текст делится по фенемам; `speed` (0.5..2)
     /// меняет темп через length_scale.
     pub fn synthesize(&self, text: &str, speed: f32) -> Result<Vec<f32>> {
+        self.synthesize_with(text, speed, PiperParams::default())
+    }
+
+    /// То же с переопределением параметров инференса.
+    pub fn synthesize_with(
+        &self,
+        text: &str,
+        speed: f32,
+        params: PiperParams,
+    ) -> Result<Vec<f32>> {
         let phonemes = self.phonemize(text)?;
         if phonemes.trim().is_empty() {
             bail!("Фенемы не дали символов: \"{text}\"");
         }
+        self.synthesize_phonemes(&phonemes, speed, params)
+    }
 
+    /// Синтез из готовой фенемной строки (публично: подбор ритма речи).
+    pub fn synthesize_phonemes(
+        &self,
+        phonemes: &str,
+        speed: f32,
+        params: PiperParams,
+    ) -> Result<Vec<f32>> {
         let mut audio = Vec::new();
-        for (i, chunk) in split_phonemes(&phonemes).iter().enumerate() {
+        for (i, chunk) in split_phonemes(phonemes).iter().enumerate() {
             if i > 0 {
                 audio.extend(std::iter::repeat(0.0f32).take(CHUNK_PAUSE_SAMPLES));
             }
-            audio.extend(self.infer_chunk(chunk, speed)?);
+            audio.extend(self.infer_chunk(chunk, speed, params)?);
         }
         Ok(audio)
     }
@@ -150,7 +179,7 @@ impl PiperEngine {
     }
 
     /// Один forward: фенемы -> ids -> waveform.
-    fn infer_chunk(&self, phonemes: &str, speed: f32) -> Result<Vec<f32>> {
+    fn infer_chunk(&self, phonemes: &str, speed: f32, params: PiperParams) -> Result<Vec<f32>> {
         let ids = phonemes_to_ids(&self.config.phoneme_id_map, phonemes);
         if ids.len() <= 3 {
             bail!("Фенемы не дали токенов: \"{phonemes}\"");
@@ -158,8 +187,13 @@ impl PiperEngine {
 
         let inf = &self.config.inference;
         // Темп: length_scale умножает длительности, поэтому speed -> 1/speed.
-        let length_scale = (1.0 / speed.clamp(0.5, 2.0)) * inf.length_scale;
-        let scales = vec![inf.noise_scale, length_scale, inf.noise_w];
+        let length_scale = (1.0 / speed.clamp(0.5, 2.0))
+            * params.length_scale.unwrap_or(inf.length_scale);
+        let scales = vec![
+            params.noise_scale.unwrap_or(inf.noise_scale),
+            length_scale,
+            params.noise_w.unwrap_or(inf.noise_w),
+        ];
 
         let input_t = Tensor::from_array(([1usize, ids.len()], ids.clone()))
             .context("input")?;

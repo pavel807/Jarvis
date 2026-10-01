@@ -1,14 +1,30 @@
 //! Проверка качества Piper: покрытие фенем против словаря голоса, темп
-//! речи и WAV для прослушивания.
+//! речи и WAV для прослушивания. Вторая секция — варианты ритма одной
+//! фразы (выразительность/темп/склейка слов), чтобы выбрать на слух.
 //!
 //! Запуск: cargo run --release --example piper_check -p jarvis-core
 
 use anyhow::Result;
 use hound::{SampleFormat, WavSpec, WavWriter};
-use jarvis_core::tts_piper::PiperEngine;
+use jarvis_core::tts_piper::{PiperEngine, PiperParams};
 use std::collections::HashMap;
 use std::io::BufWriter;
 use std::path::Path;
+
+fn save_wav(path: &str, samples: &[f32], sr: u32) -> Result<()> {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: sr,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+    let mut writer = WavWriter::new(BufWriter::new(std::fs::File::create(path)?), spec)?;
+    for &s in samples {
+        writer.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
+    }
+    writer.finalize()?;
+    Ok(())
+}
 
 fn main() -> Result<()> {
     let voice = "ruslan";
@@ -16,8 +32,8 @@ fn main() -> Result<()> {
     let sr = piper.sample_rate();
 
     // Словарь фенем модели: какие IPA-символы она знает.
-    let model_json = jarvis_core::paths::tts_models_dir()
-        .join(format!("piper-{voice}/model.json"));
+    let model_json =
+        jarvis_core::paths::tts_models_dir().join(format!("piper-{voice}/model.json"));
     let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&model_json)?)?;
     let map: HashMap<String, Vec<i64>> = serde_json::from_value(cfg["phoneme_id_map"].clone())?;
     let known = |c: char| map.contains_key(&c.to_string());
@@ -29,7 +45,6 @@ fn main() -> Result<()> {
     ];
 
     println!("Голос: {voice}, {sr} Гц\n");
-    let mut all_out = Vec::new();
     for text in phrases {
         let ipa = piper.phonemize(text)?;
         let chars: Vec<char> = ipa.chars().collect();
@@ -49,7 +64,7 @@ fn main() -> Result<()> {
         };
 
         println!("«{text}»");
-        println!("  IPA ({}/{} симв.): {}", chars.len() - unknown.len(), chars.len(), ipa);
+        println!("  IPA: {ipa}");
         println!(
             "  покрытие словаря {coverage:.1}% | неизвестные: {}",
             if unknown.is_empty() {
@@ -63,24 +78,55 @@ fn main() -> Result<()> {
             text.chars().count() as f64 / audio,
             dt / audio,
         );
-        all_out.extend(samples);
-        all_out.extend(std::iter::repeat(0.0f32).take(sr as usize / 3));
     }
 
-    let out_path = Path::new("resources/piper_check.wav");
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate: sr,
-        bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
-    };
-    let file = std::fs::File::create(out_path)?;
-    let mut writer = WavWriter::new(BufWriter::new(file), spec)?;
-    for &s in &all_out {
-        writer.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
+    // --- Варианты ритма: одинаковая фраза, разные ручки модели ---
+    let phrase = "Открываю ютуб, одну секунду.";
+    let ipa = piper.phonemize(phrase)?;
+    println!("--- Варианты ритма для «{phrase}» ---");
+
+    let variants: Vec<(&str, &str, String, PiperParams)> = vec![
+        (
+            "v1",
+            "как сейчас",
+            ipa.clone(),
+            PiperParams::default(),
+        ),
+        (
+            "v2",
+            "выразительнее (noise 1.0)",
+            ipa.clone(),
+            PiperParams {
+                noise_scale: Some(1.0),
+                ..Default::default()
+            },
+        ),
+        (
+            "v3",
+            "медленнее (темп 1.15)",
+            ipa.clone(),
+            PiperParams {
+                length_scale: Some(1.15),
+                ..Default::default()
+            },
+        ),
+        (
+            "v4",
+            "без пауз между словами",
+            ipa.replace(' ', ""),
+            PiperParams::default(),
+        ),
+    ];
+
+    for (id, label, phonemes, params) in variants {
+        let samples = piper.synthesize_phonemes(&phonemes, 1.0, params)?;
+        let audio = samples.len() as f64 / sr as f64;
+        let file = format!("resources/piper_{id}.wav");
+        save_wav(&file, &samples, sr)?;
+        println!("  {id}: {label:<38} {audio:.2} с -> {file}");
     }
-    writer.finalize()?;
-    println!("🔊 Готово к прослушиванию: {:?}", out_path);
+
+    println!("\n🔊 Послушай resources/piper_v1.wav ... piper_v4.wav и скажи, какой ритм лучше.");
 
     Ok(())
 }
