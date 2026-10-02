@@ -267,7 +267,7 @@ fn get_logs(shared: State<'_, Arc<Shared>>) -> Vec<String> {
 
 #[tauri::command]
 fn tts_voices() -> Vec<(String, String)> {
-    tts::KOKORO_VOICES
+    tts::SILERO_VOICES
         .iter()
         .map(|(id, desc)| (id.to_string(), desc.to_string()))
         .collect()

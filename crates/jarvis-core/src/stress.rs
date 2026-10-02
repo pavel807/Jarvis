@@ -25,6 +25,11 @@ use std::sync::Mutex;
 /// Гласные русского текста (для подсчёта порядкового номера).
 const RU_VOWELS: &str = "аеёиоуыэюя";
 
+/// Публичная проверка гласной (нужна движкам для расстановки «+»).
+pub fn is_ru_vowel(c: char) -> bool {
+    RU_VOWELS.contains(c)
+}
+
 const STRESS_OVERRIDES: &[(&str, &str)] = &[
     ("дела", "д+ела"),
     ("какая", "как+ая"),

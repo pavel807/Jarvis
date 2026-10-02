@@ -34,7 +34,7 @@ const settings = reactive<Settings>({
   llm_normalize: true,
   llm_temperature: 0.6,
   llm_max_tokens: 256,
-  tts_voice: "dima",
+  tts_voice: "ru_eduard",
   tts_speed: 1.0,
   ack_before_llm: false,
 });
@@ -140,7 +140,7 @@ async function save() {
     </div>
 
     <div class="card">
-      <h2>Голос (Kokoro-ru)</h2>
+      <h2>Голос (Silero v5)</h2>
       <label>Голос</label>
       <select v-model="settings.tts_voice">
         <option v-for="[id, desc] in voices" :key="id" :value="id">{{ voiceLabel(id, desc) }}</option>
@@ -148,7 +148,7 @@ async function save() {
       <label>Скорость речи ({{ settings.tts_speed.toFixed(2) }}× — меньше = спокойнее)</label>
       <input type="range" min="0.7" max="1.2" step="0.05" v-model.number="settings.tts_speed" style="width: 100%" />
       <p class="dim" style="margin-top: 8px">
-        Голос применяется при сохранении. Kokoro понимает смешанную речь EN+RU.
+        Голос применяется при сохранении. Silero v5: нейро-ударения, смешанная речь EN+RU, 29 голосов.
       </p>
     </div>
 

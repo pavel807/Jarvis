@@ -1,7 +1,8 @@
-//! TTS: Kokoro-ru (82M StyleTTS2-lite) через ONNX Runtime — быстрый
-//! качественный русский синтез со смешанной речью EN+RU.
+//! TTS: Silero v5 (FastPitch+Vocos) — нативная реализация на candle,
+//! чистый Rust без ONNX Runtime. Русский синтез со смешанной речью EN+RU,
+//! встроенные нейро-ударения. 48 кГц, RTF ~0.04.
 //!
-//! Модель (~311 МБ) скачивается один раз при отсутствии в models/kokoro-ru/.
+//! Веса: models/silero/v5_cis_base.safetensors (91 МБ).
 //!
 //! Поток-плеер последовательно обрабатывает очередь [`AudioMessage`]:
 //! проигрывает WAV или синтезирует речь (с кэшем на диске).
@@ -10,8 +11,9 @@ use crate::audio::OutputPlayer;
 use crate::llm::{self, SharedLlm};
 use crate::paths;
 use crate::settings::Settings;
-use crate::tts_kokoro::KokoroEngine;
-pub use crate::tts_kokoro::KOKORO_VOICES;
+use crate::tts_silero::SileroEngine;
+pub use crate::tts_silero::SILERO_VOICES;
+use crate::tts_silero::SAMPLE_RATE as SILERO_SAMPLE_RATE;
 use anyhow::{bail, Context, Result};
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
@@ -26,7 +28,7 @@ use std::time::{Duration, Instant, SystemTime};
 /// Версия движков синтеза — участвует в хэше кэша. v4: трёхэшелонный
 /// ударитель (переопределения -> словарь -> нейросеть) — старые кэш-файлы
 /// с неверными ударениями («какАя») невалидны.
-const TTS_ENGINE_VERSION: &str = "jarvis-tts-v4";
+const TTS_ENGINE_VERSION: &str = "jarvis-tts-v5-silero";
 /// Скорость речи по умолчанию: 1.0 — естественно; <1 медленнее.
 pub const DEFAULT_TTS_SPEED: f32 = 1.0;
 const TTS_CACHE_MAX_CHARS: usize = 200;
@@ -60,7 +62,7 @@ pub fn set_current_voice(voice: String) {
 }
 
 pub struct SharedTtsState {
-    pub tts: Mutex<Option<Arc<KokoroEngine>>>,
+    pub tts: Mutex<Option<Arc<SileroEngine>>>,
     pub condvar: Condvar,
 }
 
@@ -83,9 +85,9 @@ pub fn spawn_tts_loader(shared: &SharedTts, tts_failed: &Arc<AtomicBool>, voice:
     set_current_voice(voice.clone());
 
     std::thread::spawn(move || {
-        println!("🧠 Загрузка TTS (kokoro, голос «{voice}») в фоне...");
+        println!("🧠 Загрузка TTS (silero, голос «{voice}») в фоне...");
         println!("🔊 TTS-сборка: jarvis-tts-v4 + нейро-ударитель. Если этой строки нет в консоли — работает устаревший бинарь.");
-        match KokoroEngine::new(&voice) {
+        match SileroEngine::new(&voice) {
             Ok(engine) => {
                 let mut guard = shared.tts.lock().unwrap_or_else(|e| e.into_inner());
                 *guard = Some(Arc::new(engine));
@@ -170,7 +172,7 @@ fn wait_for_tts(
     shared_tts: &SharedTts,
     tts_failed: &AtomicBool,
     timeout: Duration,
-) -> Option<Arc<KokoroEngine>> {
+) -> Option<Arc<SileroEngine>> {
     let mut guard = shared_tts.tts.lock().unwrap_or_else(|e| e.into_inner());
     let start = Instant::now();
 
@@ -384,7 +386,7 @@ pub fn spawn_audio_player(
                         continue;
                     }
 
-                    let Some(kokoro) = wait_for_tts(
+                    let Some(engine) = wait_for_tts(
                         &tts_shared,
                         tts_failed.as_ref(),
                         Duration::from_secs(TTS_WAIT_TIMEOUT_SECS),
@@ -408,7 +410,7 @@ pub fn spawn_audio_player(
                     // Неавторегрессивная модель: вся фраза за один проход,
                     // RTF ~0.15 — воспроизведение начинается по готовности.
                     let started = Instant::now();
-                    match kokoro.synthesize(&text, speed) {
+                    match engine.synthesize(&text, speed) {
                         Ok(samples) if !samples.is_empty() => {
                             if can_cache {
                                 if let Err(e) = fs::create_dir_all(paths::tts_cache_dir()) {
@@ -416,7 +418,7 @@ pub fn spawn_audio_player(
                                 }
                                 let spec = WavSpec {
                                     channels: 1,
-                                    sample_rate: (crate::tts_kokoro::SAMPLE_RATE as f32 * speed)
+                                    sample_rate: (SILERO_SAMPLE_RATE as f32 * speed)
                                         .round() as u32,
                                     bits_per_sample: 16,
                                     sample_format: SampleFormat::Int,
@@ -427,7 +429,7 @@ pub fn spawn_audio_player(
                             }
 
                             let src_rate =
-                                (crate::tts_kokoro::SAMPLE_RATE as f32 * speed).round() as usize;
+                                (SILERO_SAMPLE_RATE as f32 * speed).round() as usize;
                             let out = if src_rate != device_rate {
                                 crate::audio::resample_audio(&samples, src_rate, device_rate)
                             } else {

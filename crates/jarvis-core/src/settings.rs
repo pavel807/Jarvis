@@ -38,7 +38,7 @@ pub struct Settings {
     pub llm_max_tokens: usize,
 
     // --- TTS ---
-    /// Голос kokoro-ru: dima | sveta | masha.
+    /// Голос Silero v5: ru_eduard | ru_dmitriy | ru_alexandr | ru_bogdan | ... (29 голосов).
     pub tts_voice: String,
     /// Скорость речи: 1.0 — естественно, меньше — медленнее.
     pub tts_speed: f32,
@@ -64,7 +64,7 @@ impl Default for Settings {
             llm_normalize: true,
             llm_temperature: 0.6,
             llm_max_tokens: 256,
-            tts_voice: "dima".to_string(),
+            tts_voice: "ru_eduard".to_string(),
             tts_speed: 1.0,
             ack_before_llm: false,
         }

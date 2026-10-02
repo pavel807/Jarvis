@@ -12,6 +12,7 @@ pub mod settings;
 pub mod stress;
 pub mod stt;
 pub mod text;
+pub mod tts_silero;
 pub mod tts;
 pub mod tts_kokoro;
 pub mod wake;
