@@ -5,6 +5,8 @@
 /resources/tts_cache/
 .DS_Store
 .playwright-mcp/
+.mimosa/
+.claude/
 # Tauri / frontend
 /app/node_modules/
 /app/dist/
