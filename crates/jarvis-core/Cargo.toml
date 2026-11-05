@@ -10,7 +10,7 @@ hf-hub.workspace = true
 hound.workspace = true
 rand.workspace = true
 rustpotter.workspace = true
-transcribe-rs.workspace = true
+speakrs.workspace = true
 serde.workspace = true
 toml.workspace = true
 urlencoding.workspace = true
@@ -19,13 +19,45 @@ candle-core.workspace = true
 candle-nn.workspace = true
 tokenizers.workspace = true
 serde_json.workspace = true
-# TTS: Piper и Kokoro-ru на ONNX Runtime (общий с transcribe-rs);
-# espeak-ng — чистый Rust-порт (фонемы и словари ru+en встроены)
-ort = "2.0.0-rc.12"
-espeak-ng = { version = "0.2", default-features = false, features = ["bundled-data-ru", "bundled-data-en"] }
 flate2 = "1"
 ureq.workspace = true
 regex.workspace = true
+
+# macOS: AppleScript прямо в процессе приложения (NSAppleScript), а не через
+# порождение osascript. Так запрос разрешения на автоматизацию приходит от
+# самого Джарвиса — «Джарвис хочет управлять Музыкой» — и его можно выдать
+# один раз, вместо поиска нужного пункта в Системных настройках.
+[target.'cfg(target_os = "macos")'.dependencies]
+# Metal-бэкенд candle — только macOS: на Linux и Windows считаем на CPU.
+# Записи ниже дополняют features базовых зависимостей (см. [dependencies]).
+candle-core = { workspace = true, features = ["metal"] }
+candle-nn = { workspace = true, features = ["metal"] }
+# objc2 — AppleScript в процессе; block2 — блок-обработчик запроса доступа
+# к микрофону (AVFoundation). В objc2 0.6 блоки вынесены в отдельный крейт.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSDictionary",
+    "NSAppleScript",
+    "NSAppleEventDescriptor",
+    "NSThread",
+] }
+# Uzu (Mirai) — второй LLM-бэкенд на Metal, только Apple Silicon.
+# Ядро — чистый Rust (MIT), модели качаются из каталога Mirai в ~/.cache/mirai.
+# Рев запинен на релиз 0.6.3.
+#
+# capability-grammar ВЫКЛЮЧЕН: он тянет xgrammar-rs с branch=main форка
+# trymirai, и после релиза uzu форк уехал вперёд, сломав сборку grammar-модуля
+# (12 ошибок компиляции). Когда trymirai запинит xgrammar-rs по rev — вернуть
+# фичу и Grammar::JsonSchema в uzu_backend (форсирование tool-вызова).
+uzu = { git = "https://github.com/trymirai/uzu", rev = "d76d468a1898cacc9c4920accf8f5ff099967107", default-features = false, features = [
+    "backend-cpu",
+    "backend-metal",
+] }
+# Прямая зависимость для обёртки uzu_backend: свой multi-thread runtime
+# (Engine uzu требует tokio-контекст) и таймауты на сетевые операции.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
 tempfile = "3"

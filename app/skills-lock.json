@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "shader-for-interfaces": {
+      "source": "v2space-labs/shader-for-interfaces",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "45c11a68cf6a5c9385676aa696a56f1433125a596b71d450b3ad86d37dcfa2a1"
+    },
+    "webgpu-threejs-tsl": {
+      "source": "dgreenheck/webgpu-claude-skill",
+      "sourceType": "github",
+      "skillPath": "skills/webgpu-threejs-tsl/SKILL.md",
+      "computedHash": "7170c3168c86fb5202fae1669701a73ee3efa1d410a5a654bf15ecf11ada71d7"
+    }
+  }
+}

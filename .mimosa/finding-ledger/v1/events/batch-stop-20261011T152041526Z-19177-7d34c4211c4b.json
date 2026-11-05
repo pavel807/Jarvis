@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261011T152041526Z-19177-7d34c4211c4b",
+  "runId": "20261011T152041526Z-19177-7d34c4211c4b",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "aff2914f69e4b134971800fa6ee23995ef235b1c",
+  "diffHash": "c0705d3be576d871040e5c21296b75be63903325b31b6dc5e9c9342ec23f6d4d",
+  "rulesVersion": "unavailable",
+  "sessionHash": "9b16b7674363913b6bb829a23606f7792747860fdbee69429e6a8d6716504323",
+  "reportRef": ".mimosa/reports/task-review-sess_f4d9521f-bd6b-4ffd-91a9-c40430846317-20261011T152041526Z-19177-7d34c4211c4b.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [
+    {
+      "file": "crates/jarvis-core/src/audio.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "crates/jarvis-core/examples/mic_check.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-10-11T15:20:41.714Z"
+}

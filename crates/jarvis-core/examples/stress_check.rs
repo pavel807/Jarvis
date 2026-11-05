@@ -54,7 +54,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ok = 0usize;
     let mut bad: Vec<String> = Vec::new();
 
-    println!("{:<18} {:>8} {:>8}  произношение", "слово", "ожидал", "получил");
+    println!(
+        "{:<18} {:>8} {:>8}  произношение",
+        "слово", "ожидал", "получил"
+    );
     println!("{}", "-".repeat(56));
     for (word, expected, spoken) in CASES {
         let got = stress.stressed_vowel_ordinal(word);
@@ -76,7 +79,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let total = CASES.len();
-    println!("\nТочность: {ok}/{total} = {:.1}%", 100.0 * ok as f64 / total as f64);
+    println!(
+        "\nТочность: {ok}/{total} = {:.1}%",
+        100.0 * ok as f64 / total as f64
+    );
     if !bad.is_empty() {
         println!("\nОшибки:");
         for b in &bad {

@@ -1,0 +1,115 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261011T142312549Z-98384-caf23c68c9d3",
+  "runId": "20261011T142312549Z-98384-caf23c68c9d3",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "aff2914f69e4b134971800fa6ee23995ef235b1c",
+  "diffHash": "2d9d137f9f2e926895d4a5fe910b95b608c6ce648d357537845d31c3b6de5882",
+  "rulesVersion": "unavailable",
+  "sessionHash": "9b16b7674363913b6bb829a23606f7792747860fdbee69429e6a8d6716504323",
+  "reportRef": ".mimosa/reports/task-review-sess_f4d9521f-bd6b-4ffd-91a9-c40430846317-20261011T142312549Z-98384-caf23c68c9d3.json",
+  "events": [
+    {
+      "eventId": "hook-97d4f96f2798c9a619531693cb4967a3",
+      "findingId": "mimosa-6a234a4be2b43d074c102102",
+      "type": "finding_observed",
+      "at": "2026-10-11T13:47:44.333Z",
+      "identity": {
+        "projectRelativeFile": "crates/jarvis-core/src/llm/candle_backend.rs",
+        "ruleId": "security",
+        "codeEvidenceHash": "89350ac627bfd2ef8a4e7af67dc9a1d60281a524ebba832d01a59711501b8681",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 340,
+      "endLine": 340,
+      "reasonCode": "advisory",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "89350ac627bfd2ef8a4e7af67dc9a1d60281a524ebba832d01a59711501b8681"
+      },
+      "sequence": 0
+    },
+    {
+      "eventId": "hook-a8211f5ff31a7e6666f47dee727de714",
+      "findingId": "mimosa-6a234a4be2b43d074c102102",
+      "type": "finding_observed",
+      "at": "2026-10-11T14:23:12.549Z",
+      "identity": {
+        "projectRelativeFile": "crates/jarvis-core/src/llm/candle_backend.rs",
+        "ruleId": "security",
+        "codeEvidenceHash": "89350ac627bfd2ef8a4e7af67dc9a1d60281a524ebba832d01a59711501b8681",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 340,
+      "endLine": 340,
+      "reasonCode": "observe",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "89350ac627bfd2ef8a4e7af67dc9a1d60281a524ebba832d01a59711501b8681"
+      },
+      "sequence": 1
+    }
+  ],
+  "observedFindingIds": [
+    "mimosa-6a234a4be2b43d074c102102"
+  ],
+  "verifiedFiles": [
+    {
+      "file": "crates/jarvis-core/src/llm/streaming.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "crates/jarvis-core/src/llm/candle_backend.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "crates/jarvis-core/src/llm/uzu_backend.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "crates/jarvis-core/src/llm/mod.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "crates/jarvis-core/src/llm/config.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "crates/jarvis-core/src/settings.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "app/src/store.ts",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "crates/jarvis-core/examples/llm_smoke.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-10-11T14:23:12.743Z"
+}

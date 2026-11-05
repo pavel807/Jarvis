@@ -1,26 +1,26 @@
 //! Нейросетевая расстановка ударений для русского (ядро RUAccent,
-//! Apache-2.0; ONNX-модели из TigreGotico/stressonnx-models).
+//! Apache-2.0; модели из TigreGotico/stressonnx-models и ruaccent/accentuator).
 //!
 //! «Интеллектуальная функция» перед фонемизацией:
 //! 1. словарь е→ё (85,5 тыс. слов) — «еще» → «ещё» (ё всегда ударная);
 //! 2. словарь ударений (110,8 тыс. слов) — «аб+а» → ударная гласная;
-//! 3. для незнакомых слов — char-level RoFormer ONNX (0,8 МБ) предсказывает
-//!    ударную гласную.
+//! 3. для незнакомых слов — char-level RoFormer (0,5 млн параметров)
+//!    предсказывает ударную гласную.
 //!
-//! Результат — порядковый номер ударной гласной слова; движок kokoro
-//! ставит по нему знак ˈ в IPA и редуцирует безударные гласные.
-//! Контекстные омографы (замок/мука) требуют модель на 342 МБ — не
-//! включены, такие слова остаются на совести espeak.
+//! Результат — порядковый номер ударной гласной слова, по нему движок
+//! ставит знак «+» перед ударной гласной.
+//!
+//! Инференс — на candle (`crate::nn::roformer`): веса де-квантованы из ONNX
+//! скриптом `scripts/export_stress_models.py`. Контекстные омографы
+//! (замок/стоит/дела) разбирает отдельный модуль `crate::omograph`.
 
+use crate::nn::roformer::{RoFormer, RoFormerConfig};
 use anyhow::{Context, Result};
-use ort::session::{Session, SessionInputs, SessionInputValue};
-use ort::value::{Tensor, Value};
+use candle_core::Device;
 use serde::Deserialize;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 /// Гласные русского текста (для подсчёта порядкового номера).
 const RU_VOWELS: &str = "аеёиоуыэюя";
@@ -40,10 +40,6 @@ const STRESS_OVERRIDES: &[(&str, &str)] = &[
     ("такое", "так+ое"),
 ];
 
-
-/// Гласные в IPA-выходе espeak (после которого расставляем ˈ).
-pub const IPA_VOWELS: &str = "aeiouyəɐɔɪʊɛɨɵ";
-
 const UNK_ID: i64 = 1;
 const BOS_ID: i64 = 2;
 const EOS_ID: i64 = 3;
@@ -58,7 +54,7 @@ struct AccentConfig {
 }
 
 pub struct RuStress {
-    session: Mutex<Session>,
+    model: RoFormer,
     char_vocab: HashMap<char, i64>,
     id2label: HashMap<String, String>,
     /// Словарь ударений (110 тыс. слов) — первый эшелон, точный.
@@ -71,11 +67,18 @@ fn ensure_files() -> Result<PathBuf> {
     let dir = crate::paths::models_dir().join("stress-ru");
     std::fs::create_dir_all(&dir)?;
 
+    // Словари и алфавит нужны всегда.
     let files = [
-        ("ru_ruaccent/nn_accent/model.onnx", "accent.onnx"),
         ("ru_ruaccent/nn_accent/vocab.txt", "vocab.txt"),
         ("ru_ruaccent/nn_accent/config.json", "config.json"),
-        ("ru_ruaccent/dictionary/yo_words.json.gz", "yo_words.json.gz"),
+        (
+            "ru_ruaccent/dictionary/accents_nn.json.gz",
+            "accents_nn.json.gz",
+        ),
+        (
+            "ru_ruaccent/dictionary/yo_words.json.gz",
+            "yo_words.json.gz",
+        ),
     ];
 
     let client = hf_hub::HFClientSync::new().context("Не удалось создать HuggingFace-клиент")?;
@@ -96,6 +99,22 @@ fn ensure_files() -> Result<PathBuf> {
             .with_context(|| format!("Не удалось сохранить {local_name}"))?;
     }
 
+    // Веса для candle. ONNX нужен только чтобы собрать их скриптом
+    // (int8 -> f32); когда safetensors уже есть, ONNX не скачиваем.
+    let weights = dir.join("accent.safetensors");
+    if !weights.exists() {
+        let onnx = dir.join("accent.onnx");
+        if !onnx.exists() {
+            println!("📥 Загрузка ударителя (accent.onnx)...");
+            let downloaded = repo
+                .download_file()
+                .filename("ru_ruaccent/nn_accent/model.onnx".to_string())
+                .send()
+                .context("Не удалось скачать accent.onnx")?;
+            std::fs::copy(&downloaded, &onnx).context("Не удалось сохранить accent.onnx")?;
+        }
+        crate::nn::ensure_safetensors(&weights)?;
+    }
     Ok(dir)
 }
 
@@ -129,20 +148,22 @@ impl RuStress {
         let accents = read_gzip_json(&dir.join("accents_nn.json.gz"))?;
         let yo_words = read_gzip_json(&dir.join("yo_words.json.gz"))?;
 
-        let session = Session::builder()
-            .context("Не удалось создать ONNX Session")?
-            .commit_from_file(dir.join("accent.onnx"))
-            .context("Не удалось загрузить модель ударений")?;
+        let model = RoFormer::load(
+            &dir.join("accent.safetensors"),
+            RoFormerConfig::default(),
+            &Device::Cpu,
+        )
+        .context("Не удалось загрузить модель ударений")?;
 
         println!(
-            "✅ Ударитель готов (словарь {}, ё {}, нейросеть OOV) за {:.1?}",
+            "✅ Ударитель готов (словарь {}, ё {}, нейросеть OOV, candle) за {:.1?}",
             accents.len(),
             yo_words.len(),
             started.elapsed()
         );
 
         Ok(Self {
-            session: Mutex::new(session),
+            model,
             char_vocab,
             id2label: config.id2label,
             accents,
@@ -150,7 +171,7 @@ impl RuStress {
         })
     }
 
-    /// Восстанавливает ё по словарю (ё всегда ударная, espeak знает её).
+    /// Восстанавливает ё по словарю (ё всегда ударная).
     pub fn yo_restore(&self, word: &str) -> String {
         if !word.contains('е') && !word.contains('Е') {
             return word.to_string();
@@ -177,10 +198,22 @@ impl RuStress {
         }
     }
 
+    /// Токены нейросети для слова (отладка и сверка реализаций).
+    pub fn debug_ids(&self, word: &str) -> Vec<i64> {
+        let lower = word.to_lowercase();
+        let mut ids: Vec<i64> = Vec::with_capacity(lower.chars().count() + 2);
+        ids.push(BOS_ID);
+        for c in lower.chars() {
+            ids.push(self.char_vocab.get(&c).copied().unwrap_or(UNK_ID));
+        }
+        ids.push(EOS_ID);
+        ids
+    }
+
     /// Порядковый номер ударной гласной слова (1-based). Эшелоны:
     /// переопределения -> словарь (110 тыс., точный) -> нейросеть (любое
     /// новое слово). ё всегда ударная; служебные слова не акцентируем.
-    /// None — ни один эшелон не сработал, оставляем ударение espeak.
+    /// None — ни один эшелон не сработал, ударение не ставим.
     pub fn stressed_vowel_ordinal(&self, word: &str) -> Option<usize> {
         let lower = word.to_lowercase();
 
@@ -216,12 +249,12 @@ impl RuStress {
         for (i, c) in stressed.char_indices() {
             if c == '+' {
                 let after: String = stressed[i + 1..].to_string();
-                if let Some(first) = after.chars().next() {
-                    if RU_VOWELS.contains(first) {
-                        let before = &stressed[..i];
-                        let idx = before.chars().filter(|c| RU_VOWELS.contains(*c)).count();
-                        return Some(idx + 1);
-                    }
+                if let Some(first) = after.chars().next()
+                    && RU_VOWELS.contains(first)
+                {
+                    let before = &stressed[..i];
+                    let idx = before.chars().filter(|c| RU_VOWELS.contains(*c)).count();
+                    return Some(idx + 1);
                 }
                 pluses += 1;
                 if pluses > 1 {
@@ -239,42 +272,22 @@ impl RuStress {
             return None;
         }
 
-        let mut ids: Vec<i64> = Vec::with_capacity(chars.len() + 2);
-        ids.push(BOS_ID);
-        for c in &chars {
-            ids.push(self.char_vocab.get(c).copied().unwrap_or(UNK_ID));
-        }
-        ids.push(EOS_ID);
-        let n = ids.len();
+        let ids: Vec<u32> = self
+            .debug_ids(lower)
+            .into_iter()
+            .map(|v| v as u32)
+            .collect();
+        let token_types = vec![0u32; ids.len()];
+        let attention = vec![1u32; ids.len()];
+        let logits = self.model.logits(&ids, &token_types, &attention).ok()?;
 
-        let input_ids = Tensor::from_array(([1usize, n], ids.clone())).ok()?;
-        let attn = Tensor::from_array(([1usize, n], vec![1i64; n])).ok()?;
-        let tti = Tensor::from_array(([1usize, n], vec![0i64; n])).ok()?;
-
-        let inputs: Vec<(Cow<'static, str>, SessionInputValue<'static>)> = vec![
-            (
-                Cow::Borrowed("input_ids"),
-                SessionInputValue::Owned(Value::from(input_ids)),
-            ),
-            (
-                Cow::Borrowed("attention_mask"),
-                SessionInputValue::Owned(Value::from(attn)),
-            ),
-            (
-                Cow::Borrowed("token_type_ids"),
-                SessionInputValue::Owned(Value::from(tti)),
-            ),
-        ];
-
-        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
-        let outputs = session.run(SessionInputs::from(inputs)).ok()?;
-        let (shape, logits) = outputs[0].try_extract_tensor::<f32>().ok()?;
-        // [1, n, num_labels]
-        let num_labels = *shape.last()? as usize;
-        let flat: &[f32] = logits;
-
+        // Берём гласную с максимальной вероятностью STRESS_PRIMARY среди
+        // всех позиций слова (а не первую прошедшую порог): у «окно» модель
+        // даёт близкие вероятности на обоих «о», и выбор первого попавшегося
+        // зависит от шума квантования.
+        let mut best: Option<(usize, f32)> = None;
         for i in 1..=chars.len() {
-            let row = &flat[i * num_labels..(i + 1) * num_labels];
+            let row: &[f32] = logits.get(i)?;
             let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let exps: Vec<f32> = row.iter().map(|v| (v - max).exp()).collect();
             let sum: f32 = exps.iter().sum();
@@ -291,14 +304,24 @@ impl RuStress {
             if label != "STRESS_PRIMARY" {
                 continue;
             }
-            // Позиция i в логитах соответствует символу chars[i - 1];
-            // порядковый номер ударной гласной = гласные в chars[..i].
+            // Позиция i в логитах соответствует символу chars[i - 1].
             if !RU_VOWELS.contains(chars[i - 1]) {
                 continue;
             }
-            return Some(lower.chars().take(i).filter(|c| RU_VOWELS.contains(*c)).count());
+            if best.is_none_or(|(_, p)| confidence > p) {
+                best = Some((i, confidence));
+            }
         }
-        None
+
+        // Порядковый номер ударной гласной = гласные в chars[..pos].
+        let (pos, _) = best?;
+        Some(
+            lower
+                .chars()
+                .take(pos)
+                .filter(|c| RU_VOWELS.contains(*c))
+                .count(),
+        )
     }
 }
 
@@ -320,7 +343,6 @@ fn vowel_ordinal(word: &str, pred: impl Fn(char) -> bool) -> Option<usize> {
 mod tests {
     use super::*;
 
-
     #[test]
     fn plus_ordinal() {
         assert_eq!(RuStress::plus_notation_ordinal("аб+а"), Some(2));
@@ -335,6 +357,4 @@ mod tests {
         assert_eq!(vowel_ordinal("ещё", |c| c == 'ё'), Some(2));
         assert_eq!(vowel_ordinal("въезд", |c| c == 'ё'), None);
     }
-
-
 }

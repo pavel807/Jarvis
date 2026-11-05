@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "J.A.R.V.I.S",
-        "width": 400,
-        "height": 820,
-        "minWidth": 340,
-        "minHeight": 600,
+        "width": 520,
+        "height": 920,
+        "minWidth": 420,
+        "minHeight": 720,
         "resizable": true,
         "visible": true
       }
@@ -28,7 +28,13 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
     "macOS": {
       "infoPlist": "./Info.plist"
     }

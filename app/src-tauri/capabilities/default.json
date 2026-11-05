@@ -1,10 +1,11 @@
 {
   "identifier": "default",
   "description": "Основные разрешения окна Jarvis",
-  "windows": ["main"],
+  "windows": ["main", "utils"],
   "permissions": [
     "core:default",
     "core:event:default",
+    "notification:default",
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled"

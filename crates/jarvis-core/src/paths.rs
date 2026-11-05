@@ -33,6 +33,11 @@ pub fn settings_file() -> PathBuf {
     base_dir().join("settings.toml")
 }
 
+/// Задачник: обычный markdown с чекбоксами, его можно править руками.
+pub fn tasks_file() -> PathBuf {
+    base_dir().join("tasks.md")
+}
+
 pub fn tts_cache_dir() -> PathBuf {
     resources_dir().join("tts_cache")
 }

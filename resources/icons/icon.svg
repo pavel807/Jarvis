@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="42%" r="72%">
+      <stop offset="0%" stop-color="#10202c"/>
+      <stop offset="60%" stop-color="#070d12"/>
+      <stop offset="100%" stop-color="#03070a"/>
+    </radialGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7f95a6"/>
+      <stop offset="45%" stop-color="#2b3a46"/>
+      <stop offset="100%" stop-color="#425665"/>
+    </linearGradient>
+    <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#bdf2ff"/>
+      <stop offset="55%" stop-color="#4bcbff"/>
+      <stop offset="100%" stop-color="#0b4a68"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="229" fill="url(#bg)"/>
+
+  <!-- Колодец под ядром -->
+  <path d="M533.1,641.1 490.9,641.1 389.7,465.7 410.8,429.2 613.2,429.2 634.3,465.7 Z" fill="#0b4a68" fill-opacity="0.35"/>
+  <path d="M549.9,744.0 474.1,744.0 292.1,428.8 330.0,363.2 694.0,363.2 731.9,428.8 Z" fill="none" stroke="#4bcbff" stroke-width="4.7"
+        stroke-opacity="0.28"/>
+
+  <!-- Корпус -->
+  <path d="M562.2,819.3 461.8,819.3 220.8,401.8 271.0,314.9 753.0,314.9 803.2,401.8 Z M742.1,425.0 702.4,356.3 321.6,356.3 281.9,425.0 472.3,754.8 551.7,754.8 Z" fill="url(#metal)" stroke="#0d161d" stroke-width="7.9"/>
+  <path d="M562.2,819.3 461.8,819.3 220.8,401.8 271.0,314.9 753.0,314.9 803.2,401.8 Z M742.1,425.0 702.4,356.3 321.6,356.3 281.9,425.0 472.3,754.8 551.7,754.8 Z" fill="none" stroke="#4bcbff" stroke-width="6.3"
+        stroke-opacity="0.5"/>
+
+  <!-- Внутреннее кольцо и канал -->
+  <path d="M540.6,687.1 483.4,687.1 346.0,449.2 374.6,399.6 649.4,399.6 678.0,449.2 Z M640.1,463.5 618.0,425.3 406.0,425.3 383.9,463.5 489.9,647.2 534.1,647.2 Z" fill="#070d12" fill-opacity="0.72" stroke="#2b3a46"
+        stroke-width="7.1"/>
+  <path d="M537.4,667.2 486.6,667.2 364.9,456.4 390.3,412.5 633.7,412.5 659.1,456.4 Z" fill="none" stroke="#4bcbff" stroke-width="26.8" stroke-opacity="0.1" stroke-linejoin="round"/><path d="M537.4,667.2 486.6,667.2 364.9,456.4 390.3,412.5 633.7,412.5 659.1,456.4 Z" fill="none" stroke="#4bcbff" stroke-width="15.0" stroke-opacity="0.22" stroke-linejoin="round"/><path d="M537.4,667.2 486.6,667.2 364.9,456.4 390.3,412.5 633.7,412.5 659.1,456.4 Z" fill="none" stroke="#4bcbff" stroke-width="7.9" stroke-opacity="0.85" stroke-linejoin="round"/>
+
+  <!-- Излучатели по серединам длинных рёбер -->
+  <line x1="341.3" y1="610.6" x2="395.9" y2="579.0" stroke="#7f95a6" stroke-width="21.7" stroke-linecap="round"/><line x1="341.3" y1="610.6" x2="395.9" y2="579.0" stroke="#bdf2ff" stroke-width="7.1" stroke-linecap="round" stroke-opacity="0.9"/><circle cx="395.9" cy="579.0" r="13.8" fill="#4bcbff" fill-opacity="0.85"/><line x1="512.0" y1="314.9" x2="512.0" y2="378.0" stroke="#7f95a6" stroke-width="21.7" stroke-linecap="round"/><line x1="512.0" y1="314.9" x2="512.0" y2="378.0" stroke="#bdf2ff" stroke-width="7.1" stroke-linecap="round" stroke-opacity="0.9"/><circle cx="512.0" cy="378.0" r="13.8" fill="#4bcbff" fill-opacity="0.85"/><line x1="682.7" y1="610.6" x2="628.1" y2="579.0" stroke="#7f95a6" stroke-width="21.7" stroke-linecap="round"/><line x1="682.7" y1="610.6" x2="628.1" y2="579.0" stroke="#bdf2ff" stroke-width="7.1" stroke-linecap="round" stroke-opacity="0.9"/><circle cx="628.1" cy="579.0" r="13.8" fill="#4bcbff" fill-opacity="0.85"/>
+
+  <!-- Ядро -->
+  <circle cx="512.0" cy="512.0" r="194.6" fill="#4bcbff" fill-opacity="0.10"/>
+  <circle cx="512.0" cy="512.0" r="134.3" fill="#4bcbff" fill-opacity="0.16"/>
+  <path d="M512.0,604.6 431.8,558.3 431.8,465.7 512.0,419.4 592.2,465.7 592.2,558.3 Z" fill="url(#coreGlow)" stroke="#bdf2ff" stroke-width="8.7"
+        stroke-opacity="0.9" stroke-linejoin="round"/>
+  <circle cx="512.0" cy="512.0" r="38.9" fill="#bdf2ff"/>
+</svg>

@@ -13,14 +13,10 @@ pub fn apply_repeat_penalty(logits: &mut [f32], penalty: f32, context: &[u32], w
     let start = context.len().saturating_sub(window);
     let mut seen = std::collections::HashSet::with_capacity(context.len() - start);
     for &tok in &context[start..] {
-        if seen.insert(tok) {
-            if let Some(l) = logits.get_mut(tok as usize) {
-                *l = if *l > 0.0 {
-                    *l / penalty
-                } else {
-                    *l * penalty
-                };
-            }
+        if seen.insert(tok)
+            && let Some(l) = logits.get_mut(tok as usize)
+        {
+            *l = if *l > 0.0 { *l / penalty } else { *l * penalty };
         }
     }
 }
@@ -40,12 +36,7 @@ pub fn argmax(logits: &[f32]) -> u32 {
 /// миллисекунды на каждый токен, поэтому сначала отбираем top-k за O(n)
 /// (`select_nth_unstable`), и только в нём работаем с softmax/top-p.
 /// Масса хвоста за пределами top-k при рабочих температурах пренебрежимо мала.
-pub fn sample_top_p(
-    logits: &[f32],
-    temperature: f64,
-    top_p: f64,
-    rng: &mut impl rand::Rng,
-) -> u32 {
+pub fn sample_top_p(logits: &[f32], temperature: f64, top_p: f64, rng: &mut impl rand::Rng) -> u32 {
     if temperature <= 0.0 {
         return argmax(logits);
     }
@@ -65,10 +56,7 @@ pub fn sample_top_p(
     let top = &idx[..k];
 
     // softmax с температурой (в f64 для стабильности), только по top-k.
-    let max = logits
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max) as f64;
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
     let mut probs: Vec<f64> = Vec::with_capacity(k);
     let mut sum = 0.0;
     for &i in top {

@@ -14,6 +14,10 @@ tauri-build = { version = "2", features = [] }
 jarvis-core = { path = "../../crates/jarvis-core" }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
+tauri-plugin-notification = "2"
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+# Кнопка «Открыть Системные настройки» в меню доступа к микрофону
+# (x-apple.systempreferences:…).
+open.workspace = true

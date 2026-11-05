@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261011T161220060Z-24538-357d0ffdaca2",
+  "runId": "20261011T161220060Z-24538-357d0ffdaca2",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "aff2914f69e4b134971800fa6ee23995ef235b1c",
+  "diffHash": "741e2622421b0c0797cdeb1d8934d17599400aa3b3e6840ee797fe01a3745274",
+  "rulesVersion": "unavailable",
+  "sessionHash": "9b16b7674363913b6bb829a23606f7792747860fdbee69429e6a8d6716504323",
+  "reportRef": ".mimosa/reports/task-review-sess_f4d9521f-bd6b-4ffd-91a9-c40430846317-20261011T161220060Z-24538-357d0ffdaca2.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [
+    {
+      "file": "crates/jarvis-core/src/audio.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "app/src-tauri/src/lib.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-10-11T16:12:20.260Z"
+}

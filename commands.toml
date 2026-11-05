@@ -4,6 +4,8 @@ reply_error = "resources/audio/reply1.wav"
 reply_unknown = "resources/audio/reply1.wav"
 reply_ack = "resources/audio/reply1.wav"
 fuzzy_min_score = 0.72
+ringtone_timer = "resources/audio/ringtone_timer.wav"
+ringtone_alarm = "resources/audio/ringtone_alarm.wav"
 
 # --- Поиск: сначала веб-поиск с суммаризацией через LLM, затем открытие Гугла ---
 
@@ -180,6 +182,25 @@ action_type = "url"
 action_value = "https://music.yandex.ru"
 
 [[commands]]
+name = "yandex_maps"
+trigger_words = [
+    "яндекс карты"
+]
+action_type = "url"
+action_value = "https://yandex.ru/maps"
+
+[[commands]]
+name = "sdek"
+trigger_words = [
+    "сдек шоп",
+    "сдэк шоп",
+    "сдек",
+    "сдэк"
+]
+action_type = "url"
+action_value = "https://cdek.shopping"
+
+[[commands]]
 name = "kinopoisk"
 trigger_words = [
     "запусти кинопоиск",
@@ -198,6 +219,19 @@ trigger_words = [
 ]
 action_type = "url"
 action_value = "https://sdo.1580.ru/course/view.php?id=188"
+
+[[commands]]
+name = "меш"
+trigger_words = [
+    "меш",
+    "мэш",
+    "дневник",
+    "электронный дневник",
+    "мой дневник",
+    "оценки"
+]
+action_type = "url"
+action_value = "https://dnevnik.mos.ru"
 
 # --- Системные ---
 
@@ -234,3 +268,16 @@ trigger_words = [
 ]
 action_type = "exit"
 action_value = ""
+
+# --- Задачник: быстрый доступ к файлу со списком задач ---
+
+[[commands]]
+name = "Открыть задачник"
+trigger_words = [
+    "задачник",
+    "открыть задачник",
+    "открой задачник",
+    "покажи задачник",
+]
+action_type = "path"
+action_value = "tasks.md"

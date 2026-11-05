@@ -1,0 +1,64 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261011T211738559Z-72408-6dba5e8da614",
+  "runId": "20261011T211738559Z-72408-6dba5e8da614",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "aff2914f69e4b134971800fa6ee23995ef235b1c",
+  "diffHash": "be33ff9a50c02ba51c279d1b8d0cdb447b81b27fee68045ddd921a626917994b",
+  "rulesVersion": "unavailable",
+  "sessionHash": "9b16b7674363913b6bb829a23606f7792747860fdbee69429e6a8d6716504323",
+  "reportRef": ".mimosa/reports/task-review-sess_f4d9521f-bd6b-4ffd-91a9-c40430846317-20261011T211738559Z-72408-6dba5e8da614.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [
+    {
+      "file": "app/src/main.ts",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "crates/jarvis-core/src/tools.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "crates/jarvis-core/src/llm/mod.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "crates/jarvis-core/src/router.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "crates/jarvis-core/src/text.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "crates/jarvis-core/src/timers.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "crates/jarvis-cli/src/main.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "app/src-tauri/src/lib.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-10-11T21:17:38.741Z"
+}

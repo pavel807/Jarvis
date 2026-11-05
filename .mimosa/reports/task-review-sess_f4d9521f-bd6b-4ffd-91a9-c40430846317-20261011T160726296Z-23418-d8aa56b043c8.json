@@ -1,0 +1,276 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20261011T160726296Z-23418-d8aa56b043c8",
+  "run_status": "completed",
+  "errors": [],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "complete",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": true,
+      "captured_files": 122,
+      "candidate_limit": 5000,
+      "truncated": false,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 0,
+      "compensated_target_count": 10
+    },
+    "change_tracking": {
+      "touched_observed": 8,
+      "touched_retained": 8,
+      "truncated": false,
+      "bash_mutation": true,
+      "bash_discovered": 10,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 10,
+      "selected_files": 10,
+      "limit": 20,
+      "truncated": false
+    },
+    "scanning": {
+      "required_files": 7,
+      "scanned_files": 7,
+      "skipped_files": 0,
+      "failed_files": 0,
+      "project_checks_required": 1,
+      "project_checks_completed": 1
+    },
+    "notification": {
+      "eligible_findings": 0,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": false
+    },
+    "reason_counts": {},
+    "reasons": [],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-10-11T16:07:26.296Z",
+  "session_id": "sess_f4d9521f-bd6b-4ffd-91a9-c40430846317",
+  "target": ".",
+  "revision": "aff2914f69e4b134971800fa6ee23995ef235b1c",
+  "rules_version": "unavailable",
+  "diff_hash": "eea76ed29e4543dce2560c8b591a10655e56adc48c3f032dd9e62ffd5e03c647",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 10,
+    "changed_files": [
+      {
+        "file": "app/src-tauri/Cargo.toml",
+        "ranges": [
+          {
+            "start": 20,
+            "end": 22
+          }
+        ],
+        "before_hash": "6e7e20e447904ab598dbc53709f72633300ca90501f63d7eb18e0f734b65e0ae",
+        "after_hash": "e0c6a8ce03f34694c4630fb04a0f46c9ebc41c8316edefe11bc661defa268a80"
+      },
+      {
+        "file": "app/src-tauri/src/lib.rs",
+        "ranges": [
+          {
+            "start": 372,
+            "end": 398
+          },
+          {
+            "start": 799,
+            "end": 801
+          }
+        ],
+        "before_hash": "c896f5f6e2bed3f32a575a86468581328b8ce5432a2ad52ffb4ee377051b9f8f",
+        "after_hash": "717e9bc6add6c50c0bb5645f1788f249814ffe18ea47ae9477c6f84e7b4c1eca"
+      },
+      {
+        "file": "app/src/store.ts",
+        "ranges": [
+          {
+            "start": 119,
+            "end": 123
+          },
+          {
+            "start": 289,
+            "end": 292
+          }
+        ],
+        "before_hash": "1853b91246abfd2c6e9cce5af6a5af1dd68354f6688b1c86d3ce3c8f695ab0cc",
+        "after_hash": "8d369e37b32dac737ba60ad622a730c6dafc4a8985206ad0eedae46750a23842"
+      },
+      {
+        "file": "Cargo.lock",
+        "ranges": [
+          {
+            "start": 3499,
+            "end": 3499
+          },
+          {
+            "start": 3520,
+            "end": 3520
+          }
+        ],
+        "before_hash": "d3184e5ca7c662d72d98de8af349b6e36718bd7e149380396d6770580cdd64a6",
+        "after_hash": "f7e775b50510c70f06b6ad99024d835e244c86a9eb34f6c1048e4ba0081aab83"
+      },
+      {
+        "file": "crates/jarvis-cli/src/main.rs",
+        "ranges": [
+          {
+            "start": 77,
+            "end": 86
+          }
+        ],
+        "before_hash": "6dc1b3e069606c8641917122e759c888a88ec7cafcd078523135f56b763f214d",
+        "after_hash": "286980ccd2c958e094206f202be8f9c8bf2db875d90d7f7f5f80eed8c6ef9409"
+      },
+      {
+        "file": "crates/jarvis-core/Cargo.toml",
+        "ranges": [
+          {
+            "start": 31,
+            "end": 32
+          },
+          {
+            "start": 34,
+            "end": 34
+          }
+        ],
+        "before_hash": "534aab43f7204e88af392dbb559916c2c6acdbec02675997a5d4b8c9dd51a2e3",
+        "after_hash": "772de7e1922221829dd5c77378ca3ba5f2ea84c19b8cb17e0724df57cae1021f"
+      },
+      {
+        "file": "crates/jarvis-core/examples/mic_check.rs",
+        "ranges": [
+          {
+            "start": 8,
+            "end": 10
+          }
+        ],
+        "before_hash": "7b0d6e550a4698067e16b88b2f5f6b44bcff27b5d6c962d0ad4f5c349190261a",
+        "after_hash": "60cfb5268d92b95896300693ae7d43232e57d2067b6f1c00952a54d29438497e"
+      },
+      {
+        "file": "crates/jarvis-core/src/audio.rs",
+        "ranges": [
+          {
+            "start": 16,
+            "end": 17
+          },
+          {
+            "start": 24,
+            "end": 30
+          },
+          {
+            "start": 35,
+            "end": 37
+          },
+          {
+            "start": 39,
+            "end": 39
+          },
+          {
+            "start": 42,
+            "end": 70
+          },
+          {
+            "start": 72,
+            "end": 77
+          },
+          {
+            "start": 79,
+            "end": 109
+          },
+          {
+            "start": 128,
+            "end": 135
+          },
+          {
+            "start": 137,
+            "end": 137
+          },
+          {
+            "start": 144,
+            "end": 168
+          }
+        ],
+        "before_hash": "dfc5dc86c529a188f888db07caa6045220780b04f2cd104de71b78be03d991fc",
+        "after_hash": "1e179a73da7a67c396939b0c6bc6f042bd88e092eb75578fdce6719bddf80e3c"
+      },
+      {
+        "file": "crates/jarvis-core/src/engine.rs",
+        "ranges": [
+          {
+            "start": 122,
+            "end": 154
+          }
+        ],
+        "before_hash": "0fc3a4440710e957d276aacae1227a3ba8549020c0434cdc6b1e07d157e5f061",
+        "after_hash": "6eb858bfcc38521b84f40ab05c0011eb1ced2fe5aee5cf7bf4b0ee364d58fcc0"
+      },
+      {
+        "file": "crates/jarvis-core/src/events.rs",
+        "ranges": [
+          {
+            "start": 51,
+            "end": 55
+          }
+        ],
+        "before_hash": "4f7bf6fb9588f9c7b9440c03c5a204e5b3e2ea2b8df75636a89043fa9009c6a3",
+        "after_hash": "e17dac54957f51bc355855f23ee3ab8a5622a1ff3c46100cb62be76d74ba4d70"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-10-11T16:07:25.275Z",
+    "completed_at": "2026-10-11T16:07:26.296Z",
+    "duration_ms": 1021,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "complete",
+    "latencyMs": 1021,
+    "peakMemoryBytes": 202735616,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 7,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 0,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [],
+  "findings": [],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-sess_f4d9521f-bd6b-4ffd-91a9-c40430846317-20261011T160726296Z-23418-d8aa56b043c8.json",
+    "latest_report": ".mimosa/reports/task-review-sess_f4d9521f-bd6b-4ffd-91a9-c40430846317.json",
+    "history_summary": ".mimosa/history/run-20261011T160726296Z-23418-d8aa56b043c8.json"
+  }
+}

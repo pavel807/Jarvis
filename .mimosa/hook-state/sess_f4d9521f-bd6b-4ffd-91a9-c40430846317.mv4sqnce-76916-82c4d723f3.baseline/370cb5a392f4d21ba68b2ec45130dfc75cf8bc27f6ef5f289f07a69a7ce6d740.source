@@ -1,0 +1,8 @@
+[package]
+name = "jarvis-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+jarvis-core = { path = "../jarvis-core" }
+anyhow.workspace = true

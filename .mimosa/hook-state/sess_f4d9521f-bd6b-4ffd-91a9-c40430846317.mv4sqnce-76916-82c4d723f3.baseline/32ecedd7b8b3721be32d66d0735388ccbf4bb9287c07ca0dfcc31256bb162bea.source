@@ -1,0 +1,140 @@
+//! Хаб таймеров Джарвиса: голос ставит таймер — окно «Утилиты» тикает,
+//! по завершении Джарвис говорит и присылает системное уведомление.
+//!
+//! Таймеры живут в процессе Джарвиса (пользователь попросил встроенные
+//! утилиты вместо Напоминаний): закрытие приложения снимает таймеры —
+//! зато контроль, окно и отмена голосом полностью у ассистента.
+
+use crate::events::{EventTx, JarvisEvent};
+use crate::tts::AudioMessage;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone)]
+pub struct ActiveTimer {
+    pub id: u64,
+    pub label: String,
+    pub remaining_secs: u64,
+}
+
+struct Timer {
+    label: String,
+    total: u64,
+    started_at: Instant,
+}
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+static TIMERS: std::sync::OnceLock<Mutex<HashMap<u64, Timer>>> = std::sync::OnceLock::new();
+
+fn map() -> &'static Mutex<HashMap<u64, Timer>> {
+    TIMERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Ставит таймер: событие для окна «Утилиты» + поток-наблюдатель, который
+/// по истечении скажет голосом, пришлёт уведомление и уберёт запись.
+pub fn start(events: &EventTx, audio_tx: &Sender<AudioMessage>, label: &str, seconds: u64) -> u64 {
+    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+    map().lock().unwrap_or_else(|e| e.into_inner()).insert(
+        id,
+        Timer {
+            label: label.to_string(),
+            total: seconds,
+            started_at: Instant::now(),
+        },
+    );
+
+    let _ = events.send(JarvisEvent::TimerStarted {
+        id,
+        label: label.to_string(),
+        seconds,
+    });
+
+    let events = events.clone();
+    let audio_tx = audio_tx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(seconds));
+        let Some(timer) = map().lock().unwrap_or_else(|e| e.into_inner()).remove(&id) else {
+            return; // отменён
+        };
+        let _ = events.send(JarvisEvent::TimerFired {
+            id,
+            label: timer.label.clone(),
+            seconds: timer.total,
+        });
+        let speech = if timer.label.is_empty() {
+            "Время вышло!".to_string()
+        } else {
+            format!("Таймер «{}» — время вышло!", timer.label)
+        };
+        let _ = audio_tx.send(AudioMessage::SynthesizeAndPlay(speech));
+        notify_fired(&timer.label, timer.total);
+    });
+    id
+}
+
+/// Отмена: без id — последний поставленный.
+pub fn cancel(events: &EventTx, id: Option<u64>) -> Option<ActiveTimer> {
+    let mut m = map().lock().unwrap_or_else(|e| e.into_inner());
+    let target = id.or_else(|| m.keys().copied().max())?;
+    let timer = m.remove(&target)?;
+    drop(m);
+    let stopped = JarvisEvent::TimerStopped {
+        id: target,
+        label: timer.label.clone(),
+    };
+    let _ = events.send(stopped);
+    Some(ActiveTimer {
+        id: target,
+        label: timer.label,
+        remaining_secs: timer
+            .total
+            .saturating_sub(timer.started_at.elapsed().as_secs()),
+    })
+}
+
+/// Список активных с остатком (для окна).
+pub fn active() -> Vec<ActiveTimer> {
+    map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(id, t)| ActiveTimer {
+            id: *id,
+            label: t.label.clone(),
+            remaining_secs: t.total.saturating_sub(t.started_at.elapsed().as_secs()),
+        })
+        .collect()
+}
+
+/// Системное уведомление о срабатывании: таймер мог тикать в фоне
+/// при свёрнутом окне.
+fn notify_fired(label: &str, seconds: u64) {
+    #[cfg(target_os = "macos")]
+    {
+        let title = if label.is_empty() {
+            "Таймер".to_string()
+        } else {
+            format!("Таймер «{label}»")
+        };
+        let _ = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                &format!(
+                    "display notification \"{} истёк ({})\" with title \"{}\" sound name \"Glass\"",
+                    "Время вышло",
+                    crate::tools::humanize_seconds(seconds),
+                    title
+                ),
+            ])
+            .status();
+    }
+}
+
+/// Тестовый доступ: снять всё (не используется в проде).
+#[doc(hidden)]
+pub fn _clear_for_tests() {
+    map().lock().unwrap_or_else(|e| e.into_inner()).clear();
+}

@@ -1,0 +1,100 @@
+//! Шина событий движка: движок публикует, UI (Tauri) и CLI подписываются.
+
+use serde::Serialize;
+use std::sync::mpsc::Sender;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JarvisEvent {
+    StateChanged {
+        state: String,
+    },
+    WakeWordDetected {
+        name: String,
+        score: f32,
+    },
+    Transcript {
+        text: String,
+    },
+    CommandMatched {
+        name: String,
+    },
+    CommandNotFound {
+        text: String,
+    },
+    /// Джарвис начал выполнять действие (tool-вызов или команду).
+    ActionStarted {
+        tool: String,
+        summary: String,
+    },
+    /// Итог действия: честный статус и фраза, которую слышит пользователь.
+    ActionResult {
+        ok: bool,
+        summary: String,
+    },
+    /// Джарвис вернулся к незакрытой теме.
+    TopicResumed {
+        topic: String,
+    },
+    Reply {
+        text: String,
+    },
+    LlmChunk {
+        text: String,
+    },
+    LlmDone {
+        text: String,
+    },
+    LlmStatus {
+        status: String,
+    },
+    /// Доступ к микрофону: false — показать меню разрешения,
+    /// true — доступ получен (меню закрыть, микрофон подключается).
+    MicPermission {
+        granted: bool,
+    },
+    /// Таймер поставлен: окно «Утилиты» открывается и тикает.
+    TimerStarted {
+        id: u64,
+        label: String,
+        seconds: u64,
+    },
+    /// Таймер сработал: голос уже озвучил, окно мигает.
+    TimerFired {
+        id: u64,
+        label: String,
+        seconds: u64,
+    },
+    /// Таймер отменён («останови таймер» или кнопкой).
+    TimerStopped {
+        id: u64,
+        label: String,
+    },
+    /// Открыть окно утилит на вкладке: "timer" | "stopwatch" | "calendar".
+    OpenUtils {
+        tab: String,
+    },
+    TrainProgress {
+        epoch: usize,
+        total: usize,
+        loss: f64,
+    },
+    TrainDone {
+        path: String,
+    },
+    RecordSaved {
+        path: String,
+    },
+    AudioLevel {
+        level: f32,
+        source: String,
+    },
+    Error {
+        message: String,
+    },
+    Log {
+        message: String,
+    },
+}
+
+pub type EventTx = Sender<JarvisEvent>;

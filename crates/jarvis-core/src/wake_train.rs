@@ -8,8 +8,10 @@ use crate::audio::{calculate_rms, resample_audio};
 use crate::events::{EventTx, JarvisEvent};
 use crate::paths;
 use crate::tts::list_wav_samples;
-use anyhow::{bail, Context, Result};
-use rustpotter::{Rustpotter, RustpotterConfig, SampleFormat, WakewordRefBuildFromFiles, WakewordSave};
+use anyhow::{Context, Result, bail};
+use rustpotter::{
+    Rustpotter, RustpotterConfig, SampleFormat, WakewordRefBuildFromFiles, WakewordSave,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,7 +34,12 @@ pub fn sample_dirs() -> (PathBuf, PathBuf) {
 
 /// Записывает сэмпл с микрофона: ждёт начала речи, копит до тишины,
 /// сохраняет 16 кГц mono WAV с ярлыком в имени файла.
-pub fn record_sample(dir: &Path, label: &str, max_secs: f32, cancel: &AtomicBool) -> Result<PathBuf> {
+pub fn record_sample(
+    dir: &Path,
+    label: &str,
+    max_secs: f32,
+    cancel: &AtomicBool,
+) -> Result<PathBuf> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use std::sync::mpsc::sync_channel;
 
@@ -53,7 +60,7 @@ pub fn record_sample(dir: &Path, label: &str, max_secs: f32, cancel: &AtomicBool
     let ch = sup.channels() as usize;
     let native_sr = sup.sample_rate() as usize;
 
-    let mut cfg: cpal::StreamConfig = sup.clone().into();
+    let mut cfg: cpal::StreamConfig = sup.into();
     cfg.buffer_size = cpal::BufferSize::Fixed(1024);
 
     let stream = match sup.sample_format() {
@@ -172,17 +179,17 @@ pub fn record_sample(dir: &Path, label: &str, max_secs: f32, cancel: &AtomicBool
 ///
 /// Это не нейросеть: сравниваются MFCC-признаки записей с потоком с микрофона
 /// (dynamic time warping). Нужно 3–8 сэмплов фразы, построение занимает секунды.
-pub fn build_reference_wakeword(
-    events: &EventTx,
-    cancel: &AtomicBool,
-) -> Result<PathBuf> {
+pub fn build_reference_wakeword(events: &EventTx, cancel: &AtomicBool) -> Result<PathBuf> {
     let (train_dir, _) = sample_dirs();
 
     // В reference-модель попадают только записи фразы: файлы с меткой
     // [jarvis] в имени. Фоновые шумы (метка none) для DTW не нужны.
     let samples: Vec<String> = list_wav_samples(&train_dir)
         .into_iter()
-        .filter(|(p, _)| crate::tts::label_of_sample(&p.file_name().unwrap_or_default().to_string_lossy()) != "none")
+        .filter(|(p, _)| {
+            crate::tts::label_of_sample(&p.file_name().unwrap_or_default().to_string_lossy())
+                != "none"
+        })
         .map(|(p, _)| p.to_string_lossy().to_string())
         .collect();
 
@@ -197,7 +204,10 @@ pub fn build_reference_wakeword(
         bail!("Отменено");
     }
 
-    println!("🧩 Построение DTW-модели wake word из {} сэмплов...", samples.len());
+    println!(
+        "🧩 Построение DTW-модели wake word из {} сэмплов...",
+        samples.len()
+    );
     let started = std::time::Instant::now();
 
     let wakeword = <rustpotter::WakewordRef as WakewordRefBuildFromFiles>::new_from_sample_files(
@@ -214,7 +224,11 @@ pub fn build_reference_wakeword(
         .save_to_file(&out.to_string_lossy())
         .map_err(|e| anyhow::anyhow!("Не удалось сохранить модель: {e}"))?;
 
-    println!("✅ DTW-модель готова за {:.1?}: {:?}", started.elapsed(), out);
+    println!(
+        "✅ DTW-модель готова за {:.1?}: {:?}",
+        started.elapsed(),
+        out
+    );
     let _ = events.send(JarvisEvent::Log {
         message: format!("Модель wake word построена ({:.1?})", started.elapsed()),
     });
@@ -243,10 +257,10 @@ pub fn test_wakeword(rpw: &Path, wav: &Path) -> Result<f32> {
         if window.len() > frame {
             window.remove(0);
         }
-        if window.len() == frame {
-            if let Some(d) = det.process_samples(window.clone()) {
-                best = best.max(d.score);
-            }
+        if window.len() == frame
+            && let Some(d) = det.process_samples(window.clone())
+        {
+            best = best.max(d.score);
         }
     }
 

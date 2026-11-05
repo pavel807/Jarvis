@@ -1,0 +1,63 @@
+[package]
+name = "jarvis-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+cpal.workspace = true
+hf-hub.workspace = true
+hound.workspace = true
+rand.workspace = true
+rustpotter.workspace = true
+transcribe-rs.workspace = true
+serde.workspace = true
+toml.workspace = true
+urlencoding.workspace = true
+open.workspace = true
+candle-core.workspace = true
+candle-nn.workspace = true
+tokenizers.workspace = true
+serde_json.workspace = true
+flate2 = "1"
+ureq.workspace = true
+regex.workspace = true
+
+# macOS: AppleScript прямо в процессе приложения (NSAppleScript), а не через
+# порождение osascript. Так запрос разрешения на автоматизацию приходит от
+# самого Джарвиса — «Джарвис хочет управлять Музыкой» — и его можно выдать
+# один раз, вместо поиска нужного пункта в Системных настройках.
+[target.'cfg(target_os = "macos")'.dependencies]
+# objc2 — AppleScript в процессе; block2 — блок-обработчик запроса доступа
+# к микрофону (AVFoundation). В objc2 0.6 блоки вынесены в отдельный крейт.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSDictionary",
+    "NSAppleScript",
+    "NSAppleEventDescriptor",
+    "NSThread",
+] }
+# Uzu (Mirai) — второй LLM-бэкенд на Metal, только Apple Silicon.
+# Ядро — чистый Rust (MIT), модели качаются из каталога Mirai в ~/.cache/mirai.
+# Рев запинен на релиз 0.6.3.
+#
+# capability-grammar ВЫКЛЮЧЕН: он тянет xgrammar-rs с branch=main форка
+# trymirai, и после релиза uzu форк уехал вперёд, сломав сборку grammar-модуля
+# (12 ошибок компиляции). Когда trymirai запинит xgrammar-rs по rev — вернуть
+# фичу и Grammar::JsonSchema в uzu_backend (форсирование tool-вызова).
+uzu = { git = "https://github.com/trymirai/uzu", rev = "d76d468a1898cacc9c4920accf8f5ff099967107", default-features = false, features = [
+    "backend-cpu",
+    "backend-metal",
+] }
+# Прямая зависимость для обёртки uzu_backend: свой multi-thread runtime
+# (Engine uzu требует tokio-контекст) и таймауты на сетевые операции.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+# Только для примера-сверки nn_verify: сравнивает candle-реализации
+# ударителя и омографов с исходными ONNX. В рантайме ort не используется
+# библиотекой (в STT его тянет transcribe-rs).
+ort = "2.0.0-rc.12"

@@ -1,9 +1,10 @@
 /target
+/build
 /models
 /train
 /resources/tts_cache/
 .DS_Store
-
+.playwright-mcp/
 # Tauri / frontend
 /app/node_modules/
 /app/dist/
@@ -11,8 +12,3 @@
 /app/src-tauri/gen/
 .zcode/
 *.toml.tmp
-resources/kokoro_check.wav
-resources/piper_check.wav
-resources/silero_check.wav
-resources/live_check.wav
-resources/silero_final.wav

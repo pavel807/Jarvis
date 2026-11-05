@@ -1,0 +1,1022 @@
+//! Команды из commands.toml: загрузка, hot-reload, fuzzy-матчинг, выполнение.
+
+use crate::events::{EventTx, JarvisEvent};
+use crate::llm::{self, ChatTurn, SharedLlm};
+use crate::paths;
+use crate::text::{clean_text, word_similarity};
+use crate::tts::AudioMessage;
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, SystemTime};
+
+pub const SIMILARITY_THRESHOLD: f32 = 0.72;
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct Command {
+    pub name: String,
+    pub trigger_words: Vec<String>,
+    pub action_type: String,
+    pub action_value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_fallback: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+pub struct CommandsConfig {
+    pub global: GlobalConfig,
+    #[serde(default)]
+    pub commands: Vec<Command>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct GlobalConfig {
+    pub reply_success: String,
+    pub reply_error: String,
+    pub reply_unknown: String,
+    /// Звук-подтверждение при срабатывании wake word.
+    #[serde(default = "default_reply_ack")]
+    pub reply_ack: String,
+    /// Порог схожести для fuzzy-матчинга. Пока не читается кодом
+    /// (используется [`SIMILARITY_THRESHOLD`]), но объявлен здесь, чтобы
+    /// сохранение конфига из интерфейса не теряло ключ из `commands.toml`.
+    #[serde(default = "default_fuzzy_min_score")]
+    pub fuzzy_min_score: f32,
+}
+
+fn default_reply_ack() -> String {
+    "resources/audio/reply1.wav".to_string()
+}
+
+fn default_fuzzy_min_score() -> f32 {
+    SIMILARITY_THRESHOLD
+}
+
+impl Default for GlobalConfig {
+    fn default() -> Self {
+        Self {
+            reply_success: "resources/audio/ok{}.wav".to_string(),
+            reply_error: "resources/audio/reply1.wav".to_string(),
+            reply_unknown: "resources/audio/reply1.wav".to_string(),
+            reply_ack: "resources/audio/reply1.wav".to_string(),
+            fuzzy_min_score: SIMILARITY_THRESHOLD,
+        }
+    }
+}
+
+impl CommandsConfig {
+    pub fn load(path: &Path) -> Result<Self> {
+        let content =
+            fs::read_to_string(path).with_context(|| format!("Не удалось прочитать {:?}", path))?;
+
+        let config: Self =
+            toml::from_str(&content).with_context(|| format!("Ошибка парсинга {:?}", path))?;
+
+        Ok(config)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let content =
+            toml::to_string_pretty(self).context("Не удалось сериализовать конфиг команд")?;
+        let tmp = path.with_extension("toml.tmp");
+        fs::write(&tmp, content).with_context(|| format!("Не удалось записать {:?}", tmp))?;
+        fs::rename(&tmp, path).with_context(|| format!("Не удалось заменить {:?}", path))?;
+        Ok(())
+    }
+
+    /// Приоритет определяется порядком команд в TOML.
+    ///
+    /// Контекстная логика: длинные вопросы («какие есть сервисы для
+    /// прослушивания музыки») не должны превращаться в команду из-за слова
+    /// «музыка» в середине. Команда срабатывает, если:
+    /// - триггер стоит в начале фразы (после вежливых префиксов), или
+    /// - фраза короткая (<=3 слов) и содержит триггер, или
+    /// - триггер занимает >= 2/3 слов длинной фразы в её начале.
+    pub fn find_command(&self, text: &str) -> Option<Command> {
+        let text_cleaned = crate::text::clean_wakewords_and_prompt(text);
+        let input_words: Vec<&str> = text_cleaned.split_whitespace().collect();
+
+        if input_words.is_empty() {
+            return None;
+        }
+
+        let total = input_words.len();
+        let mut best_cmd: Option<Command> = None;
+        let mut max_score = 0.0f32;
+
+        for cmd in &self.commands {
+            for trigger in &cmd.trigger_words {
+                let trigger_cleaned = clean_text(trigger);
+
+                if trigger_cleaned.is_empty() {
+                    continue;
+                }
+
+                let trigger_words: Vec<&str> = trigger_cleaned.split_whitespace().collect();
+                let n = trigger_words.len();
+                let joined = trigger_cleaned.clone();
+
+                if text_cleaned.starts_with(&joined) {
+                    return Some(cmd.clone());
+                }
+
+                if total <= 3 && input_words.len() >= n {
+                    for window in input_words.windows(n) {
+                        let current_window_str = window.join(" ");
+
+                        let score = if n == 1 {
+                            word_similarity(window[0], trigger_words[0])
+                        } else {
+                            word_similarity(&current_window_str, &trigger_cleaned)
+                        };
+
+                        if score >= SIMILARITY_THRESHOLD && score > max_score {
+                            max_score = score;
+                            best_cmd = Some(cmd.clone());
+                        }
+                    }
+                    continue;
+                }
+
+                if total > 3 && n * 3 >= total * 2 && input_words.len() >= n {
+                    let head = input_words[..n].join(" ");
+                    let score = if n == 1 {
+                        word_similarity(input_words[0], trigger_words[0])
+                    } else {
+                        word_similarity(&head, &trigger_cleaned)
+                    };
+
+                    if score >= SIMILARITY_THRESHOLD && score > max_score {
+                        max_score = score;
+                        best_cmd = Some(cmd.clone());
+                    }
+                }
+            }
+        }
+
+        best_cmd
+    }
+}
+
+/// Поллинг mtime commands.toml раз в секунду; при изменении перезагружает конфиг.
+pub fn spawn_config_watcher(config_path: PathBuf, commands_arc: Arc<RwLock<CommandsConfig>>) {
+    std::thread::spawn(move || {
+        let mut last_modified = fs::metadata(&config_path)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+
+            if let Ok(metadata) = fs::metadata(&config_path)
+                && let Ok(modified) = metadata.modified()
+                && modified > last_modified
+            {
+                println!("🔄 Изменение файла {:?}, перезагружаем...", config_path);
+
+                match CommandsConfig::load(&config_path) {
+                    Ok(new_cfg) => {
+                        let count = new_cfg.commands.len();
+                        let mut lock = commands_arc.write().unwrap_or_else(|e| e.into_inner());
+                        *lock = new_cfg;
+                        println!("⚡ Обновлено! Загружено команд: {}", count);
+                    }
+                    Err(e) => eprintln!("❌ Ошибка обновления {:?}: {e}", config_path),
+                }
+
+                last_modified = modified;
+            }
+        }
+    });
+}
+
+/// Убирает шумовые слова вокруг поискового запроса.
+pub fn extract_search_query(full_text: &str, trigger_words: &[String]) -> String {
+    let mut clean_str = clean_text(full_text);
+
+    for tw in trigger_words {
+        let clean_tw = clean_text(tw);
+        if !clean_tw.is_empty() {
+            let filtered = clean_str
+                .split_whitespace()
+                .filter(|w| *w != clean_tw)
+                .collect::<Vec<_>>()
+                .join(" ");
+            clean_str = filtered;
+        }
+    }
+
+    let noise_words = ["пожалуйста", "джарвис", "открой", "быстро", "да сэр", "сэр"];
+    clean_str = clean_str
+        .split_whitespace()
+        .filter(|word| !noise_words.contains(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    clean_text(&clean_str)
+}
+
+/// Глаголы остановки/закрытия. Триггеры в commands.toml — существительные
+/// («премиер», «музыка»), поэтому без проверки глагола «закрой премьер про»
+/// запускал Premiere заново, а «останови музыку» открывал Яндекс Музыку.
+const STOP_VERBS: &[&str] = &[
+    "закрой",
+    "закрыть",
+    "закрывай",
+    "закройте",
+    "закрывайте",
+    "убий",
+    "убей",
+    "выключи",
+    "выключить",
+    "выйди",
+    "выходи",
+    "выйдите",
+    "останови",
+    "остановить",
+    "стоп",
+    "хватит",
+    "пауза",
+    "quit",
+    "close",
+    "exit",
+    "kill",
+];
+
+/// Просит ли пользователь что-то остановить/закрыть, а не открыть.
+pub fn is_stop_request(text: &str) -> bool {
+    let t = clean_text(text);
+    STOP_VERBS.iter().any(|v| t.split(' ').any(|w| w == *v))
+}
+
+fn wants_close(text: &str) -> bool {
+    is_stop_request(text)
+}
+
+/// Что удалось сделать с приложением по запросу «закрой».
+enum QuitOutcome {
+    /// Приложение не запущено — закрывать нечего.
+    NotRunning,
+    /// Запрос на выход отправлен. Успех не гарантирован: приложение с
+    /// несохранёнными данными показывает окно и ждёт ответа пользователя.
+    QuitRequested,
+}
+
+/// Запущено ли приложение с таким именем процесса. Сначала точное совпадение
+/// имени, потом — вхождение в полной строке запуска: у некоторых приложений
+/// имя процесса отличается от названия в `commands.toml`, и ошибочный ответ
+/// «и не открыт» сбивал бы с толку.
+fn app_running(name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    let pgrep = |args: &[&str]| {
+        std::process::Command::new("pgrep")
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    pgrep(&["-x", name]) || pgrep(&["-f", name])
+}
+
+/// Просит приложение закрыться.
+///
+/// Ключевой момент: `osascript ... to quit` нельзя ждать. Premiere с
+/// несохранённым проектом показывает модальное окно и не завершается, а
+/// `output()` висит до бесконечности — голосовой ассистент при этом молчит и
+/// выглядит сломанным. Поэтому запрос отправляется в фоне и не блокирует.
+fn quit_app(app: &str) -> QuitOutcome {
+    let app = app.trim();
+    if app.is_empty() || !app_running(app) {
+        return QuitOutcome::NotRunning;
+    }
+    println!("🛑 Закрываю: {app}");
+
+    let script = format!("tell application \"{app}\" to quit");
+    if let Err(e) = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        eprintln!("⚠️ Не удалось отправить запрос на выход {app}: {e}");
+        return QuitOutcome::NotRunning;
+    }
+
+    QuitOutcome::QuitRequested
+}
+
+/// Через несколько секунд проверяет, закрылось ли приложение, и озвучивает
+/// причину, если нет: почти всегда это окно сохранения, которое ждёт
+/// пользователя. Без этой проверки «не закрылось» выглядит как зависание.
+fn warn_if_still_open(app: String, audio_tx: Sender<AudioMessage>) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(12));
+        if app_running(&app) {
+            eprintln!("⚠️ {app} всё ещё запущено после запроса на выход");
+            let _ = audio_tx.send(AudioMessage::SynthesizeAndPlay(format!(
+                "{app} не закрылся. Скорее всего, на экране окно сохранения — подтверди его."
+            )));
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_command(
+    cmd: &Command,
+    raw_text: &str,
+    audio_tx: &Sender<AudioMessage>,
+    events: &EventTx,
+    llm: &SharedLlm,
+    llm_cancel: Arc<AtomicBool>,
+    llm_history: Arc<Mutex<Vec<ChatTurn>>>,
+    reply_error: &str,
+) {
+    let action_type = cmd.action_type.trim();
+    let action_value = cmd.action_value.trim();
+
+    match action_type {
+        "url" => {
+            if let Err(e) = open::that(action_value) {
+                eprintln!("⚠️ Ошибка открытия URL: {e}");
+            }
+        }
+
+        // Открывает файл/папку в системном приложении (например tasks.md).
+        // Относительный путь отсчитывается от корня данных (JARVIS_HOME).
+        "path" => {
+            let expanded = crate::tools::expand_path(action_value);
+            let target = if std::path::Path::new(&expanded).is_absolute() {
+                std::path::PathBuf::from(expanded)
+            } else {
+                paths::resolve_data_path(&expanded)
+            };
+            if let Err(e) = open::that(&target) {
+                eprintln!("⚠️ Ошибка открытия пути {:?}: {e}", target);
+            }
+        }
+
+        // Открывает поиск в браузере. Голосом ничего не подтверждаем —
+        // пользователь сразу видит вкладку и результат поиска.
+        "search" => {
+            let query = extract_search_query(raw_text, &cmd.trigger_words);
+            let search_term = if query.is_empty() {
+                clean_text(raw_text)
+            } else {
+                query
+            };
+
+            if search_term.is_empty() {
+                let _ = open::that("https://www.google.com");
+                return;
+            }
+
+            let encoded_query = urlencoding::encode(&search_term);
+            let target_url = action_value.replace("{}", &encoded_query);
+
+            println!("🔍 Запуск поиска: `{}` -> {}", search_term, target_url);
+            let _ = open::that(&target_url);
+        }
+
+        // Веб-поиск: результаты → локальная LLM → короткий ответ голосом.
+        // Промежуточного «Ищу в интернете ...» нет: пользователь слышит
+        // только финальный ответ.
+        "web" => {
+            let query = extract_search_query(raw_text, &cmd.trigger_words);
+            if query.is_empty() {
+                let _ = events.send(JarvisEvent::Error {
+                    message: "Не удалось выделить поисковый запрос".into(),
+                });
+                return;
+            }
+
+            let audio_tx = audio_tx.clone();
+            let events = events.clone();
+            let llm = Arc::clone(llm);
+            let reply_error = reply_error.to_string();
+            let query = query.clone();
+
+            std::thread::spawn(move || match crate::web::search(&query, 5) {
+                Ok(hits) => {
+                    let count = hits.len();
+                    match crate::web::build_summary_prompt(&query, &hits) {
+                        Some(prompt) => {
+                            println!(
+                                "🌐 Найдено {} результатов, суммаризирую через LLM...",
+                                count
+                            );
+                            llm::ask(
+                                llm,
+                                llm::WEB_SYSTEM_PROMPT,
+                                prompt,
+                                llm_history,
+                                audio_tx,
+                                events,
+                                llm_cancel,
+                            );
+                        }
+                        None => {
+                            let _ = audio_tx.send(AudioMessage::PlayWav(reply_error));
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("⚠️ Веб-поиск не удался: {e}");
+                    let _ = audio_tx.send(AudioMessage::PlayWav(reply_error));
+                }
+            });
+        }
+
+        "app" => {
+            // «закрой премьер про» матчится тем же триггером, что и «открыть»:
+            // триггеры — голые существительные («премиер», «монтаж»), и глагол
+            // в запросе раньше просто игнорировался. Поэтому направление
+            // действия решаем по глаголу, а не по совпадению триггера.
+            if wants_close(raw_text) {
+                let app_name = if action_value.is_empty() {
+                    cmd.name.clone()
+                } else {
+                    action_value.to_string()
+                };
+                match quit_app(&app_name) {
+                    QuitOutcome::QuitRequested => {
+                        let _ = audio_tx.send(AudioMessage::SynthesizeAndPlay(format!(
+                            "Закрываю {app_name}."
+                        )));
+                        warn_if_still_open(app_name, audio_tx.clone());
+                    }
+                    QuitOutcome::NotRunning => {
+                        let _ = audio_tx.send(AudioMessage::SynthesizeAndPlay(format!(
+                            "{app_name} и не открыт."
+                        )));
+                    }
+                }
+                return;
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                let status = std::process::Command::new("open")
+                    .arg("-a")
+                    .arg(action_value)
+                    .status();
+
+                let success = status.map(|s| s.success()).unwrap_or(false);
+
+                if !success {
+                    if let Some(fallback) = &cmd.action_fallback {
+                        let _ = std::process::Command::new("open")
+                            .arg(fallback.trim())
+                            .spawn();
+                    } else {
+                        let _ = open::that(action_value);
+                    }
+                }
+            }
+        }
+        "exit" => {
+            std::process::exit(0);
+        }
+        "stop" => {
+            if !action_value.is_empty() {
+                let _ = std::process::Command::new("osascript")
+                    .arg("-e")
+                    .arg(action_value)
+                    .spawn();
+            }
+        }
+
+        "command" => {
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(action_value)
+                .spawn();
+        }
+
+        _ => {
+            let msg = format!("Неизвестный тип команды: {}", action_type);
+            eprintln!("{}", msg);
+            let _ = events.send(JarvisEvent::Error { message: msg });
+        }
+    }
+}
+
+/// Потокобезопасное чтение глобального конфига.
+pub fn get_global_config(commands_arc: &Arc<RwLock<CommandsConfig>>) -> GlobalConfig {
+    commands_arc
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .global
+        .clone()
+}
+
+// =========================================================================
+// Универсальные команды: LLM выполняет команды из commands.toml по смыслу
+// через инструмент run_command, подставляя параметры в плейсхолдеры {…}.
+// =========================================================================
+
+/// Подставляет параметры модели в значение действия: `{query}` → значение
+/// аргумента. Неизвестные плейсхолдеры остаются как есть — по ним видно,
+/// какого параметра не хватило.
+pub fn substitute_params(value: &str, args: &HashMap<String, String>) -> String {
+    let mut out = value.to_string();
+    for (key, val) in args {
+        out = out.replace(&format!("{{{key}}}"), val);
+    }
+    out
+}
+
+/// Объявленные параметры команды: `{name}` в значении действия.
+/// Пустой `{}` (слот поиска) параметром не считается.
+fn placeholders_of(value: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find('{') {
+        let after = &rest[start + 1..];
+        match after.find('}') {
+            Some(end) => {
+                let name = after[..end].trim();
+                if !name.is_empty()
+                    && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && !out.iter().any(|x| x == name)
+                {
+                    out.push(name.to_string());
+                }
+                rest = &after[end + 1..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+fn args_query(args: &HashMap<String, String>) -> Option<String> {
+    ["query", "q", "запрос", "текст"]
+        .iter()
+        .find_map(|k| args.get(*k).cloned())
+        .map(|q| q.trim().to_string())
+        .filter(|q| !q.is_empty())
+}
+
+/// Выполнение команды из tool-вызова `run_command` на готовом конфиге.
+/// Возвращает честный итог — озвучивает и передаёт модели вызывающий код.
+pub fn run_command_from(
+    cfg: &CommandsConfig,
+    name: &str,
+    args: &HashMap<String, String>,
+    audio_tx: &Sender<AudioMessage>,
+    events: &EventTx,
+) -> crate::tools::ToolOutcome {
+    use crate::tools::{ToolCall, ToolOutcome};
+
+    let wanted = name.trim();
+    let cmd = cfg
+        .commands
+        .iter()
+        .find(|c| c.name.eq_ignore_ascii_case(wanted))
+        // Модель могла назвать команду триггером — примем и это.
+        .or_else(|| {
+            cfg.commands.iter().find(|c| {
+                c.trigger_words
+                    .iter()
+                    .any(|t| t.trim().eq_ignore_ascii_case(wanted))
+            })
+        });
+
+    let Some(cmd) = cmd.cloned() else {
+        let names: Vec<String> = cfg
+            .commands
+            .iter()
+            .map(|c| c.name.clone())
+            .take(15)
+            .collect();
+        let hint = if names.is_empty() {
+            "список команд пуст".to_string()
+        } else {
+            format!("есть: {}", names.join(", "))
+        };
+        return ToolOutcome::fail(format!("Команда «{wanted}» не найдена, {hint}"));
+    };
+
+    println!("🔧 run_command: {} ({})", cmd.name, cmd.action_type);
+    let action_type = cmd.action_type.trim().to_string();
+    let action_value = substitute_params(cmd.action_value.trim(), args);
+
+    match action_type.as_str() {
+        "url" if !action_value.is_empty() => {
+            ToolCall::OpenUrl { url: action_value }.execute(audio_tx, events)
+        }
+        "path" => ToolCall::OpenPath { path: action_value }.execute(audio_tx, events),
+        "app" => {
+            let outcome = ToolCall::OpenApp {
+                name: action_value.clone(),
+            }
+            .execute(audio_tx, events);
+            // Fallback из commands.toml: приложение не нашлось — пробуем
+            // запасной адрес/файл, честно сообщая, что открыли вместо.
+            if !outcome.ok
+                && let Some(fallback) = cmd
+                    .action_fallback
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            {
+                let fb = ToolCall::OpenUrl {
+                    url: fallback.to_string(),
+                }
+                .execute(audio_tx, events);
+                if fb.ok {
+                    return ToolOutcome::ok(format!(
+                        "{action_value} не запустилось, открыл запасной вариант"
+                    ));
+                }
+            }
+            outcome
+        }
+        "search" => {
+            let Some(query) = args_query(args) else {
+                return ToolOutcome::fail(format!(
+                    "Команде «{}» нужен параметр query — что искать",
+                    cmd.name
+                ));
+            };
+            // Слот `{}` из commands.toml и подстановка `{query}` от модели —
+            // оба варианта, запрос кодируется один раз.
+            let encoded = urlencoding::encode(&query).to_string();
+            let mut enc_args = args.clone();
+            enc_args.insert("query".to_string(), encoded.clone());
+            let mut target = substitute_params(cmd.action_value.trim(), &enc_args);
+            target = target.replace("{}", &encoded);
+            match open::that(&target) {
+                Ok(_) => ToolOutcome::ok(format!("Ищу «{query}» в браузере")),
+                Err(e) => ToolOutcome::fail(format!("Поиск не открылся: {e}")),
+            }
+        }
+        // Веб-команда из LLM: выполняем поиск и отдаём выдачу модели — она
+        // суммаризирует её следующим шагом цикла. Вложенный llm::ask тут
+        // не нужен и опасен (LLM ждёт саму себя).
+        "web" => {
+            let Some(query) = args_query(args) else {
+                return ToolOutcome::fail(format!(
+                    "Команде «{}» нужен параметр query — что искать в интернете",
+                    cmd.name
+                ));
+            };
+            match crate::web::search(&query, 5) {
+                Ok(hits) if hits.is_empty() => ToolOutcome::fail("Ничего не нашлось в интернете"),
+                Ok(hits) => {
+                    let list: Vec<String> = hits
+                        .iter()
+                        .map(|h| format!("{} — {}", h.url, h.title))
+                        .collect();
+                    let count = hits.len();
+                    ToolOutcome::with_detail(
+                        format!("Нашёл {count} результатов"),
+                        format!("Результаты поиска «{query}»:\n{}", list.join("\n")),
+                    )
+                }
+                Err(e) => ToolOutcome::fail(format!("Поиск не удался: {e}")),
+            }
+        }
+        "command" | "stop" if !action_value.is_empty() => {
+            ToolCall::Shell { cmd: action_value }.execute(audio_tx, events)
+        }
+        "exit" => std::process::exit(0),
+        other => ToolOutcome::fail(format!(
+            "Неизвестный тип действия «{other}» у команды {}",
+            cmd.name
+        )),
+    }
+}
+
+/// [`run_command_from`] с чтением свежего commands.toml с диска — учитывает
+/// правки, внесённые между стартом и вызовом.
+pub fn run_command_tool(
+    name: &str,
+    args: &HashMap<String, String>,
+    audio_tx: &Sender<AudioMessage>,
+    events: &EventTx,
+) -> crate::tools::ToolOutcome {
+    match CommandsConfig::load(&paths::commands_file()) {
+        Ok(cfg) => run_command_from(&cfg, name, args, audio_tx, events),
+        Err(e) => {
+            crate::tools::ToolOutcome::fail(format!("Не удалось прочитать commands.toml: {e}"))
+        }
+    }
+}
+
+/// Каталог команд для системного промпта (по готовому конфигу).
+/// Пустая строка — команд нет.
+pub fn prompt_catalog_from(cfg: &CommandsConfig) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for cmd in cfg.commands.iter().take(40) {
+        let mut params = placeholders_of(&cmd.action_value);
+        let value: String = cmd.action_value.trim().chars().take(60).collect();
+        let action = match cmd.action_type.trim() {
+            "url" => format!("открыть {value}"),
+            "path" => format!("открыть путь {value}"),
+            "app" => format!("запустить приложение {value}"),
+            "search" => format!("поиск в браузере {value}"),
+            "web" => format!("ответить по данным интернета {value}"),
+            "command" | "stop" => format!("выполнить {value}"),
+            "exit" => "завершить работу Джарвиса".to_string(),
+            other => format!("действие {other}: {value}"),
+        };
+        // В промпт достаточно трёх триггеров: полный список раздувал префилл,
+        // а модель матчит по смыслу, а не по словарю.
+        let triggers: Vec<String> = cmd.trigger_words.iter().take(3).cloned().collect();
+        // Команды без параметров описываются одной строкой: «триггеры:» и
+        // «параметры:» на 17 командах из 20 — чистый расход префилла.
+        if params.is_empty() {
+            lines.push(format!("{}, {} → {}", cmd.name, triggers.join("/"), action));
+        } else {
+            params.sort();
+            let mut note = params.join(", ");
+            if matches!(cmd.action_type.trim(), "search" | "web") {
+                note.push_str(" (query — что искать)");
+            }
+            lines.push(format!(
+                "{}, {} → {} | параметры: {}",
+                cmd.name,
+                triggers.join("/"),
+                action,
+                note
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Каталог из текущего commands.toml. Пустая строка — команд нет или файл
+/// не читается (тогда каталог в промпт не попадает).
+pub fn prompt_catalog() -> String {
+    match CommandsConfig::load(&paths::commands_file()) {
+        Ok(cfg) => prompt_catalog_from(&cfg),
+        Err(_) => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> CommandsConfig {
+        CommandsConfig {
+            global: GlobalConfig {
+                reply_success: "ok.wav".into(),
+                reply_error: "err.wav".into(),
+                reply_unknown: "unknown.wav".into(),
+                reply_ack: "ack.wav".into(),
+                fuzzy_min_score: SIMILARITY_THRESHOLD,
+            },
+            commands: vec![
+                Command {
+                    name: "youtube".into(),
+                    trigger_words: vec!["ютуб".into(), "видео".into()],
+                    action_type: "url".into(),
+                    action_value: "https://youtube.com".into(),
+                    action_fallback: None,
+                },
+                Command {
+                    name: "yandex_music".into(),
+                    trigger_words: vec!["музыка".into(), "яндекс музыка".into()],
+                    action_type: "url".into(),
+                    action_value: "https://music.yandex.ru".into(),
+                    action_fallback: None,
+                },
+                Command {
+                    name: "kinopoisk".into(),
+                    trigger_words: vec!["запусти кинопоиск".into(), "кино".into()],
+                    action_type: "url".into(),
+                    action_value: "https://kinopoisk.ru".into(),
+                    action_fallback: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn close_verb_is_detected_only_for_close_words() {
+        for text in [
+            "закрой премьер про",
+            "закрыть премьер про",
+            "ЗАКРОЙ ПРЕМЬЕР ПРО",
+            "выйди из премьера",
+            "выключи премьер",
+            "quit premiere pro",
+        ] {
+            assert!(wants_close(text), "не увидел глагол закрытия в «{text}»");
+        }
+        // Открытие и обычные вопросы закрытием не считаются.
+        for text in [
+            "открой премьер про",
+            "запусти премьер",
+            "что такое монтаж",
+            "покажи премьер про",
+        ] {
+            assert!(!wants_close(text), "ложное закрытие в «{text}»");
+        }
+    }
+
+    #[test]
+    fn close_request_still_resolves_the_app() {
+        // Триггеры — существительные, поэтому «закрой премьер про» обязано
+        // найти ту же команду, что и «открыть»: направление решает глагол.
+        let cfg = CommandsConfig {
+            global: test_config().global,
+            commands: vec![Command {
+                name: "Adobe Premiere Pro".into(),
+                trigger_words: vec!["премиер".into(), "премьер".into(), "монтаж".into()],
+                action_type: "app".into(),
+                action_value: "Adobe Premiere Pro 2026".into(),
+                action_fallback: None,
+            }],
+        };
+        let close = cfg
+            .find_command("закрой премьер про")
+            .expect("должен матчиться");
+        assert_eq!(close.action_type, "app");
+        assert!(wants_close("закрой премьер про"));
+
+        let open = cfg
+            .find_command("открой премьер про")
+            .expect("должен матчиться");
+        assert_eq!(open.name, close.name);
+        assert!(!wants_close("открой премьер про"));
+    }
+
+    #[test]
+    fn stop_requests_are_detected() {
+        for text in [
+            "останови музыку",
+            "выключи музыку",
+            "хватит",
+            "закрой премьер про",
+        ] {
+            assert!(is_stop_request(text), "не увидел остановку в «{text}»");
+        }
+        for text in ["включи музыку", "запусти таймер", "открой сафари"]
+        {
+            assert!(!is_stop_request(text), "ложная остановка в «{text}»");
+        }
+    }
+
+    #[test]
+    fn long_question_is_not_a_command() {
+        let cfg = test_config();
+        assert!(
+            cfg.find_command("какие есть сервисы для прослушивания музыки")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn short_phrase_with_trigger_is_command() {
+        let cfg = test_config();
+        let cmd = cfg.find_command("включи музыку").expect("should match");
+        assert_eq!(cmd.name, "yandex_music");
+    }
+
+    #[test]
+    fn trigger_at_start_is_command() {
+        let cfg = test_config();
+        let cmd = cfg.find_command("запусти кинопоиск").expect("should match");
+        assert_eq!(cmd.name, "kinopoisk");
+    }
+
+    #[test]
+    fn polite_prefix_stripped() {
+        let cfg = test_config();
+        let cmd = cfg
+            .find_command("джарвис запусти кинопоиск пожалуйста")
+            .expect("should match");
+        assert_eq!(cmd.name, "kinopoisk");
+    }
+
+    // --- Универсальные команды (run_command) ---
+
+    fn no_channels() -> (Sender<AudioMessage>, EventTx) {
+        let (audio_tx, _audio_rx) = std::sync::mpsc::channel();
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        (audio_tx, event_tx)
+    }
+
+    #[test]
+    fn params_are_substituted() {
+        let mut args = HashMap::new();
+        args.insert("query".to_string(), "лунная соната".to_string());
+        assert_eq!(
+            substitute_params("https://music.yandex.ru/search?text={query}", &args),
+            "https://music.yandex.ru/search?text=лунная соната"
+        );
+        // Без аргументов шаблон не трогается — по нему видно, чего не хватило.
+        assert_eq!(
+            substitute_params("https://x.ru/?q={query}", &HashMap::new()),
+            "https://x.ru/?q={query}"
+        );
+    }
+
+    #[test]
+    fn unknown_command_fails_honestly() {
+        let cfg = test_config();
+        let (audio_tx, events) = no_channels();
+        let out = run_command_from(&cfg, "нет-такой", &HashMap::new(), &audio_tx, &events);
+        assert!(!out.ok);
+        assert!(
+            out.speech.contains("не найдена"),
+            "получено: {}",
+            out.speech
+        );
+        assert!(
+            out.speech.contains("youtube"),
+            "подсказка без имён: {}",
+            out.speech
+        );
+    }
+
+    #[test]
+    fn command_is_found_by_trigger_word() {
+        let cfg = test_config();
+        let (audio_tx, events) = no_channels();
+        // «видео» — триггер команды youtube; url-действие откроет браузер,
+        // но канал событий события не валидирует, а open::that в тесте безопасен.
+        let cfg_url_only = CommandsConfig {
+            global: cfg.global.clone(),
+            commands: vec![Command {
+                name: "тест-путь".into(),
+                trigger_words: vec!["триппер".into()],
+                action_type: "path".into(),
+                action_value: "~/нет-такого-каталога-jarvis-test".into(),
+                action_fallback: None,
+            }],
+        };
+        let out = run_command_from(
+            &cfg_url_only,
+            "триппер",
+            &HashMap::new(),
+            &audio_tx,
+            &events,
+        );
+        // Команда нашлась по триггеру, но путь не существует — честная неудача,
+        // а не «Открываю».
+        assert!(!out.ok, "получено: {}", out.speech);
+        assert!(out.speech.contains("не найден"), "получено: {}", out.speech);
+    }
+
+    #[test]
+    fn search_requires_query_param() {
+        let cfg = CommandsConfig {
+            global: test_config().global,
+            commands: vec![Command {
+                name: "поиск-музыки".into(),
+                trigger_words: vec!["музыка".into()],
+                action_type: "search".into(),
+                action_value: "https://music.yandex.ru/search?text={}".into(),
+                action_fallback: None,
+            }],
+        };
+        let (audio_tx, events) = no_channels();
+        let out = run_command_from(&cfg, "поиск-музыки", &HashMap::new(), &audio_tx, &events);
+        assert!(!out.ok, "получено: {}", out.speech);
+        assert!(out.speech.contains("query"), "получено: {}", out.speech);
+    }
+
+    #[test]
+    fn catalog_lists_names_triggers_and_params() {
+        let cfg = CommandsConfig {
+            global: test_config().global,
+            commands: vec![
+                Command {
+                    name: "youtube".into(),
+                    trigger_words: vec!["ютуб".into()],
+                    action_type: "url".into(),
+                    action_value: "https://youtube.com".into(),
+                    action_fallback: None,
+                },
+                Command {
+                    name: "поиск-музыки".into(),
+                    trigger_words: vec!["музыка".into()],
+                    action_type: "search".into(),
+                    action_value: "https://music.yandex.ru/search?text={query}".into(),
+                    action_fallback: None,
+                },
+            ],
+        };
+        let catalog = prompt_catalog_from(&cfg);
+        assert!(catalog.contains("youtube"), "каталог: {catalog}");
+        assert!(catalog.contains("ютуб"), "каталог: {catalog}");
+        assert!(catalog.contains("поиск-музыки"), "каталог: {catalog}");
+        assert!(catalog.contains("параметры: query"), "каталог: {catalog}");
+        // Пустой конфиг — пустой каталог (блок не попадает в промпт).
+        assert!(prompt_catalog_from(&CommandsConfig::default()).is_empty());
+    }
+}

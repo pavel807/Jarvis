@@ -13,11 +13,13 @@ pub struct Settings {
     // --- Детекция фразы ---
     /// Порог RMS для отделения речи от тишины.
     pub silence_rms_threshold: f32,
-    /// Сколько секунд тишины завершают фразу.
+    /// Сколько секунд подтверждённой VAD тишины завершают фразу.
+    /// Пока speakrs слышит человеческую речь, пауза фразу не закрывает.
     pub silence_timeout_secs: f32,
     /// Минимальная длительность фразы (отсекает щелчки и шорохи).
     pub min_command_duration_secs: f32,
-    /// Максимальная длительность фразы.
+    /// Мягкий предел длительности фразы. Пока VAD слышит речь, фраза
+    /// продолжается до жёсткого предела движка (30 с).
     pub max_command_duration_secs: f32,
     /// Окно прямого слушания после wake word/команды.
     pub followup_window_secs: u64,
@@ -28,13 +30,36 @@ pub struct Settings {
     /// Имя файла активной модели wake word внутри `models/`.
     pub wakeword_model: String,
 
+    // --- STT (FastConformer) ---
+    /// Декодер ASR: "rnnt" — транзьюсер жадно (по умолчанию, точнее),
+    /// "ctc" — CTC жадно, "ctc_beam" — CTC beam search со словарём Jarvis.
+    pub asr_decoder: String,
+    /// Ширина луча для "ctc_beam".
+    pub asr_beam_width: usize,
+    /// Словарь Jarvis для beam search: названия приложений и команд из
+    /// commands.toml повышают точность их распознавания.
+    pub asr_dict: bool,
+
     // --- LLM ---
     pub llm_enabled: bool,
+    /// Бэкенд LLM: "uzu" — движок Mirai на Metal (только macOS, модель
+    /// скачивается сама) или "candle" — собственные реализации на candle.
+    /// Применяется при следующем запуске движка.
+    pub llm_backend: String,
+    /// Каталог модели LLM внутри `models/`: "qwen3.5-0.8b" (гибрид
+    /// Gated DeltaNet + attention, ~1.7 ГБ BF16) или "minicpm5-1b-ru".
+    /// Для бэкенда uzu — имя из каталога Mirai: "qwen3.5-2b-mirai-m"
+    /// (4-бит), "qwen3.5-2b-mirai-l" (8-бит) и т.д.
+    /// Применяется при следующем запуске движка.
+    pub llm_model: String,
     /// Автоматически искать в интернете, когда вопрос про свежие данные.
     pub web_search_auto: bool,
     /// Нейро-нормализация текста перед озвучкой (числа и единицы через LLM).
     pub llm_normalize: bool,
     pub llm_temperature: f64,
+    /// Страховочный лимит длины ответа LLM в токенах. `0` — без лимита:
+    /// ответы и команды досказываются до конца, обрывы держат только защита
+    /// от зацикливания и конец контекста модели.
     pub llm_max_tokens: usize,
 
     // --- TTS ---
@@ -47,26 +72,52 @@ pub struct Settings {
     /// Звук-подтверждение перед ответом LLM. Выключен по умолчанию:
     /// он стоит в очереди плеера перед речью и отодвигает первый звук ответа.
     pub ack_before_llm: bool,
+
+    // --- Память ---
+    /// Помнить темы между сессиями и возвращаться к ушедшей по просьбе
+    /// («мы это забыли»).
+    pub topic_memory: bool,
+    /// Фильтр говорящего: в LLM-цепочку идёт только голос владельца.
+    pub speaker_filter: bool,
+    /// Порог косинусного сходства с голосовым профилем владельца (0..1).
+    pub speaker_threshold: f32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             silence_rms_threshold: 0.018,
-            silence_timeout_secs: 0.7,
+            silence_timeout_secs: 0.6,
             min_command_duration_secs: 0.5,
             max_command_duration_secs: 8.0,
             followup_window_secs: 8,
             wake_threshold: 0.6,
             wakeword_model: "jarvis_model_2.rpw".to_string(),
+            asr_decoder: "rnnt".to_string(),
+            asr_beam_width: 8,
+            asr_dict: true,
             llm_enabled: true,
+            llm_backend: if cfg!(target_os = "macos") {
+                "uzu".to_string()
+            } else {
+                "candle".to_string()
+            },
+            // 8-бит (mirai-l) вместо 4-бит: та же Qwen3.5 2B, но вдвое меньше
+            // квантизационных повреждений весов — заметно меньше выдумывает.
+            llm_model: "qwen3.5-2b-mirai-l".to_string(),
             web_search_auto: true,
             llm_normalize: true,
             llm_temperature: 0.6,
-            llm_max_tokens: 256,
+            // 0 — без искусственного лимита (длинные ответы не обрываются).
+            llm_max_tokens: 0,
             tts_voice: "ru_eduard".to_string(),
             tts_speed: 1.0,
             ack_before_llm: false,
+            topic_memory: true,
+            // Фильтр включён по умолчанию: если профиль ещё не построен,
+            // он просто пропускает всё и ни на что не влияет.
+            speaker_filter: true,
+            speaker_threshold: 0.6,
         }
     }
 }
@@ -74,16 +125,13 @@ impl Default for Settings {
 impl Settings {
     pub fn load(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
-            Ok(raw) => {
-                toml::from_str(&raw).with_context(|| format!("Ошибка парсинга {:?}", path))
-            }
+            Ok(raw) => toml::from_str(&raw).with_context(|| format!("Ошибка парсинга {:?}", path)),
             Err(_) => Ok(Self::default()),
         }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let content =
-            toml::to_string_pretty(self).context("Не удалось сериализовать настройки")?;
+        let content = toml::to_string_pretty(self).context("Не удалось сериализовать настройки")?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -97,13 +145,28 @@ impl Settings {
     pub fn apply(&self) {
         crate::tts::set_current_voice(self.tts_voice.clone());
         crate::tts::set_current_speed(self.tts_speed);
-        crate::llm::config::update_generation_params(crate::llm::config::GenerationParams {
+        crate::llm::config::set_backend(&self.llm_backend);
+        crate::llm::config::set_model_name(&self.llm_model);
+        crate::llm::config::update_generation_params(self.llm_params());
+    }
+
+    /// Применяет настройки, безопасные на живую (hot-reload settings.toml):
+    /// скорость речи и параметры генерации LLM. Голос и бэкенд не трогаем:
+    /// смена голоса требует перезагрузки Silero-движка (её делает UI-команда
+    /// сохранения), бэкенд/модель — перезапуска движка.
+    pub fn apply_hot(&self) {
+        crate::tts::set_current_speed(self.tts_speed);
+        crate::llm::config::update_generation_params(self.llm_params());
+    }
+
+    fn llm_params(&self) -> crate::llm::config::GenerationParams {
+        crate::llm::config::GenerationParams {
             temperature: self.llm_temperature,
             top_p: 0.95,
             repeat_penalty: 1.1,
             repeat_window: 64,
             max_tokens: self.llm_max_tokens,
-        });
+        }
     }
 }
 
@@ -117,21 +180,48 @@ pub fn spawn_settings_watcher(settings_path: PathBuf, settings: Arc<RwLock<Setti
         loop {
             std::thread::sleep(Duration::from_secs(1));
 
-            if let Ok(metadata) = fs::metadata(&settings_path) {
-                if let Ok(modified) = metadata.modified() {
-                    if modified > last_modified {
-                        match Settings::load(&settings_path) {
-                            Ok(new_cfg) => {
-                                let mut lock = settings.write().unwrap_or_else(|e| e.into_inner());
-                                *lock = new_cfg;
-                                println!("⚡ Настройки перезагружены");
-                            }
-                            Err(e) => eprintln!("❌ Ошибка обновления настроек: {e}"),
-                        }
-                        last_modified = modified;
+            if let Ok(metadata) = fs::metadata(&settings_path)
+                && let Ok(modified) = metadata.modified()
+                && modified > last_modified
+            {
+                match Settings::load(&settings_path) {
+                    Ok(new_cfg) => {
+                        let mut lock = settings.write().unwrap_or_else(|e| e.into_inner());
+                        *lock = new_cfg.clone();
+                        drop(lock);
+                        // Применяем горячие настройки сразу: без этого правка
+                        // settings.toml вручную (например, llm_max_tokens = 0)
+                        // обновляла только копию в памяти, а движок до
+                        // перезапуска работал по старым параметрам.
+                        new_cfg.apply_hot();
+                        println!("⚡ Настройки перезагружены");
                     }
+                    Err(e) => eprintln!("❌ Ошибка обновления настроек: {e}"),
                 }
+                last_modified = modified;
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Settings;
+
+    #[test]
+    fn zero_max_tokens_stays_uncapped_in_llm_params() {
+        // 0 — без лимита: не подменяется дефолтом и не клампится.
+        let uncapped = Settings {
+            llm_max_tokens: 0,
+            ..Settings::default()
+        };
+        assert_eq!(uncapped.llm_params().max_tokens, 0);
+
+        // Ненулевое — страховочный кап, проходит как есть.
+        let capped = Settings {
+            llm_max_tokens: 256,
+            ..Settings::default()
+        };
+        assert_eq!(capped.llm_params().max_tokens, 256);
+    }
 }

@@ -1,0 +1,134 @@
+//! Батарея разнообразных вопросов через полный `llm::ask` — ресёрч качества
+//! ответов универсального помощника: игры, факты, свежие данные, вычисления,
+//! действия на компьютере, творческие и разговорные вопросы.
+//!
+//! Запуск: cargo run --release -p jarvis-core --example qa_battery
+
+use anyhow::Result;
+use jarvis_core::events::JarvisEvent;
+use jarvis_core::llm::{self, SharedLlmState};
+use jarvis_core::tts::AudioMessage;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::channel;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+const QUESTIONS: &[&str] = &[
+    // --- игры ---
+    "во что поиграть с другом на вечер, если есть только колода карт",
+    "сколько человек нужно для игры в монополию",
+    "что сложнее: шахматы или го",
+    // --- факты ---
+    "когда вышел первый айфон",
+    "кто такой Илон Маск",
+    "какая столица Австралии",
+    // --- свежие данные ---
+    "какая погода в москве",
+    // --- вычисления ---
+    "сколько будет 15 процентов от 2400",
+    // --- действия на компьютере ---
+    "сколько свободного места на диске",
+    "открой калькулятор",
+    // --- творческое и разговорное ---
+    "расскажи короткий анекдот про программиста",
+    "объясни, что такое квантовая запутанность, простыми словами",
+    "что ты умеешь",
+    "спасибо",
+];
+
+fn main() -> Result<()> {
+    let settings = jarvis_core::settings::Settings::load(&jarvis_core::paths::settings_file())?;
+    settings.apply();
+
+    let (events_tx, events_rx) = channel::<JarvisEvent>();
+    let (audio_tx, audio_rx) = channel::<AudioMessage>();
+    std::thread::spawn(move || for _ in audio_rx {});
+
+    // Флаг завершения вопроса: LlmDone или Error.
+    let done = Arc::new((Mutex::new(false), Condvar::new()));
+    {
+        let done = Arc::clone(&done);
+        std::thread::spawn(move || {
+            for ev in events_rx {
+                match ev {
+                    JarvisEvent::LlmDone { text } => {
+                        println!("✅ ОТВЕТ: {text}");
+                        let (lock, cvar) = &*done;
+                        *lock.lock().unwrap() = true;
+                        cvar.notify_all();
+                    }
+                    JarvisEvent::Error { message } => {
+                        println!("❗ ОШИБКА: {message}");
+                        let (lock, cvar) = &*done;
+                        *lock.lock().unwrap() = true;
+                        cvar.notify_all();
+                    }
+                    JarvisEvent::ActionStarted { tool, summary } => {
+                        println!("▶️ {tool}: {summary}")
+                    }
+                    JarvisEvent::ActionResult { ok, summary } => {
+                        println!("🔧 [{}] {}", ok, summary)
+                    }
+                    JarvisEvent::Log { message } => println!("ℹ️  {message}"),
+                    JarvisEvent::LlmStatus { status } => println!("🧠 {status}"),
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    let shared = Arc::new(SharedLlmState::new());
+    llm::spawn_llm_loader(&shared, &events_tx);
+    let history = Arc::new(Mutex::new(Vec::new()));
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    for q in QUESTIONS {
+        println!("\n========== ❓ {q}");
+        let started = Instant::now();
+        // Зеркало llm_ask (текстовый чат): свежие данные — сразу веб-флоу.
+        let explicit_web = jarvis_core::router::explicit_web_request(q);
+        let fresh_info = jarvis_core::web::looks_like_fresh_info(q)
+            && !jarvis_core::router::calendar_question(q);
+        let mut system = llm::CHAT_SYSTEM_PROMPT;
+        let mut prompt = (*q).to_string();
+        if explicit_web || fresh_info {
+            let query = jarvis_core::router::web_query_from(q).unwrap_or_else(|| q.to_string());
+            println!("🌐 веб-флоу: {query}");
+            if let Ok(hits) = jarvis_core::web::search(&query, 5)
+                && let Some(web_prompt) = jarvis_core::web::build_summary_prompt(&query, &hits)
+            {
+                system = llm::WEB_SYSTEM_PROMPT;
+                prompt = web_prompt;
+            }
+        }
+        llm::ask(
+            Arc::clone(&shared),
+            system,
+            prompt,
+            Arc::clone(&history),
+            audio_tx.clone(),
+            events_tx.clone(),
+            Arc::clone(&cancel),
+        );
+        let (lock, cvar) = &*done;
+        let mut guard = lock.lock().unwrap();
+        let (mut guard, timeout) = cvar
+            .wait_timeout_while(guard, Duration::from_secs(60), |finished| !*finished)
+            .unwrap();
+        if timeout.timed_out() {
+            println!("⏱ ТАЙМАУТ 60 c");
+        } else {
+            println!("⏱ {:.1?}", started.elapsed());
+        }
+        *guard = false;
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
+    // История диалога — видно, что реально запомнилось.
+    println!("\n========== ИСТОРИЯ");
+    for (q, a) in history.lock().unwrap().iter() {
+        println!("Q: {q}\nA: {}\n", a.chars().take(120).collect::<String>());
+    }
+    let _ = Ordering::SeqCst; // silence unused-import lint in some toolchains
+    Ok(())
+}

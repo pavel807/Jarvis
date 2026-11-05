@@ -1,6 +1,6 @@
 //! Детектор wake word (RustPotter): создание, горячая подмена модели.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use rustpotter::{Rustpotter, RustpotterConfig, SampleFormat};
 use std::path::Path;
 

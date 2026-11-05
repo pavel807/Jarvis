@@ -1,80 +1,154 @@
 //! Конечный автомат ассистента: wake word → команда → LLM.
-//!
-//! Потоки: callback микрофона шлёт чанки в bounded-канал; главный цикл делает
-//! VAD/wake word и, не блокируясь, отправляет готовые фразы в STT-воркер
-//! (транскрибация идёт параллельно); ответы озвучивает отдельный поток-плеер.
 
 use crate::audio::{calculate_rms, resample_audio, spawn_stream};
-use crate::commands::{execute_command, get_global_config, CommandsConfig};
+use crate::commands::{CommandsConfig, execute_command, get_global_config};
 use crate::events::{EventTx, JarvisEvent};
 use crate::llm::{self, ChatTurn, SharedLlm};
 use crate::paths;
+use crate::router;
 use crate::settings::Settings;
+use crate::speaker::{SpeechProbeResult, SpeakerQuery, SpeakerReply};
 use crate::stt::Stt;
 use crate::text::{clean_wakewords_and_prompt, extract_repeat_text, is_valid};
 use crate::tts::AudioMessage;
 use crate::wake;
+use crate::{text, topic};
 use anyhow::{Context, Result};
 use cpal::traits::StreamTrait;
 use rand::Rng;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, sync_channel};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-/// Сколько секунд аудио держим в pre-roll истории перед началом речи.
 const HISTORY_BUFFER_SECS: usize = 1;
+const MIC_LEVEL_INTERVAL_MS: u64 = 40;
+/// Сколько миллисекунд речи нужно принять до того, как она станет фразой,
+/// от которой берётся преролл (начало слова). 500 мс: потеря первого слога
+/// («проиграй» → «играй») недопустима для команд; буфер истории — 1 с.
+const PREROLL_SECS: f32 = 0.5;
+/// Сколько миллисекунд после озвучки ещё игнорируем вход: в буфере микрофона
+/// остаётся хвост только что сказанного.
+const POST_SPEAK_GUARD_MS: u64 = 250;
+
+/// VAD speakrs: сколько последних секунд фразы отправляем на проверку.
+/// Короче окно — дешевле инференс, но пауза в начале окна выглядит как конец
+/// фразы. 1.5 с хватает, чтобы отличить паузу посреди слова от тишины.
+const VAD_WINDOW_SECS: f32 = 1.5;
+/// Как часто опрашиваем VAD, пока пользователь говорит.
+const VAD_PROBE_INTERVAL_MS: u64 = 400;
+/// Сколько ждём ответ VAD, прежде чем считать пайплайн зависшим.
+const VAD_PROBE_TIMEOUT_MS: u64 = 2500;
+/// Насколько свежим должен быть результат VAD, чтобы закрыть по нему фразу.
+/// Запас больше типичных 200 мс инференса: медленный CPU не должен лишать
+/// ассистента возможности когда-либо закончить фразу.
+const VAD_RESULT_MAX_AGE_MS: u64 = 2000;
+/// Минимальный измеренный хвост тишины: у speakrs есть смещение ~0.2 с
+/// (речь в окне заканчивается раньше реального конца), поэтому слишком
+/// маленький порог закрывал бы фразу прямо посреди слова.
+const VAD_MIN_TAIL_SECS: f32 = 0.35;
+/// Жёсткий предел фразы, когда VAD подтверждает, что речь ещё идёт.
+/// Обычный `max_command_duration_secs` — мягкий: на нём фраза не режется,
+/// пока speakrs видит голос.
+const HARD_MAX_COMMAND_SECS: f32 = 30.0;
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 enum AppState {
-    /// Слушаем wake word.
     WaitingForWakeWord,
-    /// Окно прямого слушания: ждём команду.
     WaitingForCommand,
-    /// Фраза captured, ждём результат транскрибации.
     Processing,
 }
 
-/// Всё, что нужно движку для работы; общее для CLI и Tauri.
 pub struct EngineHandles {
     pub commands: Arc<RwLock<CommandsConfig>>,
     pub settings: Arc<RwLock<Settings>>,
     pub audio_tx: Sender<AudioMessage>,
     pub is_speaking: Arc<AtomicBool>,
     pub stop_audio_flag: Arc<AtomicBool>,
-    /// Пауза прослушивания (из UI/трея).
     pub paused: Arc<AtomicBool>,
-    /// Флаг горячей подмены модели wake word (после обучения).
     pub wakeword_reload: Arc<AtomicBool>,
-    /// Отмена генерации LLM (сбрасывается в начале обработки фразы).
     pub llm_cancel: Arc<AtomicBool>,
-    /// Контекст голосового диалога: пары «вопрос → ответ».
-    /// Чистится при возврате в режим wake word.
     pub llm_history: Arc<Mutex<Vec<ChatTurn>>>,
     pub llm: SharedLlm,
     pub events: EventTx,
+    /// Голосовой воркер: запросы VAD/верификации и ответы.
+    pub speaker_tx: std::sync::mpsc::SyncSender<SpeakerQuery>,
+    pub speaker_rx: Receiver<SpeakerReply>,
 }
 
 pub struct SttJob {
     pub samples: Vec<f32>,
 }
 
-/// STT-воркер: транскрибация уходит из микрофонного цикла, ответы приходят
-/// по порядку в общий канал.
 pub fn spawn_stt_worker(
     mut stt: Stt,
+    settings: Arc<RwLock<crate::settings::Settings>>,
+    commands: Arc<RwLock<CommandsConfig>>,
 ) -> (SyncSender<SttJob>, Receiver<anyhow::Result<String>>) {
     let (tx, rx) = sync_channel::<SttJob>(2);
     let (out_tx, out_rx) = std::sync::mpsc::channel();
 
     std::thread::spawn(move || {
+        // Словарь Jarvis для beam search: триггерные слова команд.
+        // Пересобирается, когда состав команд меняется (hot-reload config).
+        let mut dict: Option<crate::asr::ctc::JarvisDictionary> = None;
+        let mut dict_len = 0usize;
         while let Ok(job) = rx.recv() {
             let started = Instant::now();
-            let res = stt.transcribe(&job.samples);
+            let (decoder_name, beam_width, dict_enabled) = {
+                let s = settings.read().unwrap_or_else(|e| e.into_inner());
+                (s.asr_decoder.clone(), s.asr_beam_width, s.asr_dict)
+            };
+            let cmd_len = commands.read().unwrap_or_else(|e| e.into_inner()).commands.len();
+            let res = match decoder_name.as_str() {
+                "ctc" => stt
+                    .model()
+                    .transcribe_with(&job.samples, crate::asr::model::Decoder::CtcGreedy, None)
+                    .map(|t| t.text.trim().to_string()),
+                "ctc_beam" => {
+                    if dict_enabled && cmd_len != dict_len {
+                        let phrases: Vec<String> = commands
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .commands
+                            .iter()
+                            .filter(|c| c.enabled)
+                            .flat_map(|c| {
+                                let mut variants = c.trigger_words.clone();
+                                // Латинские триггеры («premiere pro») ASR пишет
+                                // кириллицей — добавляем русскую форму
+                                // произношения из TextNormalizer.
+                                for w in &c.trigger_words {
+                                    let ru = crate::tts_normalizer::apply_tech_pronunciation(
+                                        &w.to_lowercase(),
+                                    );
+                                    if ru != w.to_lowercase() && !variants.contains(&ru) {
+                                        variants.push(ru);
+                                    }
+                                }
+                                variants
+                            })
+                            .collect();
+                        dict = stt.model().jarvis_dictionary(&phrases).ok();
+                        dict_len = cmd_len;
+                    }
+                    stt.model()
+                        .transcribe_with(
+                            &job.samples,
+                            crate::asr::model::Decoder::CtcBeam {
+                                width: beam_width.max(1),
+                            },
+                            dict.as_ref(),
+                        )
+                        .map(|t| t.text.trim().to_string())
+                }
+                _ => stt.transcribe(&job.samples),
+            };
             let secs = job.samples.len() as f32 / wake::SAMPLE_RATE as f32;
             println!(
-                "📝 STT: {:.1?} на {:.1} с аудио",
+                "📝 STT[{}]: {:.1?} на {:.1} с аудио",
+                decoder_name,
                 started.elapsed(),
                 secs
             );
@@ -85,7 +159,6 @@ pub fn spawn_stt_worker(
     (tx, out_rx)
 }
 
-/// Быстрые социальные ответы без LLM.
 fn match_quick_social_response(text: &str) -> Option<&'static str> {
     use crate::text::clean_text;
 
@@ -119,34 +192,183 @@ fn match_quick_social_response(text: &str) -> Option<&'static str> {
     }
 }
 
-/// Куда двигаться после обработки фразы: режим wake word или окно follow-up.
 #[derive(PartialEq)]
 enum Outcome {
     Wake,
     Followup,
 }
 
-/// Главная функция движка. Блокирует вызывающий поток.
+/// Состояние VAD-проверок одной фразы.
+///
+/// Запросы идут асинхронно: аудио-цикл не ждёт инференс speakrs, а лишь
+/// отправляет очередное окно и забирает готовый ответ. Идентификатор
+/// отсекает ответы, пришедшие после сброса фразы.
+struct VadTracker {
+    id: u64,
+    in_flight: bool,
+    probe_started_at: Instant,
+    probe_audio_end_at: Instant,
+    last_probe_at: Instant,
+    /// Измеренный хвост тишины после последней речи в окне, секунд.
+    tail_secs: Option<f32>,
+    /// Момент конца аудио, по которому посчитан `tail_secs`.
+    tail_at: Option<Instant>,
+    /// Хотя бы один запрос завершился успешно — VAD можно доверять.
+    healthy: bool,
+    /// Пайплайн недоступен: движок откатывается на RMS-детекцию.
+    unavailable: bool,
+    /// Подряд идущих ошибок инференса (одна может быть случайной).
+    failures: u8,
+    /// speakrs хоть раз увидел речь в текущей фразе.
+    saw_speech: bool,
+}
+
+impl VadTracker {
+    fn new() -> Self {
+        Self {
+            id: 0,
+            in_flight: false,
+            probe_started_at: Instant::now(),
+            probe_audio_end_at: Instant::now(),
+            // Первый запрос можно отправлять сразу, как только началась речь.
+            last_probe_at: Instant::now() - Duration::from_millis(VAD_PROBE_INTERVAL_MS),
+            tail_secs: None,
+            tail_at: None,
+            healthy: false,
+            unavailable: false,
+            failures: 0,
+            saw_speech: false,
+        }
+    }
+
+    /// Новая фраза: старые ответы становятся невалидными по id.
+    fn reset_phrase(&mut self) {
+        self.id = self.id.wrapping_add(1);
+        self.in_flight = false;
+        self.tail_secs = None;
+        self.tail_at = None;
+        self.saw_speech = false;
+        self.last_probe_at = Instant::now() - Duration::from_millis(VAD_PROBE_INTERVAL_MS);
+    }
+
+    /// Принять ответ VAD. `false` — ответ устарел и к текущей фразе не относится.
+    fn accept(&mut self, result: SpeechProbeResult) -> bool {
+        if result.id != self.id {
+            return false;
+        }
+        self.in_flight = false;
+        self.healthy = true;
+        self.failures = 0;
+        let total = result.total_secs.max(0.0);
+        let Some(end) = result.last_speech_end else {
+            // Речи в окне нет вовсе — хвост тишины равен всему окну.
+            self.tail_secs = Some(total);
+            self.tail_at = Some(self.probe_audio_end_at);
+            return true;
+        };
+        self.saw_speech = true;
+        self.tail_secs = Some((total - end.clamp(0.0, total)).max(0.0));
+        self.tail_at = Some(self.probe_audio_end_at);
+        true
+    }
+
+    /// Ошибка инференса. VAD отключаем только после нескольких подряд:
+    /// одиночный сбой не должен лишать движок VAD до конца сессии.
+    fn note_failure(&mut self) {
+        self.in_flight = false;
+        self.failures = self.failures.saturating_add(1);
+        if self.failures >= 3 {
+            self.unavailable = true;
+            eprintln!("🎙️ VAD speakrs недоступен — завершаю фразы по громкости");
+        }
+    }
+
+    /// VAD уверенно показывает, что после последней речи прошло достаточно тишины.
+    fn confirmed_silence(&self, threshold_secs: f32) -> bool {
+        if self.unavailable {
+            return false;
+        }
+        let (Some(tail), Some(at)) = (self.tail_secs, self.tail_at) else {
+            return false;
+        };
+        // Свежесть важна: старый «хвост тишины» не должен закрыть фразу,
+        // когда пользователь уже снова говорит.
+        at.elapsed() <= Duration::from_millis(VAD_RESULT_MAX_AGE_MS)
+            && tail >= threshold_secs.max(VAD_MIN_TAIL_SECS)
+    }
+}
+
+/// Ждёт вердикт фильтра говорящего, пропуская ответы VAD от прошлых фраз.
+/// `Err(())` — воркер не ответил за отведённое время.
+fn wait_for_verdict(
+    rx: &Receiver<SpeakerReply>,
+    timeout: Duration,
+) -> std::result::Result<Option<bool>, ()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(());
+        }
+        match rx.recv_timeout(left) {
+            Ok(SpeakerReply::Verified(verdict)) => return Ok(verdict),
+            Ok(SpeakerReply::Speech(_)) => continue,
+            Err(_) => return Err(()),
+        }
+    }
+}
+
 pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
+    // Прогреваем соединение с поисковиком заранее: тогда первый запрос
+    // пользователя не платит за DNS и TLS-рукопожатие.
+    crate::web::warm_up();
+
     let (mic_tx, mic_rx) = sync_channel::<Vec<f32>>(128);
 
     println!("🎤 Запрашиваю доступ к микрофону...");
-    let (stream, native_sr) =
-        spawn_stream(mic_tx).context("Не удалось создать входной аудиопоток.")?;
-    stream
-        .play()
-        .context("Не удалось запустить микрофон.")?;
+    // Цикл ожидания доступа: macOS при запрете не возвращает ошибку, а молча
+    // подаёт тишину, поэтому без проверки здесь ассистент «работал» без ушей.
+    // Пока доступа нет — показываем системный запрос и событие в UI и ждём;
+    // как только пользователь разрешил, микрофон открывается без перезапуска.
+    let (stream, native_sr) = {
+        #[cfg(target_os = "macos")]
+        let mut told_user = false;
+        let opened;
+        loop {
+            #[cfg(target_os = "macos")]
+            {
+                if !crate::audio::mic_access_step() {
+                    if !told_user {
+                        told_user = true;
+                        let _ = h.events.send(JarvisEvent::MicPermission { granted: false });
+                        println!("🎤 Жду доступа к микрофону (открыт системный запрос)…");
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+                if told_user {
+                    let _ = h.events.send(JarvisEvent::MicPermission { granted: true });
+                }
+            }
+            match spawn_stream(mic_tx.clone()) {
+                Ok(pair) => {
+                    opened = pair;
+                    break;
+                }
+                Err(e) => return Err(e.context("Не удалось создать входной аудиопоток.")),
+            }
+        }
+        opened
+    };
+    stream.play().context("Не удалось запустить микрофон.")?;
 
     println!("✅ Микрофон запущен и готов к работе");
     println!("💡 Скажи 'Джарвис' для активации...");
 
-    let (stt_tx, stt_rx) = spawn_stt_worker(stt);
+    let (stt_tx, stt_rx) = spawn_stt_worker(stt, Arc::clone(&h.settings), Arc::clone(&h.commands));
 
     let (wake_threshold, ww_model) = {
-        let s = h
-            .settings
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let s = h.settings.read().unwrap_or_else(|e| e.into_inner());
         (s.wake_threshold, s.wakeword_model.clone())
     };
     let mut det = wake::create_detector(&paths::wakeword_model_file(&ww_model), wake_threshold)?;
@@ -161,22 +383,30 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 
     let mut has_speech_started = false;
     let mut silence_samples = 0;
+    // Сколько сэмплов было именно речью (а не тишиной) в текущей фразе.
+    let mut voiced_samples = 0usize;
+    // Фильтр говорящего включён для текущей фразы: сегмент ушёл на
+    // верификацию голоса, и в Processing нужно забрать вердикт.
+    let mut speaker_check_sent = false;
+    // Оценка фонового шума комнаты: по ней поднимаем порог речи, чтобы
+    // вентилятор/улица не запускали распознавание.
+    let mut noise_floor = 0.0f32;
     let mut was_speaking = false;
     let mut rng = rand::thread_rng();
+    // VAD speakrs: пока пользователь говорит, фраза не уходит в STT.
+    let mut vad = VadTracker::new();
 
-    let _ = h
-        .events
-        .send(JarvisEvent::StateChanged { state: "wake_word".into() });
+    let mut last_mic_level_emit = Instant::now() - Duration::from_millis(MIC_LEVEL_INTERVAL_MS);
+    let mut mic_held_level = 0.0f32;
+
+    let _ = h.events.send(JarvisEvent::StateChanged {
+        state: "wake_word".into(),
+    });
 
     loop {
-        // --- 0. Горячая подмена модели wake word и снимок настроек ---
         if h.wakeword_reload.load(Ordering::SeqCst) && state == AppState::WaitingForWakeWord {
             h.wakeword_reload.store(false, Ordering::SeqCst);
-            let snap = h
-                .settings
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
+            let snap = h.settings.read().unwrap_or_else(|e| e.into_inner()).clone();
             match wake::create_detector(
                 &paths::wakeword_model_file(&snap.wakeword_model),
                 snap.wake_threshold,
@@ -189,19 +419,24 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             }
         }
 
-        let settings_snap = h
-            .settings
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let settings_snap = h.settings.read().unwrap_or_else(|e| e.into_inner()).clone();
         let min_command_samples =
             (wake::SAMPLE_RATE as f32 * settings_snap.min_command_duration_secs) as usize;
         let max_command_samples =
             (wake::SAMPLE_RATE as f32 * settings_snap.max_command_duration_secs) as usize;
+        // Пока speakrs слышит речь, мягкий лимит не режет фразу; жёсткий
+        // предел защищает от вечного слушания (шум, музыка, зависший VAD).
+        let hard_max_command_samples = (wake::SAMPLE_RATE as f32
+            * settings_snap.max_command_duration_secs.max(HARD_MAX_COMMAND_SECS))
+            as usize;
         let silence_trigger_samples =
             (wake::SAMPLE_RATE as f32 * settings_snap.silence_timeout_secs) as usize;
+        let vad_window_samples = (wake::SAMPLE_RATE as f32 * VAD_WINDOW_SECS) as usize;
+        // Речь короче 0.35 с — почти наверняка щелчок или шумовой всплеск.
+        let min_voiced_samples = (wake::SAMPLE_RATE as f32 * 0.25) as usize;
+        // Насколько высоко вообще можно поднять порог (чтобы не оглохнуть).
+        let noise_ceiling = settings_snap.silence_rms_threshold * 4.0;
 
-        // Пауза: вычитываем микрофон, копилки сбрасываем.
         if h.paused.load(Ordering::SeqCst) {
             let _ = mic_rx.recv_timeout(Duration::from_millis(100));
             command_buffer.clear();
@@ -209,24 +444,33 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             audio_history.clear();
             has_speech_started = false;
             silence_samples = 0;
+            voiced_samples = 0;
+            vad.reset_phrase();
+            mic_held_level = 0.0;
+            let _ = h.events.send(JarvisEvent::AudioLevel {
+                level: 0.0,
+                source: "mic".into(),
+            });
             continue;
         }
 
-        // --- 1. Забираем готовую транскрипцию, если она есть ---
         if state == AppState::Processing {
             match stt_rx.try_recv() {
-                Ok(res) => {
-                    state = AppState::WaitingForCommand;
+                        Ok(res) => {
+                            state = AppState::WaitingForCommand;
 
-                    let text = match res {
-                        Ok(t) => t,
-                        Err(e) => {
-                            eprintln!("⚠️ Ошибка распознавания: {e}");
-                            command_buffer.clear();
-                            has_speech_started = false;
-                            silence_samples = 0;
+                            let text = match res {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    eprintln!("⚠️ Ошибка распознавания: {e}");
+                                    speaker_check_sent = false;
+                                    command_buffer.clear();
+                                    has_speech_started = false;
+                                    silence_samples = 0;
+                                    voiced_samples = 0;
+                                    vad.reset_phrase();
 
-                            if followup_expired_or_none(followup_deadline) {
+                                    if followup_expired_or_none(followup_deadline) {
                                 let global_cfg = get_global_config(&h.commands);
                                 let _ = h
                                     .audio_tx
@@ -240,17 +484,55 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                     };
 
                     println!("📝 Распознано: {:?}", text);
+
+                    // Вердикт фильтра говорящего: чужая речь не идёт ни в
+                    // LLM, ни в команды — движок просто ждёт дальше.
+                    if speaker_check_sent {
+                        let owner = match wait_for_verdict(
+                            &h.speaker_rx,
+                            Duration::from_millis(2000),
+                        ) {
+                            Ok(v) => v,
+                            Err(()) => {
+                                eprintln!("🎙️ Фильтр говорящего не ответил вовремя — фраза пропущена фильтром");
+                                None
+                            }
+                        };
+                        speaker_check_sent = false;
+                        if owner == Some(false) {
+                            println!("🎙️ Посторонний голос — фраза не принята");
+                            let _ = h.events.send(JarvisEvent::Log {
+                                message: "Посторонний голос на фоне — фраза пропущена".into(),
+                            });
+                            command_buffer.clear();
+                            has_speech_started = false;
+                            silence_samples = 0;
+                            voiced_samples = 0;
+                            vad.reset_phrase();
+                            // Followup закрываем: чужая фраза не продолжение
+                            // диалога с владельцем.
+                            state = AppState::WaitingForWakeWord;
+                            followup_deadline = None;
+                            wi16.clear();
+                            audio_history.clear();
+                            continue;
+                        }
+                    }
+
                     let _ = h
                         .events
                         .send(JarvisEvent::Transcript { text: text.clone() });
 
-                    let outcome = if is_valid(&text) {
+                    let noise_input = !is_valid(&text);
+                    let outcome = if !noise_input {
                         handle_transcript(&text, &h, &mut rng)
                     } else {
                         eprintln!("🔇 Шум или пустой ввод");
                         if followup_expired_or_none(followup_deadline) {
                             let global_cfg = get_global_config(&h.commands);
-                            let _ = h.audio_tx.send(AudioMessage::PlayWav(global_cfg.reply_error));
+                            let _ = h
+                                .audio_tx
+                                .send(AudioMessage::PlayWav(global_cfg.reply_error));
                             Outcome::Wake
                         } else {
                             Outcome::Followup
@@ -260,6 +542,8 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                     command_buffer.clear();
                     has_speech_started = false;
                     silence_samples = 0;
+                    voiced_samples = 0;
+                    vad.reset_phrase();
 
                     match outcome {
                         Outcome::Wake => {
@@ -267,7 +551,6 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                             followup_deadline = None;
                             audio_history.clear();
                             wi16.clear();
-                            // Диалог завершён — контекст LLM не нужен.
                             h.llm_history
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
@@ -278,8 +561,15 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                         }
                         Outcome::Followup => {
                             state = AppState::WaitingForCommand;
-                            followup_deadline =
-                                Some(Instant::now() + Duration::from_secs(settings_snap.followup_window_secs));
+                            // Пустое распознавание (шум) окно не продлевает:
+                            // иначе фоновый шум держит ассистента в режиме
+                            // слушания бесконечно, съедая цикл за циклом.
+                            if !noise_input || followup_deadline.is_none() {
+                                followup_deadline = Some(
+                                    Instant::now()
+                                        + Duration::from_secs(settings_snap.followup_window_secs),
+                                );
+                            }
                             audio_history.clear();
                             let _ = h.events.send(JarvisEvent::StateChanged {
                                 state: "listening".into(),
@@ -296,39 +586,10 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             }
         }
 
-        // --- 2. Очередь микрофона ---
         let chunk = match mic_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(c) => c,
             Err(_) => continue,
         };
-
-        // Пока звучит ответ ассистента — не слушаем себя.
-        let speaking_now = h.is_speaking.load(Ordering::SeqCst);
-        if speaking_now {
-            was_speaking = true;
-            audio_history.clear();
-            command_buffer.clear();
-            wi16.clear();
-
-            has_speech_started = false;
-            silence_samples = 0;
-            followup_deadline = Some(Instant::now() + Duration::from_secs(settings_snap.followup_window_secs));
-            continue;
-        }
-        if was_speaking {
-            // Речь закончилась: у колонок отгул, микрофон мог снять эхо.
-            // Пауза и сброс накопленного, чтобы эхо не превратилось
-            // в «команду» и не оборвало следующий ответ.
-            was_speaking = false;
-            std::thread::sleep(Duration::from_millis(250));
-            while mic_rx.try_recv().is_ok() {}
-            audio_history.clear();
-            command_buffer.clear();
-            wi16.clear();
-            has_speech_started = false;
-            silence_samples = 0;
-            continue;
-        }
 
         let chunk_16k = if native_sr != wake::SAMPLE_RATE {
             resample_audio(&chunk, native_sr, wake::SAMPLE_RATE)
@@ -336,6 +597,33 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             chunk
         };
 
+        // Уровень микрофона летит в UI всегда, даже пока Джарвис говорит или
+        // LLM обрабатывает запрос: звук принимается, просто не обрабатывается
+        // как команда. Без этого спектрограмма замирала на всё время ответа.
+        let now = Instant::now();
+        if now.duration_since(last_mic_level_emit) >= Duration::from_millis(MIC_LEVEL_INTERVAL_MS) {
+            let rms = calculate_rms(&chunk_16k);
+            let peak_abs = chunk_16k.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+            let raw = (rms.max(peak_abs * 0.65) * 6.0).min(1.0);
+
+            mic_held_level = if raw > mic_held_level {
+                raw
+            } else {
+                mic_held_level * 0.75
+            };
+
+            let _ = h.events.send(JarvisEvent::AudioLevel {
+                level: mic_held_level,
+                source: "mic".into(),
+            });
+            last_mic_level_emit = now;
+        }
+
+        // Историю пополняем всегда, даже когда Джарвис говорит: первые ~0.3 с
+        // речи пользователя приходятся на момент, когда он ещё не умолк, и
+        // без истории фраза начиналась бы с середины слова.
+        let history_capacity = wake::SAMPLE_RATE * HISTORY_BUFFER_SECS;
+        let preroll_samples = (wake::SAMPLE_RATE as f32 * PREROLL_SECS) as usize;
         for &s in &chunk_16k {
             if audio_history.len() >= history_capacity {
                 audio_history.pop_front();
@@ -343,38 +631,74 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             audio_history.push_back(s);
         }
 
-        // --- 3. Истечение окна follow-up ---
-        if let Some(deadline) = followup_deadline {
-            if Instant::now() > deadline {
-                if state == AppState::WaitingForCommand {
-                    println!(
-                        "🔒 Окно прямого слушания ({} сек) истекло. Переход в режим вакворда.",
-                        settings_snap.followup_window_secs
-                    );
+        // Пока Джарвис говорит, микрофон не слушаем: иначе хвост его же речи
+        // будет распознан как ответ пользователя.
+        let speaking_now = h.is_speaking.load(Ordering::SeqCst);
+        if speaking_now {
+            was_speaking = true;
+            audio_history.clear();
+            command_buffer.clear();
+            has_speech_started = false;
+            vad.reset_phrase();
+            continue;
+        }
 
-                    state = AppState::WaitingForWakeWord;
-                    command_buffer.clear();
-                    wi16.clear();
-                    audio_history.clear();
-                    h.llm_history
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clear();
+        if was_speaking {
+            // Озвучка только что закончилась: выбрасываем хвост из буфера микрофона
+            // и коротко молчим, чтобы пользователь не начал говорить в пустоту.
+            was_speaking = false;
+            has_speech_started = false;
+            silence_samples = 0;
+            voiced_samples = 0;
+            command_buffer.clear();
+            vad.reset_phrase();
+            while mic_rx.try_recv().is_ok() {}
+            audio_history.clear();
+            std::thread::sleep(Duration::from_millis(POST_SPEAK_GUARD_MS));
+            audio_history.clear();
+            continue;
+        }
 
-                    has_speech_started = false;
-                    silence_samples = 0;
-                    let _ = h
-                        .events
-                        .send(JarvisEvent::StateChanged { state: "wake_word".into() });
-                }
+        if let Some(deadline) = followup_deadline
+            && Instant::now() > deadline
+        {
+            if state == AppState::WaitingForCommand && has_speech_started {
+                // Пользователь уже говорит: окно прямого слушания больше не
+                // актуально. Не обрываем фразу на полуслове — продлеваем
+                // до конца речи, итог выставит обработка транскрипта.
+                followup_deadline = Some(
+                    Instant::now() + Duration::from_secs(settings_snap.followup_window_secs),
+                );
+            } else if state == AppState::WaitingForCommand {
+                println!(
+                    "🔒 Окно прямого слушания ({} сек) истекло. Переход в режим вакворда.",
+                    settings_snap.followup_window_secs
+                );
+
+                state = AppState::WaitingForWakeWord;
+                command_buffer.clear();
+                wi16.clear();
+                audio_history.clear();
+                h.llm_history
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
+
+                has_speech_started = false;
+                silence_samples = 0;
+                voiced_samples = 0;
+                vad.reset_phrase();
+                followup_deadline = None;
+                let _ = h.events.send(JarvisEvent::StateChanged {
+                    state: "wake_word".into(),
+                });
+            } else {
                 followup_deadline = None;
             }
         }
 
         match state {
             AppState::WaitingForWakeWord => {
-                // Буфер для детектора наполняется только здесь — в остальных
-                // состояниях он не нужен и его рост ограничен.
                 for &s in &chunk_16k {
                     wi16.push_back((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
                 }
@@ -396,21 +720,28 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                             .audio_tx
                             .send(AudioMessage::PlayWav(ack.to_string_lossy().to_string()));
 
-                        std::thread::sleep(Duration::from_millis(150));
+                        // Небольшая пауза, чтобы хвост подтверждающего звука
+                        // не попал в буфер команды. Было 150 мс — это чистая
+                        // задержка перед началом слушания.
+                        std::thread::sleep(Duration::from_millis(60));
 
                         wi16.clear();
                         audio_history.clear();
 
                         state = AppState::WaitingForCommand;
-                        followup_deadline =
-                            Some(Instant::now() + Duration::from_secs(settings_snap.followup_window_secs));
+                        followup_deadline = Some(
+                            Instant::now()
+                                + Duration::from_secs(settings_snap.followup_window_secs),
+                        );
 
                         command_buffer.clear();
                         has_speech_started = false;
                         silence_samples = 0;
-                        let _ = h
-                            .events
-                            .send(JarvisEvent::StateChanged { state: "listening".into() });
+                        voiced_samples = 0;
+                        vad.reset_phrase();
+                        let _ = h.events.send(JarvisEvent::StateChanged {
+                            state: "listening".into(),
+                        });
 
                         break;
                     }
@@ -420,59 +751,178 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             AppState::WaitingForCommand => {
                 let chunk_rms = calculate_rms(&chunk_16k);
 
-                if chunk_rms >= settings_snap.silence_rms_threshold {
+                // Порог речи: не ниже настройки и заметно выше фонового шума.
+                let speech_floor = speech_floor(settings_snap.silence_rms_threshold, noise_floor);
+
+                if chunk_rms >= speech_floor {
+                    voiced_samples += chunk_16k.len();
                     if !has_speech_started {
                         has_speech_started = true;
-                        let preroll_samples = (wake::SAMPLE_RATE as f32 * 0.3) as usize;
+                        vad.reset_phrase();
                         let hist_len = audio_history.len();
                         let take_samples = hist_len.min(preroll_samples);
                         if take_samples > 0 {
                             let start_idx = hist_len - take_samples;
-                            for i in start_idx..hist_len {
-                                command_buffer.push(audio_history[i]);
-                            }
+                            command_buffer.extend(audio_history.iter().skip(start_idx).copied());
                         }
                     }
                     silence_samples = 0;
-                } else if has_speech_started {
-                    silence_samples += chunk_16k.len();
+                    // Громкий звук после паузы отменяет старый вердикт VAD:
+                    // пользователь мог продолжить фразу.
+                    vad.tail_secs = None;
+                    vad.tail_at = None;
+                } else {
+                    // Тишина: обновляем оценку фона (только когда не говорим),
+                    // чтобы порог подстраивался под комнату.
+                    if !has_speech_started {
+                        noise_floor = update_noise_floor(noise_floor, chunk_rms, noise_ceiling);
+                    }
+                    if has_speech_started {
+                        // Считаем реальную тишину. Это только запасной путь:
+                        // пока speakrs видит речь, фразу не закрываем.
+                        silence_samples += chunk_16k.len();
+                    }
                 }
 
                 if has_speech_started {
                     command_buffer.extend_from_slice(&chunk_16k);
 
-                    let reached_max = command_buffer.len() >= max_command_samples;
-                    let silence_timeout = silence_samples >= silence_trigger_samples;
+                    // Ответы VAD не блокируют аудио-цикл: отправляем окно,
+                    // а результат забираем, когда воркер его посчитает.
+                    while let Ok(reply) = h.speaker_rx.try_recv() {
+                        match reply {
+                            SpeakerReply::Speech(Some(result)) => {
+                                vad.accept(result);
+                            }
+                            SpeakerReply::Speech(None) => vad.note_failure(),
+                            // Вердикт фильтра от прошлой фразы: текущая его не ждёт.
+                            SpeakerReply::Verified(_) => {}
+                        }
+                    }
 
-                    if reached_max || silence_timeout {
-                        if command_buffer.len() < min_command_samples {
+                    // Очередное окно на проверку. Один запрос в полёте:
+                    // воркер не копит очередь, а свежесть важнее частоты.
+                    if !vad.unavailable
+                        && !vad.in_flight
+                        && vad.last_probe_at.elapsed()
+                            >= Duration::from_millis(VAD_PROBE_INTERVAL_MS)
+                    {
+                        let take = command_buffer.len().min(vad_window_samples);
+                        if take > 0 {
+                            let start = command_buffer.len() - take;
+                            vad.id = vad.id.wrapping_add(1);
+                            let query = SpeakerQuery::SpeechProbe {
+                                id: vad.id,
+                                samples: command_buffer[start..].to_vec(),
+                            };
+                            if h.speaker_tx.try_send(query).is_ok() {
+                                vad.in_flight = true;
+                                vad.probe_started_at = now;
+                                vad.probe_audio_end_at = now;
+                                vad.last_probe_at = now;
+                            }
+                        }
+                    }
+
+                    // Зависший инференс не должен держать фразу вечно.
+                    if vad.in_flight
+                        && now.duration_since(vad.probe_started_at)
+                            > Duration::from_millis(VAD_PROBE_TIMEOUT_MS)
+                    {
+                        eprintln!(
+                            "🎙️ VAD speakrs не ответил за {VAD_PROBE_TIMEOUT_MS} мс"
+                        );
+                        vad.note_failure();
+                    }
+
+                    let reached_max = command_buffer.len() >= max_command_samples;
+                    let reached_hard_max = command_buffer.len() >= hard_max_command_samples;
+                    // Первый ответ VAD ещё в пути — не решаем по старой
+                    // RMS-логике, иначе тихая речь оборвётся до проверки.
+                    let vad_pending = vad.in_flight && !vad.healthy && !vad.unavailable;
+                    // Пока VAD здоров, пауза посреди предложения не закрывает
+                    // фразу: нужен подтверждённый хвост тишины speakrs.
+                    let endpoint = if vad.healthy && !vad.unavailable {
+                        vad.confirmed_silence(settings_snap.silence_timeout_secs)
+                            || reached_hard_max
+                    } else if vad_pending {
+                        false
+                    } else {
+                        silence_samples >= silence_trigger_samples || reached_max
+                    };
+
+                    if endpoint {
+                        // Мало и буфера, и собственно речи — это шум, а не фраза.
+                        // VAD, увидевший речь, отменяет проверку по громкости:
+                        // тихую речь RMS может недосчитать.
+                        let too_quiet =
+                            voiced_samples < min_voiced_samples && !vad.saw_speech;
+                        if command_buffer.len() < min_command_samples || too_quiet {
                             command_buffer.clear();
                             has_speech_started = false;
                             silence_samples = 0;
+                            voiced_samples = 0;
+                            vad.reset_phrase();
                             continue;
                         }
 
                         let pad = (wake::SAMPLE_RATE as f32 * 0.2) as usize;
                         let mut padded = Vec::with_capacity(command_buffer.len() + pad * 2);
 
-                        padded.extend(std::iter::repeat(0.0f32).take(pad));
+                        padded.extend(std::iter::repeat_n(0.0f32, pad));
                         padded.extend_from_slice(&command_buffer);
-                        padded.extend(std::iter::repeat(0.0f32).take(pad));
+                        padded.extend(std::iter::repeat_n(0.0f32, pad));
 
-                        // Транскрибация уходит в воркер; микрофонный цикл не блокируется.
+                        // Фильтр говорящего: сегмент уходит на проверку голоса
+                        // параллельно с STT — вердикт забирается в Processing.
+                        speaker_check_sent = settings_snap.speaker_filter;
+                        if speaker_check_sent {
+                            let query = SpeakerQuery::Verify {
+                                samples: padded.clone(),
+                                threshold: settings_snap.speaker_threshold,
+                            };
+                            if h.speaker_tx.try_send(query).is_err() {
+                                // Очередь гейта переполнена — фильтр пропускает фразу.
+                                speaker_check_sent = false;
+                            }
+                        }
+
                         if stt_tx.send(SttJob { samples: padded }).is_err() {
                             return Err(anyhow::anyhow!("STT-воркер недоступен"));
                         }
 
                         state = AppState::Processing;
+                        // Фраза ушла в STT: ответы VAD на неё больше не нужны.
+                        vad.reset_phrase();
+                        // Сообщаем UI, что фраза закончилась и пошла обработка.
+                        // Без этого события интерфейс узнавал о работе только
+                        // от llm_status, и пауза на распознавание выглядела
+                        // зависшей визуализацией.
+                        let _ = h.events.send(JarvisEvent::StateChanged {
+                            state: "processing".into(),
+                        });
                     }
                 }
             }
 
-            // Ждём результат транскрибации; аудио не копим.
             AppState::Processing => {}
         }
     }
+}
+
+/// Во сколько раз речь должна быть громче фона, чтобы считаться речью.
+const NOISE_MARGIN: f32 = 1.8;
+
+/// Порог, выше которого чанк считается речью: настройка пользователя, но не
+/// ниже фонового шума комнаты с запасом.
+fn speech_floor(threshold: f32, noise_floor: f32) -> f32 {
+    threshold.max(noise_floor * NOISE_MARGIN)
+}
+
+/// Оценка фонового шума: экспоненциальное сглаживание, обновляется только
+/// в тишине и не поднимается выше потолка (иначе ассистент «оглохнет»).
+fn update_noise_floor(current: f32, rms: f32, ceiling: f32) -> f32 {
+    (current * 0.95 + rms * 0.05).min(ceiling)
 }
 
 fn followup_expired_or_none(deadline: Option<Instant>) -> bool {
@@ -482,14 +932,134 @@ fn followup_expired_or_none(deadline: Option<Instant>) -> bool {
     }
 }
 
-/// Обработка распознанной фразы: повтор / социальный ответ / команда / LLM.
-fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outcome {
-    // Новая генерация — новая отмена. Сброс именно здесь, на потоке движка,
-    // до старта любого фонового потока с LLM: иначе отмена, нажатая в момент
-    // старта запроса, затиралась бы внутри llm::ask.
-    h.llm_cancel.store(false, Ordering::SeqCst);
+/// Ответ на вопрос «задача N сделана?». Молчание и невнятный ответ оставляют
+/// задачу открытой — лучше лишняя открытая галочка, чем потерянная задача.
+fn handle_task_confirmation(
+    expect: &crate::tasks::ExpectDone,
+    answer: &str,
+    h: &EngineHandles,
+) -> Outcome {
+    if crate::tasks::is_negative(answer) {
+        println!("↩️ Задача {} остаётся открытой", expect.task_id);
+        let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(
+            "Хорошо, оставляю открытой.".into(),
+        ));
+        let _ = h.events.send(JarvisEvent::Log {
+            message: format!("Задача {} осталась открытой", expect.task_id),
+        });
+        return Outcome::Followup;
+    }
 
-    // 1. РЕЖИМ ПОВТОРЕНИЯ («скажи ...»)
+    if !crate::tasks::is_affirmative(answer) {
+        println!("🤷 Не понял ответ на вопрос по задаче: {answer:?}");
+        let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(
+            "Не понял, задача открыта. Скажи да или нет.".into(),
+        ));
+        return Outcome::Followup;
+    }
+
+    match crate::tasks::set_done(expect.task_id, true) {
+        Some(task) => {
+            println!("✅ Задача {} закрыта: {}", task.id, task.text);
+            let _ = h.events.send(JarvisEvent::Log {
+                message: format!("✅ Задача {} закрыта: {}", task.id, task.text),
+            });
+            let next = crate::tasks::speak_next();
+            let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(next));
+        }
+        None => {
+            eprintln!("⚠️ Задача {} не найдена при подтверждении", expect.task_id);
+            let _ = h
+                .audio_tx
+                .send(AudioMessage::SynthesizeAndPlay("Закрыл.".into()));
+        }
+    }
+
+    Outcome::Followup
+}
+
+/// Возврат к незакрытой теме: «мы это забыли», «о чём говорили».
+///
+/// Тема возвращается в историю диалога целиком — вопрос и прошлый ответ, —
+/// а модели уходит короткая инструкция «продолжи». Так она продолжает с
+/// нужного места и не начинает тему заново. Если возвращаться не к чему,
+/// честно говорим об этом, а не выдумываем продолжение.
+fn resume_topic(spoken: &str, h: &EngineHandles) -> Outcome {
+    let topic_memory = h
+        .settings
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .topic_memory;
+
+    let resume = topic_memory.then(topic::resume).flatten();
+
+    let Some(resume) = resume else {
+        let reply = if topic_memory {
+            "Не помню, о чём мы говорили. Напомни тему."
+        } else {
+            "Память тем выключена в настройках."
+        };
+        println!("🧠 Возврат к теме: нечего вспоминать");
+        let _ = h.events.send(JarvisEvent::Log {
+            message: "Просьба вернуться к теме, но память тем пуста".into(),
+        });
+        let _ = h
+            .audio_tx
+            .send(AudioMessage::SynthesizeAndPlay(reply.into()));
+        return Outcome::Followup;
+    };
+
+    println!("🧠 Возврат к теме: {}", resume.topic);
+    let _ = h.events.send(JarvisEvent::Log {
+        message: format!("Возврат к теме: {}", resume.topic),
+    });
+    let _ = h.events.send(JarvisEvent::TopicResumed {
+        topic: resume.topic,
+    });
+
+    let prompt = resume.prompt;
+    {
+        let mut buf = h.llm_history.lock().unwrap_or_else(|e| e.into_inner());
+        // Место под возвращаемый обмен режем заранее, иначе обрезка по
+        // лимиту могла бы отрезать его начало — и продолжить было бы нечего.
+        let excess = buf.len().saturating_sub(llm::MAX_HISTORY_ENTRIES - 2);
+        buf.drain(..excess);
+        // Прошлый обмен кладём в историю целиком: без него модели нечего
+        // продолжать, и она выдумает тему с нуля.
+        buf.push((resume.question, resume.answer));
+        buf.push((
+            spoken.to_string(),
+            "Пользователь попросил вернуться к этой теме и продолжить её.".to_string(),
+        ));
+    }
+
+    llm::ask(
+        Arc::clone(&h.llm),
+        llm::CHAT_SYSTEM_PROMPT,
+        prompt,
+        Arc::clone(&h.llm_history),
+        h.audio_tx.clone(),
+        h.events.clone(),
+        Arc::clone(&h.llm_cancel),
+    );
+
+    Outcome::Followup
+}
+
+fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outcome {
+    h.llm_cancel.store(false, Ordering::SeqCst);
+    // Номер обращения: фоновый веб-поиск проверит его перед озвучкой.
+    let req_id = llm::new_request();
+
+    // Джарвис только что спросил «задача выполнена?» — короткий ответ закрывает
+    // галочку, не уходя в LLM.
+    if crate::tasks::expecting_done()
+        && let Some(expect) = crate::tasks::take_expect_done()
+    {
+        let cleaned = clean_wakewords_and_prompt(text);
+        return handle_task_confirmation(&expect, &cleaned, h);
+    }
+
     if let Some(phrase_to_repeat) = extract_repeat_text(text) {
         println!("🗣️ Озвучивание текста: \"{}\"", phrase_to_repeat);
         let _ = h
@@ -498,7 +1068,10 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
         return Outcome::Followup;
     }
 
-    // 2. БЫСТРЫЕ СОЦИАЛЬНЫЕ ОТВЕТЫ
+    if let Some(spoken) = text::extract_topic_resume(text) {
+        return resume_topic(&spoken, h);
+    }
+
     if let Some(social_reply) = match_quick_social_response(text) {
         println!("⚡ Социальный ответ: \"{}\"", social_reply);
         let _ = h
@@ -507,15 +1080,27 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
         return Outcome::Followup;
     }
 
-    // 3. ПОИСК ЛОКАЛЬНЫХ КОМАНД ИЗ TOML
     let (matched_cmd, global_cfg) = {
         let lock = h.commands.read().unwrap_or_else(|e| e.into_inner());
-        (lock.find_command(text), lock.global.clone())
+        // Детерминированно выполняем системные команды — стоп речи и
+        // завершение работы обязаны срабатывать мгновенно и надёжно с любым
+        // размером модели. Простые action-фразы («открой ютуб», «запусти
+        // монтаж», «закрой премьер») тоже решаем без модели: маленькая модель
+        // именно на них чаще всего ошибалась. Остальное (url/app/search/
+        // web/path с контекстом «яндекс музыка» против «яндекс карты»)
+        // по-прежнему отдаём LLM с каталогом run_command.
+        let matched_cmd = lock
+            .find_command(text)
+            .filter(|cmd| matches!(cmd.action_type.trim(), "stop" | "exit"))
+            .or_else(|| lock.find_action_command(text));
+        (matched_cmd, lock.global.clone())
     };
 
     if let Some(cmd) = matched_cmd {
         println!("✅ Команда: {}", cmd.name);
-        let _ = h.events.send(JarvisEvent::CommandMatched { name: cmd.name.clone() });
+        let _ = h.events.send(JarvisEvent::CommandMatched {
+            name: cmd.name.clone(),
+        });
 
         if cmd.action_type == "stop" {
             h.stop_audio_flag.store(true, Ordering::SeqCst);
@@ -523,7 +1108,9 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
             let _ = h.audio_tx.send(AudioMessage::Stop);
 
             let reply_error = global_cfg.reply_error.clone();
-            let err_path = paths::resolve_data_path(&reply_error).to_string_lossy().to_string();
+            let err_path = paths::resolve_data_path(&reply_error)
+                .to_string_lossy()
+                .to_string();
             execute_command(
                 &cmd,
                 text,
@@ -538,15 +1125,14 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
             return Outcome::Wake;
         }
 
-        let sound_num = rng.gen_range(1..=4);
-        let sound_path = paths::resolve_data_path(&global_cfg.reply_success.replace("{}", &sound_num.to_string()));
-        let _ = h
-            .audio_tx
-            .send(AudioMessage::PlayWav(sound_path.to_string_lossy().to_string()));
-
         let reply_error = global_cfg.reply_error.clone();
-        let err_path = paths::resolve_data_path(&reply_error).to_string_lossy().to_string();
-        execute_command(
+        let err_path = paths::resolve_data_path(&reply_error)
+            .to_string_lossy()
+            .to_string();
+        // Исполнение сначала, звук-подтверждение после и только при успехе:
+        // раньше звук стоял ДО execute_command, и ошибка url/path/command
+        // звучала как успех.
+        let ok = execute_command(
             &cmd,
             text,
             &h.audio_tx,
@@ -556,35 +1142,96 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
             Arc::clone(&h.llm_history),
             &err_path,
         );
+        if ok {
+            let sound_num = rng.gen_range(1..=4);
+            let sound_path = paths::resolve_data_path(
+                &global_cfg
+                    .reply_success
+                    .replace("{}", &sound_num.to_string()),
+            );
+            let _ = h.audio_tx.send(AudioMessage::PlayWav(
+                sound_path.to_string_lossy().to_string(),
+            ));
+        } else {
+            let _ = h.audio_tx.send(AudioMessage::PlayWav(err_path));
+        }
         return Outcome::Followup;
     }
 
-    // 4. ЛОКАЛЬНЫЙ LLM — ответ на любые вопросы
     let prompt = clean_wakewords_and_prompt(text);
 
     if !prompt.trim().is_empty() {
-        // Вопрос про свежие данные? Ищем в интернете и суммаризируем.
-        let web_auto = {
+        // Голый wake word в окне слушания («Джарвис», даже записанный STT как
+        // «жарвис») — не вопрос: молча продолжаем слушать.
+        if crate::text::is_wake_only(&prompt) {
+            return Outcome::Followup;
+        }
+
+        // Мусор STT («юч», обрывок слова) в LLM не гоняем: ответ по шуму
+        // гарантированно бесполезен. Окно слушания остаётся открытым —
+        // фразу можно повторить.
+        if prompt.chars().filter(|c| c.is_alphanumeric()).count() < 3 {
+            println!("🔇 Слишком короткий ввод, пропускаю: \"{prompt}\"");
+            return Outcome::Followup;
+        }
+
+        // Огрызки речи из одних слов-связок («а после», «ну вот») — тоже не
+        // вопрос: ответ LLM будет выдумкой ни о чём.
+        if crate::text::is_filler_only(&prompt) {
+            println!("🔇 Только слова-связки, пропускаю: \"{prompt}\"");
+            return Outcome::Followup;
+        }
+
+        // Календарь считаем сами: маленькая модель не умеет прибавлять дни
+        // («какой день будет послезавтра» → «не знаю»), а так ответ
+        // мгновенный, без LLM и без веб-поиска.
+        if let Some(answer) = crate::text::calendar_answer(&prompt) {
+            println!("📅 Календарь: {answer}");
+            let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(answer));
+            return Outcome::Followup;
+        }
+
+        // Авто-поиск только для обычных вопросов. Команды действия («открой
+        // сейчас дипсик») не должны перехватываться, даже если в тексте есть
+        // «сейчас», «цена» и т.п.
+        let intent = router::classify(&prompt);
+        let web_search_auto = {
             let st = h.settings.read().unwrap_or_else(|e| e.into_inner());
             st.web_search_auto
-        } && crate::web::looks_like_fresh_info(&prompt);
+        };
+        // Явная просьба «посмотри в интернете» — прямая команда, работает
+        // всегда, даже с выключенным авто-поиском.
+        let explicit_web = intent == router::Intent::Chat && router::explicit_web_request(&prompt);
+        let fresh_info = intent == router::Intent::Chat
+            && crate::web::looks_like_fresh_info(&prompt)
+            // «Какой сегодня день недели» вычисляется из даты в промпте —
+            // поиск был бы тратой пары секунд.
+            && !router::calendar_question(&prompt);
+        let web_auto = (fresh_info && web_search_auto) || explicit_web;
 
         if web_auto {
-            println!("🌐 Вопрос требует свежих данных, ищу в интернете: \"{}\"", prompt);
-
-            let _ = h
-                .audio_tx
-                .send(AudioMessage::SynthesizeAndPlay(format!("Ищу в интернете {}", prompt)));
+            // «Да посмотри в интернете» без предмета — ищем то, о чём
+            // только что говорили (память тем не чистится wake word'ом).
+            let query = router::web_query_from(&prompt)
+                .or_else(crate::topic::last_question)
+                .unwrap_or_else(|| prompt.clone());
+            println!("🌐 Ищу в интернете: \"{query}\"");
 
             let audio_tx = h.audio_tx.clone();
             let events = h.events.clone();
             let llm = Arc::clone(&h.llm);
             let history = Arc::clone(&h.llm_history);
             let cancel = Arc::clone(&h.llm_cancel);
-            let query = prompt.clone();
 
             std::thread::spawn(move || match crate::web::search(&query, 5) {
                 Ok(hits) => {
+                    // Пока искали, пользователь мог сказать новое слово или
+                    // «стоп»: вчерашний курс доллара вслух посреди нового
+                    // разговора звучит как бред.
+                    if !llm::is_current_request(req_id) || cancel.load(Ordering::SeqCst) {
+                        println!("🚫 Поиск устарел — отвечаю молча");
+                        return;
+                    }
                     if let Some(web_prompt) = crate::web::build_summary_prompt(&query, &hits) {
                         llm::ask(
                             llm,
@@ -605,8 +1252,6 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
 
         println!("🤖 Вопрос к LLM: \"{}\"", prompt);
 
-        // Звук-подтверждение — по настройке: в очереди плеера он стоит перед
-        // речью и отодвигает первый звук ответа.
         if h.settings
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -614,16 +1259,18 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
         {
             let sound_num = rng.gen_range(1..=4);
             let sound_path = paths::resolve_data_path(
-                &global_cfg.reply_success.replace("{}", &sound_num.to_string()),
+                &global_cfg
+                    .reply_success
+                    .replace("{}", &sound_num.to_string()),
             );
-            let _ = h
-                .audio_tx
-                .send(AudioMessage::PlayWav(sound_path.to_string_lossy().to_string()));
+            let _ = h.audio_tx.send(AudioMessage::PlayWav(
+                sound_path.to_string_lossy().to_string(),
+            ));
         }
 
         llm::ask(
             Arc::clone(&h.llm),
-            llm::SYSTEM_PROMPT,
+            llm::CHAT_SYSTEM_PROMPT,
             prompt,
             Arc::clone(&h.llm_history),
             h.audio_tx.clone(),
@@ -632,7 +1279,9 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
         );
     } else {
         println!("❓ Команда не найдена: \"{}\"", text);
-        let _ = h.events.send(JarvisEvent::CommandNotFound { text: text.to_string() });
+        let _ = h.events.send(JarvisEvent::CommandNotFound {
+            text: text.to_string(),
+        });
         let unknown = paths::resolve_data_path(&global_cfg.reply_unknown);
         let _ = h
             .audio_tx
@@ -640,4 +1289,129 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
     }
 
     Outcome::Followup
+}
+
+#[cfg(test)]
+mod vad_tests {
+    use super::*;
+
+    #[test]
+    fn steady_noise_does_not_trigger_speech() {
+        let threshold = 0.018f32;
+        let ceiling = threshold * 4.0;
+        // Комната «шумит» ровно на уровне порога — типичный случай из лога,
+        // когда ассистент бесконечно распознавал пустоту.
+        let mut floor = 0.0f32;
+        for _ in 0..200 {
+            floor = update_noise_floor(floor, 0.020, ceiling);
+        }
+        assert!(
+            speech_floor(threshold, floor) > 0.020,
+            "порог {} должен подняться выше шума 0.020",
+            speech_floor(threshold, floor)
+        );
+    }
+
+    #[test]
+    fn quiet_room_keeps_user_threshold() {
+        let threshold = 0.018f32;
+        let ceiling = threshold * 4.0;
+        let mut floor = 0.0f32;
+        for _ in 0..200 {
+            floor = update_noise_floor(floor, 0.002, ceiling);
+        }
+        assert_eq!(speech_floor(threshold, floor), threshold);
+        // Обычная речь проходит с большим запасом.
+        assert!(0.15 > speech_floor(threshold, floor));
+    }
+
+    #[test]
+    fn vad_confirms_tail_silence() {
+        let mut vad = VadTracker::new();
+        vad.reset_phrase();
+        let id = vad.id;
+        assert!(vad.accept(SpeechProbeResult {
+            id,
+            total_secs: 1.5,
+            last_speech_end: Some(0.7),
+        }));
+        assert!(vad.saw_speech);
+        // Хвост 0.8 с — речь закончилась, фразу можно закрывать.
+        assert!(vad.confirmed_silence(0.6));
+    }
+
+    #[test]
+    fn vad_keeps_phrase_while_speech_reaches_window_end() {
+        let mut vad = VadTracker::new();
+        vad.reset_phrase();
+        let id = vad.id;
+        // Модель обычно заканчивает сегмент за ~0.2 с до конца окна даже
+        // при непрерывной речи: это смещение, а не тишина.
+        assert!(vad.accept(SpeechProbeResult {
+            id,
+            total_secs: 1.5,
+            last_speech_end: Some(1.3),
+        }));
+        assert!(!vad.confirmed_silence(0.2));
+    }
+
+    #[test]
+    fn vad_ignores_stale_reply() {
+        let mut vad = VadTracker::new();
+        vad.reset_phrase();
+        let id = vad.id;
+        vad.reset_phrase();
+        assert!(!vad.accept(SpeechProbeResult {
+            id,
+            total_secs: 1.5,
+            last_speech_end: Some(0.1),
+        }));
+        assert!(vad.tail_secs.is_none());
+    }
+
+    #[test]
+    fn vad_no_speech_means_full_window_of_silence() {
+        let mut vad = VadTracker::new();
+        vad.reset_phrase();
+        let id = vad.id;
+        assert!(vad.accept(SpeechProbeResult {
+            id,
+            total_secs: 1.5,
+            last_speech_end: None,
+        }));
+        assert!(!vad.saw_speech);
+        assert_eq!(vad.tail_secs, Some(1.5));
+        assert!(vad.confirmed_silence(0.6));
+    }
+
+    #[test]
+    fn vad_disables_after_three_failures() {
+        let mut vad = VadTracker::new();
+        vad.note_failure();
+        vad.note_failure();
+        assert!(!vad.unavailable);
+        vad.note_failure();
+        assert!(vad.unavailable);
+    }
+
+    #[test]
+    fn verdict_waits_through_stale_vad_replies() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(SpeakerReply::Speech(None)).unwrap();
+        tx.send(SpeakerReply::Verified(Some(false))).unwrap();
+        assert_eq!(
+            wait_for_verdict(&rx, Duration::from_millis(100)),
+            Ok(Some(false))
+        );
+    }
+
+    #[test]
+    fn noise_floor_is_capped() {
+        let ceiling = 0.072f32;
+        let mut floor = 0.0f32;
+        for _ in 0..500 {
+            floor = update_noise_floor(floor, 0.5, ceiling);
+        }
+        assert!(floor <= ceiling);
+    }
 }

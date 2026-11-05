@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/jarvis-core", "crates/jarvis-cli", "app/src-tauri"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+
+[workspace.dependencies]
+anyhow = "1"
+cpal = "0.18.2"
+hf-hub = { version = "1.0.0", features = ["blocking"] }
+hound = "3.5"
+rand = "0.8"
+rustpotter = { git = "https://github.com/pavel807/RustPotter", version = "4.0.1" }
+transcribe-rs = { version = "0.3", features = ["onnx"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+urlencoding = "2.1"
+open = "5.4.2"
+candle-core = { version = "0.11", features = ["metal"] }
+candle-nn = { version = "0.11", features = ["metal"] }
+tokenizers = "0.21"
+serde_json = "1"
+ureq = "3"
+regex = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

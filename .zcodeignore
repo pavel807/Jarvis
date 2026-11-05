@@ -1,4 +1,5 @@
 /target
+/build
 /models
 /train
 /resources/tts_cache/
@@ -11,8 +12,6 @@
 /app/src-tauri/gen/
 .zcode/
 *.toml.tmp
-resources/kokoro_check.wav
-resources/piper_check.wav
 
 # ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
 .git/

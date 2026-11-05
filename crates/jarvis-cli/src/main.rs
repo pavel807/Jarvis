@@ -1,22 +1,21 @@
 //! Headless-запуск Jarvis из терминала: лог в консоль, движок в jarvis-core.
 
 use anyhow::Result;
-use jarvis_core::commands::{spawn_config_watcher, CommandsConfig};
-use jarvis_core::engine::{run_engine, EngineHandles};
+use jarvis_core::commands::{CommandsConfig, spawn_config_watcher};
+use jarvis_core::engine::{EngineHandles, run_engine};
 use jarvis_core::events::JarvisEvent;
-use jarvis_core::llm::{spawn_llm_loader, SharedLlmState};
+use jarvis_core::llm::{SharedLlmState, spawn_llm_loader};
 use jarvis_core::paths;
-use jarvis_core::settings::{spawn_settings_watcher, Settings};
-use jarvis_core::stt::{self, Stt};
+use jarvis_core::settings::{Settings, spawn_settings_watcher};
+use jarvis_core::stt::Stt;
 use jarvis_core::tts::{self, SharedTtsState};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, RwLock};
 
 fn main() -> Result<()> {
-    println!("🎙️ Запуск Jarvis CLI (GigaAM v3 + Qwen3-TTS + Rustpotter + Qwen3)...");
+    println!("🎙️ Запуск Jarvis CLI ...");
 
-    stt::init_env();
     let models_dir = paths::models_dir();
     std::fs::create_dir_all(&models_dir)?;
 
@@ -29,6 +28,7 @@ fn main() -> Result<()> {
 
     let config_path = paths::commands_file();
     let initial_commands = CommandsConfig::load(&config_path)?;
+    initial_commands.apply_ringtones();
 
     println!("📋 Загружено {} команд", initial_commands.commands.len());
 
@@ -41,6 +41,8 @@ fn main() -> Result<()> {
     let wakeword_reload = Arc::new(AtomicBool::new(false));
     let llm_cancel = Arc::new(AtomicBool::new(false));
 
+    // Канал событий создаём первым: он нужен плееру (AudioLevel),
+    // движку и логгеру.
     let (events_tx, events_rx) = channel::<JarvisEvent>();
 
     // Лог событий в консоль.
@@ -54,31 +56,97 @@ fn main() -> Result<()> {
                 JarvisEvent::Transcript { text } => println!("📝 Распознано: {}", text),
                 JarvisEvent::CommandMatched { name } => println!("✅ Команда: {}", name),
                 JarvisEvent::CommandNotFound { text } => println!("❓ Не найдено: {}", text),
+                JarvisEvent::ActionStarted { tool, summary } => {
+                    print!("🔧 {tool}");
+                    if !summary.is_empty() {
+                        print!(": {summary}");
+                    }
+                    println!()
+                }
+                JarvisEvent::ActionResult { ok, summary } => {
+                    if ok {
+                        println!("✅ {summary}")
+                    } else {
+                        println!("❗ {summary}")
+                    }
+                }
+                JarvisEvent::TopicResumed { topic } => println!("🧠 Возврат к теме: {}", topic),
                 JarvisEvent::LlmChunk { text } => print!("🤖 {}", text),
                 JarvisEvent::LlmDone { text } => println!("🤖 [готово] {}", text),
                 JarvisEvent::LlmStatus { status } => println!("🧠 LLM: {}", status),
+                JarvisEvent::TimerStarted { label, seconds, .. } => {
+                    let name = if label.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" «{label}»")
+                    };
+                    println!("⏱ Таймер{name} на {seconds} с — окно утилит открыто")
+                }
+                JarvisEvent::TimerFired { label, kind, .. } => {
+                    let name = if label.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" «{label}»")
+                    };
+                    let what = match kind {
+                        jarvis_core::timers::TimerKind::Alarm => "Будильник",
+                        jarvis_core::timers::TimerKind::Timer => "Таймер",
+                    };
+                    println!("⏰ {what}{name} — время вышло, звонит рингтон")
+                }
+                JarvisEvent::TimerStopped { .. } => println!("⏹ Таймер остановлен"),
+                JarvisEvent::OpenUtils { tab } => println!("🧰 Окно утилит: {tab}"),
+                JarvisEvent::CloseUtils => println!("🧰 Окно утилит закрыто"),
+                JarvisEvent::MicPermission { granted } => {
+                    if granted {
+                        println!("✅ Доступ к микрофону получен");
+                    } else {
+                        println!(
+                            "🎤 Жду доступа к микрофону — подтверди системный запрос \
+                                  или выдай его в Системных настройках"
+                        );
+                    }
+                }
                 JarvisEvent::TrainProgress { epoch, total, loss } => {
                     println!("🏋️ Эпоха {}/{} (loss {:.4})", epoch, total, loss)
                 }
                 JarvisEvent::TrainDone { path } => println!("🏋️ Модель обучена: {}", path),
                 JarvisEvent::RecordSaved { path } => println!("💾 Сэмпл записан: {}", path),
+                // AudioLevel приходит ~20 раз в секунду — в консоль не льём.
+                JarvisEvent::AudioLevel { .. } => {}
                 JarvisEvent::Error { message } => eprintln!("❗ {}", message),
                 JarvisEvent::Reply { text } => println!("💬 {}", text),
                 JarvisEvent::Log { message } => println!("{}", message),
+                JarvisEvent::ReactorIntro => println!("⚛️ Реактор приветствует"),
+                JarvisEvent::RouterVerdict {
+                    intent,
+                    confidence,
+                    force_tool,
+                } => println!(
+                    "🧭 Роутер: {} ({:.2}, force_tool={})",
+                    intent, confidence, force_tool
+                ),
+                JarvisEvent::ToolParseFailed { reason, raw } => {
+                    println!("⚠️ Tool не разобран: {reason}; ответ: {raw}")
+                }
             }
         }
     });
 
-    // LLM создаётся до плеера: он использует её для нейро-нормализации.
     let shared_llm = Arc::new(SharedLlmState::new());
 
-    // TTS: ленивая загрузка в фоне + поток-плеер.
     let shared_tts: Arc<SharedTtsState> = Arc::new(SharedTtsState::new());
     let tts_failed = Arc::new(AtomicBool::new(false));
-    let tts_voice = settings.read().unwrap_or_else(|e| e.into_inner()).tts_voice.clone();
+    let tts_voice = settings
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .tts_voice
+        .clone();
     tts::spawn_tts_loader(&shared_tts, &tts_failed, &tts_voice);
 
+    // Плеер: первым аргументом — клон канала событий для AudioLevel.
     let audio_tx = tts::spawn_audio_player(
+        events_tx.clone(),
         Arc::clone(&shared_tts),
         Arc::clone(&tts_failed),
         Arc::clone(&is_speaking),
@@ -90,8 +158,16 @@ fn main() -> Result<()> {
     // LLM: фоновая загрузка Qwen3.
     spawn_llm_loader(&shared_llm, &events_tx);
 
-    println!("📥 Загрузка GigaAM v3 в память...");
+    println!("📥 Загрузка FastConformer (ASR)...");
     let model = Stt::load(&models_dir)?;
+
+    // Фильтр говорящего: как в Tauri-приложении; при недоступности —
+    // воркер пропускает всё.
+    let speaker_gate = jarvis_core::speaker::load_gate(&events_tx);
+    let (speaker_tx, speaker_rx) = jarvis_core::speaker::spawn_speaker_worker(
+        speaker_gate,
+        Arc::new(AtomicBool::new(false)),
+    );
 
     println!("🚀 Джарвис готов к работе!");
 
@@ -107,6 +183,8 @@ fn main() -> Result<()> {
         llm_history: Arc::new(Mutex::new(Vec::new())),
         llm: shared_llm,
         events: events_tx,
+        speaker_tx,
+        speaker_rx,
     };
 
     run_engine(model, handles)

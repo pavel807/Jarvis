@@ -1,13 +1,13 @@
 //! Tauri-бэкенд Jarvis: запускает движок из jarvis-core, мостит события в UI
 //! и предоставляет IPC-команды (команды, настройки, wake word, TTS, LLM).
 
-use jarvis_core::commands::{spawn_config_watcher, CommandsConfig};
-use jarvis_core::engine::{run_engine, EngineHandles};
+use jarvis_core::commands::{CommandsConfig, spawn_config_watcher};
+use jarvis_core::engine::{EngineHandles, run_engine};
 use jarvis_core::events::JarvisEvent;
-use jarvis_core::llm::{self, spawn_llm_loader, ChatTurn, SharedLlmState};
+use jarvis_core::llm::{self, ChatTurn, SharedLlmState, spawn_llm_loader};
 use jarvis_core::paths;
-use jarvis_core::settings::{spawn_settings_watcher, Settings};
-use jarvis_core::stt::{self, Stt};
+use jarvis_core::settings::{Settings, spawn_settings_watcher};
+use jarvis_core::stt::Stt;
 use jarvis_core::tts::{self, AudioMessage, SharedTtsState};
 use jarvis_core::wake_train;
 use std::collections::VecDeque;
@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
+
 /// Сколько последних записей журнала держим для UI.
 const LOG_CAPACITY: usize = 400;
 
@@ -37,7 +39,11 @@ pub struct Shared {
     pub chat_history: Arc<Mutex<Vec<ChatTurn>>>,
     pub record_cancel: Arc<AtomicBool>,
     pub engine_running: Arc<AtomicBool>,
+    /// Флаг пересборки голосового профиля (после записи новых образцов).
+    pub speaker_invalidate: Arc<AtomicBool>,
     pub audio_tx: std::sync::mpsc::Sender<AudioMessage>,
+    /// Канал событий движка: нужен хабу таймеров для окна «Утилиты».
+    pub utils_events: Mutex<Option<std::sync::mpsc::Sender<JarvisEvent>>>,
     logs: Mutex<VecDeque<String>>,
 }
 
@@ -52,12 +58,11 @@ impl Shared {
         shared_llm: Arc<SharedLlmState>,
         settings: Arc<RwLock<Settings>>,
     ) -> Self {
-        // Битый commands.toml не должен валить приложение: работаем
-        // без команд, ошибку видно в журнале.
         let commands = CommandsConfig::load(&paths::commands_file()).unwrap_or_else(|e| {
             eprintln!("⚠️ {e:#}; использую пустой список команд");
             CommandsConfig::default()
         });
+        commands.apply_ringtones();
 
         Self {
             commands: Arc::new(RwLock::new(commands)),
@@ -74,7 +79,9 @@ impl Shared {
             chat_history: Arc::new(Mutex::new(Vec::new())),
             record_cancel: Arc::new(AtomicBool::new(false)),
             engine_running: Arc::new(AtomicBool::new(false)),
+            speaker_invalidate: Arc::new(AtomicBool::new(false)),
             audio_tx,
+            utils_events: Mutex::new(None),
             logs: Mutex::new(VecDeque::with_capacity(LOG_CAPACITY)),
         }
     }
@@ -113,48 +120,144 @@ impl Shared {
     }
 }
 
+/// Распаковывает подготовленный архив из ресурсов приложения в каталог данных
+/// при первом запуске (звуки, конфиги, крошечные wake word-модели).
+/// Тяжёлые модели (LLM/STT/TTS) в архив не входят и качаются отдельно при
+/// первом обращении. Идемпотентно по файлу-маркеру.
+fn provision_data(events: &std::sync::mpsc::Sender<JarvisEvent>, resource_dir: Option<&Path>) {
+    let home = paths::base_dir();
+    // Маркер — собственная метка, которую ставим после успешной распаковки.
+    // Привязываться к файлу модели нельзя: тяжёлые модели больше не в архиве
+    // (качаются при первом запуске), а сам архив — это звуки, конфиги и
+    // крошечные wake word-модели.
+    let marker = home.join(".jarvis_provisioned");
+    if marker.exists() {
+        return;
+    }
+    let Some(payload) = find_payload(resource_dir) else {
+        return;
+    };
+
+    let _ = events.send(JarvisEvent::Log {
+        message: "Первый запуск: распаковываю ресурсы (один раз)…".into(),
+    });
+    if let Err(e) = std::fs::create_dir_all(&home) {
+        let _ = events.send(JarvisEvent::Error {
+            message: format!("Не удалось создать {}: {e}", home.display()),
+        });
+        return;
+    }
+
+    match std::process::Command::new("/usr/bin/tar")
+        .arg("-xzf")
+        .arg(&payload)
+        .arg("-C")
+        .arg(&home)
+        .status()
+    {
+        Ok(s) if s.success() => {
+            let _ = std::fs::write(&marker, "1");
+            let _ = events.send(JarvisEvent::Log {
+                message: "Ресурсы распакованы.".into(),
+            });
+        }
+        other => {
+            let _ = events.send(JarvisEvent::Error {
+                message: format!("Распаковка не удалась: {other:?}"),
+            });
+        }
+    }
+}
+
+/// Ищет подготовленный архив в `Contents/Resources/payload`.
+fn find_payload(resource_dir: Option<&Path>) -> Option<PathBuf> {
+    let candidate = resource_dir?.join("payload/jarvis-data.tar.gz");
+    candidate.exists().then_some(candidate)
+}
+
 /// Загружает модели и запускает движок ассистента в фоновом потоке.
-fn spawn_engine(shared: &Arc<Shared>, events_tx: std::sync::mpsc::Sender<JarvisEvent>) {
+fn spawn_engine(
+    shared: &Arc<Shared>,
+    events_tx: std::sync::mpsc::Sender<JarvisEvent>,
+    resource_dir: Option<PathBuf>,
+) {
     let shared_engine = Arc::clone(shared);
 
-    // Hot-reload конфигов, как в CLI.
-    spawn_config_watcher(
-        paths::commands_file(),
-        Arc::clone(&shared_engine.commands),
-    );
-    spawn_settings_watcher(
-        paths::settings_file(),
-        Arc::clone(&shared_engine.settings),
-    );
+    spawn_config_watcher(paths::commands_file(), Arc::clone(&shared_engine.commands));
+    spawn_settings_watcher(paths::settings_file(), Arc::clone(&shared_engine.settings));
 
     std::thread::spawn(move || {
-        stt::init_env();
+        // Канал для хаба таймеров: окно «Утилиты» получает события.
+        *shared_engine
+            .utils_events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(events_tx.clone());
+
+        provision_data(&events_tx, resource_dir.as_deref());
+
+        // Конфиги могли появиться только что из архива — перечитываем их.
+        if let Ok(cfg) = CommandsConfig::load(&paths::commands_file()) {
+            cfg.apply_ringtones();
+            *shared_engine
+                .commands
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = cfg;
+        }
+        if let Ok(s) = Settings::load(&paths::settings_file()) {
+            s.apply();
+            *shared_engine
+                .settings
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = s;
+        }
+
+        // Фильтр говорящего: пайплайн speakrs (CoreML на macOS) грузится
+        // вместе с движком; при недоступности — воркер всё пропускает.
+        let speaker_gate = jarvis_core::speaker::load_gate(&events_tx);
+        let (speaker_tx, speaker_rx) = jarvis_core::speaker::spawn_speaker_worker(
+            speaker_gate,
+            Arc::clone(&shared_engine.speaker_invalidate),
+        );
 
         let tts_voice = {
-            let s = shared_engine.settings.read().unwrap_or_else(|e| e.into_inner());
+            let s = shared_engine
+                .settings
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             s.apply();
             s.tts_voice.clone()
         };
 
-        tts::spawn_tts_loader(&shared_engine.shared_tts, &shared_engine.tts_failed, &tts_voice);
+        tts::spawn_tts_loader(
+            &shared_engine.shared_tts,
+            &shared_engine.tts_failed,
+            &tts_voice,
+        );
 
-        // Баннер сборки TTS в журнал UI: если его нет в журнале — работает
-        // устаревшая сборка и все фиксы произношения в бинарь не попали.
         let _ = events_tx.send(JarvisEvent::Log {
-            message: "TTS-сборка: kokoro-ru + нейро-ударитель (v4), голос «{voice}»"
+            message: "TTS-сборка: silero v5 + нейро-ударитель, голос «{voice}»"
                 .replace("{voice}", &tts_voice),
         });
         spawn_llm_loader(&shared_engine.shared_llm, &events_tx);
 
         let models_dir = paths::models_dir();
-        let Ok(model) = Stt::load(&models_dir) else {
-            shared_engine.engine_running.store(false, Ordering::SeqCst);
-            let _ = events_tx.send(JarvisEvent::Error {
-                message: "Не удалось загрузить STT-модель".into(),
-            });
-            return;
+        let model = match Stt::load(&models_dir) {
+            Ok(model) => model,
+            Err(e) => {
+                shared_engine.engine_running.store(false, Ordering::SeqCst);
+                // Причина обязана дойти до журнала: без неё «не удалось
+                // загрузить» не отличить битых весов от отсутствующих.
+                eprintln!("❌ STT: {e:#}");
+                let _ = events_tx.send(JarvisEvent::Error {
+                    message: format!("Не удалось загрузить STT-модель: {e:#}"),
+                });
+                return;
+            }
         };
 
+        // Клон канала для ошибки после moves: events_tx уезжает в handles,
+        // а причина падения движка должна дойти до UI.
+        let error_tx = events_tx.clone();
         let handles = EngineHandles {
             commands: Arc::clone(&shared_engine.commands),
             settings: Arc::clone(&shared_engine.settings),
@@ -167,12 +270,21 @@ fn spawn_engine(shared: &Arc<Shared>, events_tx: std::sync::mpsc::Sender<JarvisE
             llm_history: Arc::clone(&shared_engine.chat_history),
             llm: Arc::clone(&shared_engine.shared_llm),
             events: events_tx,
+            speaker_tx,
+            speaker_rx,
         };
 
         shared_engine.engine_running.store(true, Ordering::SeqCst);
         if let Err(e) = run_engine(model, handles) {
-            eprintln!("❌ Движок остановился: {e}");
+            eprintln!("❌ Движок остановился: {e:#}");
             shared_engine.engine_running.store(false, Ordering::SeqCst);
+            // Раньше причина уходила только в stderr терминала: при падении
+            // аудио-потока (например, macOS молча забрал доступ к микрофону
+            // после пересборки) интерфейс выглядел живым, а микрофон не
+            // работал. Показываем причину и в журнале UI.
+            let _ = error_tx.send(JarvisEvent::Error {
+                message: format!("Движок остановился: {e:#}"),
+            });
         }
     });
 }
@@ -186,6 +298,9 @@ struct Status {
     paused: bool,
     llm_status: String,
     tts_ready: bool,
+    /// Рабочая директория агента: от неё считаются относительные пути
+    /// файловых инструментов, её же меняет `cd` в shell.
+    cwd: String,
 }
 
 #[tauri::command]
@@ -200,7 +315,21 @@ fn status(shared: State<'_, Arc<Shared>>) -> Status {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_some(),
+        cwd: jarvis_core::tools::cwd(),
     }
+}
+
+/// Текущая рабочая директория агента.
+#[tauri::command]
+fn get_cwd() -> String {
+    jarvis_core::tools::cwd()
+}
+
+/// Сменить рабочую директорию агента. Пустая строка или несуществующий путь
+/// возвращают её к корню данных Джарвиса.
+#[tauri::command]
+fn set_cwd(path: String) -> String {
+    jarvis_core::tools::set_cwd(&path)
 }
 
 #[tauri::command]
@@ -224,10 +353,7 @@ fn save_commands(shared: State<'_, Arc<Shared>>, config: CommandsConfig) -> Resu
         .map_err(|e| e.to_string())?;
 
     let count = config.commands.len();
-    *shared
-        .commands
-        .write()
-        .unwrap_or_else(|e| e.into_inner()) = config;
+    *shared.commands.write().unwrap_or_else(|e| e.into_inner()) = config;
     println!("⚡ Сохранено команд: {count}");
     Ok(())
 }
@@ -249,10 +375,7 @@ fn save_settings(shared: State<'_, Arc<Shared>>, settings: Settings) -> Result<(
         .save(&paths::settings_file())
         .map_err(|e| e.to_string())?;
     settings.apply();
-    *shared
-        .settings
-        .write()
-        .unwrap_or_else(|e| e.into_inner()) = settings;
+    *shared.settings.write().unwrap_or_else(|e| e.into_inner()) = settings;
 
     if voice_changed {
         tts::set_voice(&shared.shared_tts, &shared.tts_failed, &voice);
@@ -265,6 +388,55 @@ fn get_logs(shared: State<'_, Arc<Shared>>) -> Vec<String> {
     shared.logs()
 }
 
+// ---------- Задачник (экран «Память») ----------
+
+/// Задача из задачника для UI.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskDto {
+    id: usize,
+    text: String,
+    done: bool,
+}
+
+impl From<jarvis_core::tasks::Task> for TaskDto {
+    fn from(t: jarvis_core::tasks::Task) -> Self {
+        Self {
+            id: t.id,
+            text: t.text,
+            done: t.done,
+        }
+    }
+}
+
+#[tauri::command]
+fn tasks_list() -> Vec<TaskDto> {
+    jarvis_core::tasks::load().into_iter().map(TaskDto::from).collect()
+}
+
+#[tauri::command]
+fn tasks_add(text: String) -> Result<TaskDto, String> {
+    jarvis_core::tasks::add(&text)
+        .map(TaskDto::from)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn tasks_set_done(id: usize, done: bool) -> Option<TaskDto> {
+    jarvis_core::tasks::set_done(id, done).map(TaskDto::from)
+}
+
+#[tauri::command]
+fn tasks_remove(id: usize) -> Option<TaskDto> {
+    jarvis_core::tasks::remove(id).map(TaskDto::from)
+}
+
+/// Открывает tasks.md в системном редакторе — правки подхватятся движком.
+#[tauri::command]
+fn tasks_open() -> Result<(), String> {
+    open::that(jarvis_core::tasks::path()).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn tts_voices() -> Vec<(String, String)> {
     tts::SILERO_VOICES
@@ -273,19 +445,164 @@ fn tts_voices() -> Vec<(String, String)> {
         .collect()
 }
 
+/// Открывает ссылку из ответа ассистента в системном браузере.
+/// Принимаются только http/https — остальное в вебвью не приходит.
 #[tauri::command]
-fn tts_test(shared: State<'_, Arc<Shared>>, text: String) {
-    let _ = shared
-        .audio_tx
-        .send(AudioMessage::SynthesizeAndPlay(text));
+fn open_external(url: String) -> Result<(), String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("Открывать можно только ссылки http(s)".into());
+    }
+    open::that(url).map_err(|e| e.to_string())
+}
+
+/// Озвучивает текст. С параметром `voice` — превью другого диктора:
+/// выбранный голос приложения не меняет, в кэш речи не пишется.
+#[tauri::command]
+fn tts_test(shared: State<'_, Arc<Shared>>, text: String, voice: Option<String>) {
+    match voice {
+        Some(v) if !v.trim().is_empty() && v != tts::current_voice() => {
+            let _ = shared.audio_tx.send(AudioMessage::PreviewVoice { text, voice: v });
+        }
+        _ => {
+            let _ = shared.audio_tx.send(AudioMessage::SynthesizeAndPlay(text));
+        }
+    }
+}
+
+/// Открывает панель «Конфиденциальность → Микрофон» в Системных настройках.
+/// Начиная с Ventura Настройки переписаны: старый путь панели молча не
+/// открывается, поэтому пробуем новый адрес, затем старый, затем само
+/// приложение.
+fn open_mic_pane() -> Result<(), String> {
+    let urls = [
+        "x-apple.systempreferences:com.apple.settings.privacy?Privacy_Microphone",
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+    ];
+    for url in urls {
+        if open::that(url).is_ok() {
+            return Ok(());
+        }
+    }
+    open::that("/System/Applications/System Settings.app").map_err(|e| e.to_string())
+}
+
+/// Открывает панель «Конфиденциальность → Микрофон» в Системных настройках —
+/// кнопка в меню доступа к микрофону.
+#[tauri::command]
+fn open_mic_settings() -> Result<(), String> {
+    open_mic_pane()
+}
+
+/// Статус доступа к микрофону для строки в Настройках.
+#[tauri::command]
+fn mic_status() -> String {
+    jarvis_core::audio::mic_status().to_string()
+}
+
+/// Повторный запрос доступа к микрофону из Настроек. После отказа macOS
+/// диалог уже не показывает — тогда сразу открываем Системные настройки.
+/// Статус пишем в журнал UI: раньше «кнопка ничего не сделала» было не видно.
+#[tauri::command]
+fn mic_request(app: AppHandle) -> String {
+    let status = jarvis_core::audio::mic_request_access();
+    let _ = app.emit(
+        "engine-event",
+        &JarvisEvent::Log {
+            message: format!("Запрос доступа к микрофону: статус «{status}»"),
+        },
+    );
+    if status == "denied" {
+        let _ = open_mic_pane();
+    }
+    status.to_string()
+}
+
+/// Окно «Утилиты» (таймер/секундомер/календарь): создаём при первом
+/// обращении, дальше показываем и поднимаем наверх.
+fn show_utils_window(app: &tauri::AppHandle, tab: Option<&str>) {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("utils") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    } else {
+        let _ = tauri::WebviewWindowBuilder::new(
+            app,
+            "utils",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .title("Джарвис — утилиты")
+        .inner_size(340.0, 560.0)
+        .build();
+    }
+    if let Some(tab) = tab {
+        let _ = app.emit("utils-tab", tab);
+    }
+}
+
+/// Таймер из окна утилит (ручная кнопка, не голос).
+#[tauri::command]
+fn timer_start(
+    shared: State<'_, Arc<Shared>>,
+    label: Option<String>,
+    seconds: u64,
+) -> Result<u64, String> {
+    let events = shared
+        .utils_events
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .ok_or_else(|| "Движок ещё не запущен".to_string())?;
+    Ok(jarvis_core::timers::start(
+        &events,
+        &shared.audio_tx,
+        label.as_deref().unwrap_or(""),
+        seconds,
+        jarvis_core::timers::TimerKind::Timer,
+    ))
+}
+
+/// Отмена таймера из окна утилит.
+#[tauri::command]
+fn timer_cancel(shared: State<'_, Arc<Shared>>, id: u64) -> Result<(), String> {
+    let events = shared
+        .utils_events
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .ok_or_else(|| "Движок ещё не запущен".to_string())?;
+    jarvis_core::timers::cancel(&events, &shared.audio_tx, None, Some(id))
+        .map(|_| ())
+        .ok_or_else(|| "Таймер не найден".to_string())
+}
+
+/// Закрытие окна «Утилиты» из интерфейса (крестик).
+#[tauri::command]
+fn utils_close(app: AppHandle) {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("utils") {
+        let _ = window.hide();
+    }
 }
 
 #[tauri::command]
 fn llm_ask(shared: State<'_, Arc<Shared>>, app: AppHandle, prompt: String) {
+    // Номер обращения: фоновый веб-поиск проверит его перед озвучкой.
+    let req_id = jarvis_core::llm::new_request();
     // События этого вопроса уходят и в UI, и в общий мост событий движка.
     let (tx, rx) = channel::<JarvisEvent>();
     std::thread::spawn(move || {
         for ev in rx {
+            // Текстовый чат минует мост движка: окно утилит открываем здесь,
+            // иначе «открой утилиты» с клавиатуры только скажет о команде.
+            match &ev {
+                JarvisEvent::OpenUtils { tab } => show_utils_window(&app, Some(tab)),
+                JarvisEvent::CloseUtils => {
+                    if let Some(window) = app.get_webview_window("utils") {
+                        let _ = window.hide();
+                    }
+                }
+                _ => {}
+            }
             let _ = app.emit("engine-event", &ev);
         }
     });
@@ -293,14 +610,58 @@ fn llm_ask(shared: State<'_, Arc<Shared>>, app: AppHandle, prompt: String) {
     // Свежий токен на каждый запрос: «Стоп» отменяет текущий вопрос,
     // и гонки с обнулением флага внутри генерации нет.
     let cancel = Arc::new(AtomicBool::new(false));
-    *shared
-        .chat_cancel
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&cancel));
+    *shared.chat_cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&cancel));
 
+    // Свежие данные (погода, курсы, «кто такой X») — тот же веб-флоу, что и
+    // в голосовом движке: голос этот путь проходит до ask, текстовый чат
+    // приходит напрямую, поэтому проверяем здесь.
+    let web_search_auto = shared
+        .settings
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .web_search_auto;
+    let explicit_web = jarvis_core::router::explicit_web_request(&prompt);
+    let fresh_info = jarvis_core::web::looks_like_fresh_info(&prompt)
+        && !jarvis_core::router::calendar_question(&prompt);
+    if explicit_web || (fresh_info && web_search_auto) {
+        let query = jarvis_core::router::web_query_from(&prompt)
+            .or_else(jarvis_core::topic::last_question)
+            .unwrap_or_else(|| prompt.clone());
+        println!("🌐 Текстовый чат: ищу в интернете: \"{query}\"");
+        let llm = Arc::clone(&shared.shared_llm);
+        let history = Arc::clone(&shared.chat_history);
+        let audio_tx = shared.audio_tx.clone();
+        std::thread::spawn(move || match jarvis_core::web::search(&query, 5) {
+            Ok(hits) => {
+                if !jarvis_core::llm::is_current_request(req_id)
+                    || cancel.load(Ordering::SeqCst)
+                {
+                    println!("🚫 Поиск устарел — отвечаю молча");
+                    return;
+                }
+                if let Some(web_prompt) = jarvis_core::web::build_summary_prompt(&query, &hits) {
+                    llm::ask(
+                        llm,
+                        llm::WEB_SYSTEM_PROMPT,
+                        web_prompt,
+                        history,
+                        audio_tx,
+                        tx,
+                        cancel,
+                    );
+                }
+            }
+            Err(e) => eprintln!("⚠️ Веб-поиск не удался: {e}"),
+        });
+        return;
+    }
+
+    // `CHAT_SYSTEM_PROMPT` — базовый разговорный промпт. Внутри `ask`
+    // роутер сам подменит его на короткий tool-промпт, если запрос
+    // требует действия (таймер, приложение и т.п.).
     llm::ask(
         Arc::clone(&shared.shared_llm),
-        llm::SYSTEM_PROMPT,
+        llm::CHAT_SYSTEM_PROMPT,
         prompt,
         Arc::clone(&shared.chat_history),
         shared.audio_tx.clone(),
@@ -311,6 +672,13 @@ fn llm_ask(shared: State<'_, Arc<Shared>>, app: AppHandle, prompt: String) {
 
 #[tauri::command]
 fn llm_cancel(shared: State<'_, Arc<Shared>>) {
+    // Тот же порядок, что и у голосовой команды «замолчи» (engine.rs):
+    // флаг останавливает уже играющий кусок (плеер — один поток и внутри
+    // play_wav/wait_drain не читает очередь, поэтому без флага Stop лежит
+    // в очереди до конца фразы), llm_cancel рвёт генерацию и голосового,
+    // и текстового пути, chat_cancel — токен текущего чат-запроса.
+    shared.stop_audio_flag.store(true, Ordering::SeqCst);
+    shared.llm_cancel.store(true, Ordering::SeqCst);
     if let Some(cancel) = shared
         .chat_cancel
         .lock()
@@ -352,7 +720,6 @@ fn ww_record(
     kind: String,
 ) -> Result<(), String> {
     if shared.record_cancel.swap(false, Ordering::SeqCst) {
-        // предыдущая запись ещё не завершена — не стартуем новую
         return Err("Запись уже идёт".into());
     }
 
@@ -379,6 +746,11 @@ fn ww_record(
 
         match wake_train::record_sample(&dir, label, 6.0, &cancel) {
             Ok(path) => {
+                // Новый образец — голосовой профиль фильтра говорящего
+                // пересобирается при следующей проверке.
+                shared
+                    .speaker_invalidate
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = app.emit(
                     "engine-event",
                     &JarvisEvent::RecordSaved {
@@ -410,8 +782,6 @@ impl Drop for RecordGuard {
     }
 }
 
-/// Проверяет, что путь (после разрешения симлинков) лежит внутри базового
-/// каталога. Пути из webview нельзя принимать на веру.
 fn ensure_under_dir(path: &Path, base: &Path) -> Result<PathBuf, String> {
     let canonical = path
         .canonicalize()
@@ -422,10 +792,7 @@ fn ensure_under_dir(path: &Path, base: &Path) -> Result<PathBuf, String> {
     if canonical.starts_with(&base_canonical) {
         Ok(canonical)
     } else {
-        Err(format!(
-            "Путь {:?} вне каталога {:?}",
-            path, base_canonical
-        ))
+        Err(format!("Путь {:?} вне каталога {:?}", path, base_canonical))
     }
 }
 
@@ -437,8 +804,6 @@ fn ww_delete(path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn ww_build(app: AppHandle) -> Result<(), String> {
-    // DTW-модель строится за секунды, но всё равно в отдельном потоке,
-    // чтобы не блокировать UI.
     std::thread::spawn(move || {
         let (tx, rx) = channel::<JarvisEvent>();
         std::thread::spawn(move || {
@@ -470,16 +835,12 @@ fn ww_apply(shared: State<'_, Arc<Shared>>, path: Option<String>) -> Result<(), 
     let trained = match path {
         Some(p) => ensure_under_dir(Path::new(&p), &paths::models_dir())
             .or_else(|_| ensure_under_dir(Path::new(&p), &paths::train_dir()))?,
-        None => {
-            // Дефолт: результат последнего обучения (см. ww_build).
-            paths::models_dir().join("jarvis_model_trained.rpw")
-        }
+        None => paths::models_dir().join("jarvis_model_trained.rpw"),
     };
     if trained.extension().is_some_and(|x| x != "rpw") {
         return Err("Ожидался файл модели .rpw".into());
     }
 
-    // Активный слот задаётся настройкой wakeword_model.
     let active = {
         let s = shared.settings.read().unwrap_or_else(|e| e.into_inner());
         paths::wakeword_model_file(&s.wakeword_model)
@@ -532,8 +893,6 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 show_main(tray.app_handle());
             }
         });
-    // Иконка может отсутствовать (например, при сборке без icons/) —
-    // не паникуем, трай просто будет без иконки.
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
@@ -550,13 +909,10 @@ fn show_main(app: &AppHandle) {
     }
 }
 
-/// Каталог данных приложения для случая, когда собранный .app запущен вне
-/// репозитория: `~/Library/Application Support/Jarvis` (macOS) или `~/.jarvis`.
 fn app_data_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         #[cfg(target_os = "macos")]
-        return home
-            .join("Library/Application Support/Jarvis");
+        return home.join("Library/Application Support/Jarvis");
         #[cfg(not(target_os = "macos"))]
         return home.join(".jarvis");
     }
@@ -565,9 +921,6 @@ fn app_data_dir() -> PathBuf {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Корень данных Jarvis. Приоритет: переменная окружения JARVIS_HOME →
-    // корень репозитория, известный на этапе сборки (dev-запуск) → каталог
-    // данных приложения (собранный .app).
     if std::env::var_os("JARVIS_HOME").is_none() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo = manifest
@@ -584,24 +937,36 @@ pub fn run() {
         }
     }
 
+    // Рабочая директория агента — домашний каталог пользователя. Без этого
+    // относительные пути файловых инструментов смотрели в каталог запуска
+    // приложения внутри .app, где ничего нет и куда нельзя писать.
+    if let Some(home) = std::env::var_os("HOME") {
+        jarvis_core::tools::set_cwd(&home.to_string_lossy());
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // Плеер и SharedTtsState создаются до Shared, чтобы всё
-            // разделяло один инстанс состояния TTS.
+            // 1. Канал событий создаём ПЕРВЫМ: он нужен и плееру (для AudioLevel),
+            //    и движку, и мосту в UI.
+            let (events_tx, events_rx) = channel::<JarvisEvent>();
+
+            // 2. Состояния, которые плеер и движок делят между собой.
             let shared_tts: Arc<SharedTtsState> = Arc::new(SharedTtsState::new());
             let tts_failed = Arc::new(AtomicBool::new(false));
             let is_speaking = Arc::new(AtomicBool::new(false));
+            // Клон для наблюдателя фазы «говорит»: сам флаг уедет в состояние.
+            let speaking_flag = Arc::clone(&is_speaking);
             let stop_audio_flag = Arc::new(AtomicBool::new(false));
 
             let shared_llm: Arc<SharedLlmState> = Arc::new(SharedLlmState::new());
-            // Битый settings.toml не должен валить приложение: откатываемся
-            // на значения по умолчанию.
+
             let settings = Arc::new(RwLock::new(
                 Settings::load(&paths::settings_file()).unwrap_or_else(|e| {
                     eprintln!("⚠️ {e:#}; использую настройки по умолчанию");
@@ -610,7 +975,11 @@ pub fn run() {
             ));
             settings.read().unwrap_or_else(|e| e.into_inner()).apply();
 
+            // 3. Плеер: первым аргументом идёт клон events_tx (нужен для
+            //    AudioLevel при воспроизведении). Возвращает Sender очереди
+            //    AudioMessage — через него движок и UI отправляют фразы.
             let audio_tx = tts::spawn_audio_player(
+                events_tx.clone(),
                 Arc::clone(&shared_tts),
                 Arc::clone(&tts_failed),
                 Arc::clone(&is_speaking),
@@ -619,6 +988,7 @@ pub fn run() {
                 Arc::clone(&settings),
             );
 
+            // 4. Общее состояние приложения.
             let shared = Arc::new(Shared::with_parts(
                 audio_tx.clone(),
                 shared_tts,
@@ -630,25 +1000,85 @@ pub fn run() {
             ));
             app.manage(Arc::clone(&shared));
 
-            // Мост событий движка в UI + журнал.
-            let (events_tx, events_rx) = channel::<JarvisEvent>();
+            // 5. Мост событий движка в UI + журнал.
             let shared_events = Arc::clone(&shared);
             let bridge = handle.clone();
             std::thread::spawn(move || {
                 for ev in events_rx {
                     shared_events.push_log(format!("{ev:?}"));
+                    // Таймеры и утилиты живут в отдельном окне: создаём/показываем.
+                    match &ev {
+                        JarvisEvent::TimerStarted { .. } | JarvisEvent::TimerStopped { .. } => {
+                            show_utils_window(&bridge, None);
+                        }
+                        JarvisEvent::TimerFired { label, kind, .. } => {
+                            show_utils_window(&bridge, None);
+                            use tauri_plugin_notification::NotificationExt;
+                            let (title, body) = match kind {
+                                jarvis_core::timers::TimerKind::Alarm => (
+                                    "Будильник",
+                                    if label.is_empty() {
+                                        "Пора вставать!".to_string()
+                                    } else {
+                                        label.to_string()
+                                    },
+                                ),
+                                jarvis_core::timers::TimerKind::Timer => (
+                                    "Таймер",
+                                    if label.is_empty() {
+                                        "Время вышло".to_string()
+                                    } else {
+                                        format!("{label} — время вышло")
+                                    },
+                                ),
+                            };
+                            let _ = bridge
+                                .notification()
+                                .builder()
+                                .title(title)
+                                .body(body)
+                                .show();
+                        }
+                        JarvisEvent::OpenUtils { tab } => {
+                            show_utils_window(&bridge, Some(tab));
+                        }
+                        JarvisEvent::CloseUtils => {
+                            use tauri::Manager;
+                            if let Some(window) = bridge.get_webview_window("utils") {
+                                let _ = window.hide();
+                            }
+                        }
+                        _ => {}
+                    }
                     let _ = bridge.emit("engine-event", &ev);
                 }
             });
 
+            // 5б. Фаза «говорит». В движке для неё нет состояния: пока TTS
+            //     играет, UI считал, что Джарвис готов и ждёт. Следим за
+            //     флагом озвучки и сообщаем интерфейсу только на смене.
+            let speaking_flag = Arc::clone(&speaking_flag);
+            let speak_bridge = handle.clone();
+            std::thread::spawn(move || {
+                let mut last = false;
+                loop {
+                    std::thread::sleep(Duration::from_millis(80));
+                    let now = speaking_flag.load(Ordering::SeqCst);
+                    if now != last {
+                        last = now;
+                        let _ = speak_bridge.emit("speech", serde_json::json!({ "speaking": now }));
+                    }
+                }
+            });
             tts::prune_tts_cache();
-            spawn_engine(&shared, events_tx);
+
+            let resource_dir = handle.path().resource_dir().ok();
+            spawn_engine(&shared, events_tx, resource_dir);
             build_tray(&handle)?;
 
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Закрытие окна сворачивает приложение в трей, а не завершает его.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
                 api.prevent_close();
@@ -657,15 +1087,29 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             status,
             set_paused,
+            get_cwd,
+            set_cwd,
             get_commands,
             save_commands,
             get_settings,
             save_settings,
             get_logs,
+            tasks_list,
+            tasks_add,
+            tasks_set_done,
+            tasks_remove,
+            tasks_open,
             tts_voices,
             tts_test,
+            open_external,
             llm_ask,
             llm_cancel,
+            open_mic_settings,
+            mic_status,
+            mic_request,
+            timer_start,
+            timer_cancel,
+            utils_close,
             ww_samples,
             ww_record,
             ww_delete,

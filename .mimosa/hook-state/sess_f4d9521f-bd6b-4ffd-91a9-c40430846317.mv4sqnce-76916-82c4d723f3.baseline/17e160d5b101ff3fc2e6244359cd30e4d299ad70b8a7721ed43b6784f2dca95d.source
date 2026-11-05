@@ -1,0 +1,20 @@
+import { createApp } from "vue";
+import App from "./App.vue";
+import UtilsWindow from "./UtilsWindow.vue";
+import "./style.css";
+
+// Окно «Утилиты» (таймер/секундомер/календарь) грузит тот же бандл:
+// различаем по метке окна Tauri. В браузере метки нет — обычное приложение.
+async function boot() {
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    if (getCurrentWindow().label === "utils") {
+      createApp(UtilsWindow).mount("#app");
+      return;
+    }
+  } catch {
+    // вне Tauri — главный интерфейс
+  }
+  createApp(App).mount("#app");
+}
+void boot();

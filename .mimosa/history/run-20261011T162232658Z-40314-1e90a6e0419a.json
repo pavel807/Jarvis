@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20261011T162232658Z-40314-1e90a6e0419a",
+  "runStatus": "inconclusive",
+  "errors": [
+    "baseline-enumerate:target/release/deps/rmetaHUXuFC: bash_discovery_incomplete: ENOENT: no such file or directory, scandir '/Users/pavellabushev/Projects/Rust/Jarvis/target/release/deps/rmetaHUXuFC'"
+  ],
+  "target": ".",
+  "revision": "aff2914f69e4b134971800fa6ee23995ef235b1c",
+  "diffHash": "df988656937cbb8c490c865df0102e434d0b1c0b5f91590a9dabc4d109432b78",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-10-11T16:22:32.658Z",
+  "timing": {
+    "startedAt": "2026-10-11T16:22:31.542Z",
+    "completedAt": "2026-10-11T16:22:32.658Z",
+    "durationMs": 1116
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "bash_discovery_incomplete": 1,
+      "project_check_failed": 1
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_f4d9521f-bd6b-4ffd-91a9-c40430846317-20261011T162232658Z-40314-1e90a6e0419a.json"
+}

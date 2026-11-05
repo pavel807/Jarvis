@@ -1,20 +1,33 @@
 //! jarvis-core: движок голосового ассистента (wake word, STT, TTS, LLM, команды).
 
+pub mod agent;
+pub mod applescript;
+pub mod asr;
 pub mod audio;
 pub mod commands;
 pub mod engine;
 pub mod events;
-pub mod kokoro_g2p;
-pub mod kokoro_vocab;
 pub mod llm;
+pub mod model_fetch;
+pub mod nn;
+pub mod omograph;
 pub mod paths;
+pub mod platform;
+pub mod prompt_budget;
+pub mod router;
 pub mod settings;
+pub mod site_cache;
 pub mod stress;
+pub mod speaker;
 pub mod stt;
+pub mod tasks;
 pub mod text;
-pub mod tts_silero;
+pub mod timers;
+pub mod tools;
+pub mod topic;
 pub mod tts;
-pub mod tts_kokoro;
+pub mod tts_normalizer;
+pub mod tts_silero;
 pub mod wake;
 pub mod wake_train;
 pub mod web;

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261011T162232658Z-40314-1e90a6e0419a",
+  "runId": "20261011T162232658Z-40314-1e90a6e0419a",
+  "runStatus": "inconclusive",
+  "coverage": {
+    "status": "partial",
+    "reasons": [
+      {
+        "code": "bash_discovery_incomplete",
+        "stage": "baseline-enumerate",
+        "target": "target/release/deps/rmetaHUXuFC",
+        "detail": "ENOENT: no such file or directory, scandir '/Users/pavellabushev/Projects/Rust/Jarvis/target/release/deps/rmetaHUXuFC'",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline-enumerate",
+        "target": "target/release/deps/rmetaHUXuFC",
+        "detail": "bash_discovery_incomplete: ENOENT: no such file or directory, scandir '/Users/pavellabushev/Projects/Rust/Jarvis/target/release/deps/rmetaHUXuFC'",
+        "affectsCompletion": true
+      }
+    ]
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "aff2914f69e4b134971800fa6ee23995ef235b1c",
+  "diffHash": "df988656937cbb8c490c865df0102e434d0b1c0b5f91590a9dabc4d109432b78",
+  "rulesVersion": "unavailable",
+  "sessionHash": "9b16b7674363913b6bb829a23606f7792747860fdbee69429e6a8d6716504323",
+  "reportRef": ".mimosa/reports/task-review-sess_f4d9521f-bd6b-4ffd-91a9-c40430846317-20261011T162232658Z-40314-1e90a6e0419a.json",
+  "events": [],
+  "observedFindingIds": [
+    "mimosa-9bdae3c60c37a61dd5f25b42",
+    "mimosa-d2b92dad2d435b34fc98014d"
+  ],
+  "verifiedFiles": [
+    {
+      "file": "crates/jarvis-core/src/llm/uzu_backend.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "scripts/build_macos.sh",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-10-11T16:22:33.029Z"
+}
