@@ -356,7 +356,8 @@ impl KvCache {
     }
 }
 
-/// Состояние одного слоя.
+/// Состояние одного слоя. Clone — снапшот спекулятивного декодирования.
+#[derive(Clone)]
 pub enum LayerCache {
     Linear {
         /// Свёртка: последние `kernel-1` входов, `(kernel-1, conv_dim)`.
@@ -367,7 +368,8 @@ pub enum LayerCache {
     Full(KvCache),
 }
 
-/// Полный кэш модели (по слою на каждый).
+/// Полный кэш модели (по слою на каждый). Clone — снапшот.
+#[derive(Clone)]
 pub struct Qwen35Cache {
     layers: Vec<LayerCache>,
 }
@@ -375,6 +377,12 @@ pub struct Qwen35Cache {
 impl Qwen35Cache {
     pub fn reset(&mut self, model: &Qwen35Model) {
         *self = model.new_cache();
+    }
+
+    /// Полный снимок состояния (conv + SSM + KV) для спекулятивного
+    /// декодирования: рекуррентные состояния DeltaNet не обрезаются.
+    pub fn snapshot(&self) -> Self {
+        Self { layers: self.layers.clone() }
     }
 }
 
@@ -995,8 +1003,7 @@ impl Qwen35Model {
         self.rope_len
     }
 
-    pub fn new_cache(&self) -> Qwen35Cache {
-        let dev = &self.device;
+    pub fn new_cache(&self) -> Qwen35Cache {        let dev = &self.device;
         let conv_dim = self.config.linear_num_heads
             * (2 * self.config.linear_head_k_dim + self.config.linear_head_v_dim);
         let layers = self

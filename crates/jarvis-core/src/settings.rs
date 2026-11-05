@@ -79,6 +79,14 @@ pub struct Settings {
     pub topic_memory: bool,
     /// Фильтр говорящего: в LLM-цепочку идёт только голос владельца.
     pub speaker_filter: bool,
+
+    // --- GUI-агент (Holo-3.1 / Holo) ---
+    /// GUI-агент включён: инструменты ui_task и screen_look живы.
+    pub ui_agent_enabled: bool,
+    /// Лимит шагов замкнутого цикла агента на одну задачу.
+    pub ui_agent_max_steps: usize,
+    /// Стенный лимит времени одной задачи, секунды.
+    pub ui_agent_timeout_secs: u64,
     /// Порог косинусного сходства с голосовым профилем владельца (0..1).
     pub speaker_threshold: f32,
 }
@@ -118,6 +126,9 @@ impl Default for Settings {
             // он просто пропускает всё и ни на что не влияет.
             speaker_filter: true,
             speaker_threshold: 0.6,
+            ui_agent_enabled: true,
+            ui_agent_max_steps: 12,
+            ui_agent_timeout_secs: 240,
         }
     }
 }
@@ -141,8 +152,13 @@ impl Settings {
         Ok(())
     }
 
-    /// Применяет настройки к подсистемам (голос TTS, параметры LLM).
+    /// Применяет настройки к подсистемам (голос TTS, параметры LLM, GUI-агент).
     pub fn apply(&self) {
+        crate::holo::service::update_config(crate::holo::service::AgentSettings {
+            enabled: self.ui_agent_enabled,
+            max_steps: self.ui_agent_max_steps,
+            timeout_secs: self.ui_agent_timeout_secs,
+        });
         crate::tts::set_current_voice(self.tts_voice.clone());
         crate::tts::set_current_speed(self.tts_speed);
         crate::llm::config::set_backend(&self.llm_backend);
@@ -151,12 +167,17 @@ impl Settings {
     }
 
     /// Применяет настройки, безопасные на живую (hot-reload settings.toml):
-    /// скорость речи и параметры генерации LLM. Голос и бэкенд не трогаем:
-    /// смена голоса требует перезагрузки Silero-движка (её делает UI-команда
-    /// сохранения), бэкенд/модель — перезапуска движка.
+    /// скорость речи, параметры генерации LLM и конфиг GUI-агента. Голос и
+    /// бэкенд не трогаем: смена голоса требует перезагрузки Silero-движка
+    /// (её делает UI-команда сохранения), бэкенд/модель — перезапуска движка.
     pub fn apply_hot(&self) {
         crate::tts::set_current_speed(self.tts_speed);
         crate::llm::config::update_generation_params(self.llm_params());
+        crate::holo::service::update_config(crate::holo::service::AgentSettings {
+            enabled: self.ui_agent_enabled,
+            max_steps: self.ui_agent_max_steps,
+            timeout_secs: self.ui_agent_timeout_secs,
+        });
     }
 
     fn llm_params(&self) -> crate::llm::config::GenerationParams {

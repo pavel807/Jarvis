@@ -11,18 +11,18 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.5.0",
-    "@tauri-apps/plugin-autostart": "^2.3.0",
-    "svelte": "^5.57.2",
+    "@tauri-apps/api": "^2.12.4",
+    "@tauri-apps/plugin-autostart": "^2.7.0",
+    "svelte": "^5.57.3",
     "three": "^0.187.0"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.2.4",
-    "@tauri-apps/cli": "^2.11.4",
+    "@tauri-apps/cli": "^2.12.4",
     "@types/three": "^0.187.0",
     "@webgpu/types": "^0.1.74",
-    "svelte-check": "^4.7.7",
-    "typescript": "^5.7.2",
-    "vite": "^6.4.3"
+    "svelte-check": "^4.7.8",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.5"
   }
 }

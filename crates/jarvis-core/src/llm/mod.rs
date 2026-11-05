@@ -807,7 +807,7 @@ pub fn ask(
 }
 
 /// Сколько раз за одну фразу агент может вызвать инструмент.
-pub const MAX_TOOL_STEPS: usize = 6;
+pub const MAX_TOOL_STEPS: usize = 12;
 
 /// С какой уверенности роутера форсировать tool-блок префиллом.
 ///
@@ -1084,6 +1084,9 @@ fn needs_next_step(call: &tools::ToolCall, outcome: &tools::ToolOutcome) -> bool
         // Результат оконной команды финален: после честного «свернул»/«нет
         // окон» модель получала слово и начинала выдумывать причины ошибки.
         tools::ToolCall::Window { .. } => false,
+        // Ввод/ожидание — звенья сценария интерфейса: модель должна продолжить
+        // цепочку и сама решить, остались ли действия.
+        tools::ToolCall::DesktopInput { .. } | tools::ToolCall::Wait { .. } => true,
         tools::ToolCall::WebSearch { .. } => outcome.ok,
         tools::ToolCall::RunCommand { .. } => {
             !outcome.ok || outcome.detail.starts_with("Результаты поиска")
@@ -1099,6 +1102,16 @@ fn needs_next_step(call: &tools::ToolCall, outcome: &tools::ToolOutcome) -> bool
         // круг модели тут только добавлял «Задача завершена» после команды.
         // Неудача — наоборот: пусть модель объяснит причину словами.
         tools::ToolCall::MusicControl { .. } => !outcome.ok,
+        // GUI-агент возвращает финальный отчёт: успех финален, провал —
+        // модель объясняет причину или переформулирует задачу.
+        tools::ToolCall::UiTask { .. } => !outcome.ok,
+        // Описание экрана — информация для следующего шага, как file_read.
+        tools::ToolCall::ScreenLook { .. } => true,
+        // Запуск/закрытие приложения и открытие ссылки — звенья цепочки
+        // («открой сафари сайт авиасейлс» = open_app + open_url/ui_task).
+        // Раньше цикл обрывался после первого шага, и задача не доводилась.
+        tools::ToolCall::OpenApp { .. } | tools::ToolCall::QuitApp { .. } => true,
+        tools::ToolCall::OpenUrl { .. } | tools::ToolCall::OpenPath { .. } => true,
         _ => !outcome.ok,
     }
 }

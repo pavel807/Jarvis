@@ -21,7 +21,8 @@
     { key: "ai", title: "AI-модель" },
     { key: "web", title: "Интернет" },
     { key: "system", title: "Система" },
-  ] as const;
+    { key: "ui-agent", title: "GUI-агент" },
+] as const;
 
   type SectionKey = (typeof SECTIONS)[number]["key"];
 
@@ -94,6 +95,39 @@
   async function openMicSettings() {
     try {
       await invoke("open_mic_settings");
+    } catch (e) {
+      toast(`Не получилось: ${e}`, "err");
+    }
+  }
+
+  // --- GUI-агент: статус модели и скачивание весов ---
+  let uiAgentStage = $state<string>("unknown");
+  const uiAgentStageLabel = $derived(
+    ({
+      ready: "в памяти",
+      loading: "загружается",
+      downloaded: "на диске",
+      not_downloaded: "не скачана",
+      failed: "ошибка",
+      unavailable: "сервис не запущен",
+      unknown: "уточняю…",
+    })[uiAgentStage] ?? uiAgentStage,
+  );
+  onMount(() => {
+    void (async () => {
+      try {
+        const st = await invoke<{ ui_agent_stage?: string }>("status");
+        uiAgentStage = st.ui_agent_stage ?? "unknown";
+      } catch {
+        uiAgentStage = "unknown";
+      }
+    })();
+  });
+  async function downloadUiAgent() {
+    try {
+      await invoke("ui_agent_download");
+      toast("Загрузка весов началась — прогресс в журнале", "ok");
+      uiAgentStage = "loading";
     } catch (e) {
       toast(`Не получилось: ${e}`, "err");
     }
@@ -205,7 +239,7 @@
 <div class="page">
   <div class="toolbar">
     <div class="search-box">
-      <span class="icon"><AppIcon name="search" size={14} /></span>
+      <span class="search-box__icon"><AppIcon name="search" size={14} /></span>
       <input
         bind:value={query}
         class="input"
@@ -300,6 +334,30 @@
           hint="«Мы это забыли» — вернёт разговор к теме, от которой отвлеклись."
           onchange={(value) => void patchSettings({ topic_memory: value })}
         />
+      {/if}
+    </div>
+  </section>
+
+  <!-- GUI-агент (зрение и действия на экране) -->
+  <section class="settings-section" data-section="ui-agent" bind:this={sectionEls["ui-agent"]}>
+    <h2 class="section-title">GUI-агент</h2>
+    <div class="card card--flush">
+      {#if hit("gui", "агент", "экран", "ui_task", "vision", "зрение")}
+        <SwitchRow
+          checked={settings.ui_agent_enabled}
+          title="GUI-агент включён"
+          hint="Агент зрения (Holo-3.1) видит экран: «что на экране» — описание, «сделай на экране …» — сам кликает и печатает с самопроверкой. Модель (~9,7 ГБ) грузится при первом обращении."
+          onchange={(value) => void patchSettings({ ui_agent_enabled: value })}
+        />
+        <div class="row-item">
+          <div class="row-item__text">
+            <span class="row-item__title">Веса модели</span>
+            <span class="row-item__value">{uiAgentStageLabel}</span>
+          </div>
+          {#if uiAgentStage === "not_downloaded"}
+            <button class="mini-btn" onclick={() => void downloadUiAgent()}>Скачать (~9,7 ГБ)</button>
+          {/if}
+        </div>
       {/if}
     </div>
   </section>

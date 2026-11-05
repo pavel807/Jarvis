@@ -239,6 +239,12 @@ fn spawn_engine(
                 .replace("{voice}", &tts_voice),
         });
         spawn_llm_loader(&shared_engine.shared_llm, &events_tx);
+        // GUI-агент (Holo-3.1-4B): воркер с горячей загрузкой модели при
+        // старте — интерфейс живой, вопросы не про экран отвечаются сразу,
+        // про экран — вежливая фраза ожидания, пока веса готовятся.
+        let venus_handle = jarvis_core::holo::spawn_service(events_tx.clone());
+        jarvis_core::holo::set_service(venus_handle);
+        let _ = jarvis_core::holo::with_service(|h| h.request(jarvis_core::holo::ServiceQuery::Preload));
 
         let models_dir = paths::models_dir();
         let model = match Stt::load(&models_dir) {
@@ -298,6 +304,8 @@ struct Status {
     paused: bool,
     llm_status: String,
     tts_ready: bool,
+    /// Стадия GUI-агента (Holo-3.1): not_downloaded | downloaded | ready | failed.
+    ui_agent_stage: String,
     /// Рабочая директория агента: от неё считаются относительные пути
     /// файловых инструментов, её же меняет `cd` в shell.
     cwd: String,
@@ -305,6 +313,17 @@ struct Status {
 
 #[tauri::command]
 fn status(shared: State<'_, Arc<Shared>>) -> Status {
+    let ui_stage = jarvis_core::holo::with_service(|h| {
+        let st = h.status();
+        Ok(match st.stage {
+            jarvis_core::holo::RuntimeStage::Ready => "ready".to_string(),
+            jarvis_core::holo::RuntimeStage::Loading => "loading".to_string(),
+            jarvis_core::holo::RuntimeStage::Failed => "failed".to_string(),
+            _ if st.downloaded => "downloaded".to_string(),
+            _ => "not_downloaded".to_string(),
+        })
+    })
+    .unwrap_or_else(|_| "unavailable".to_string());
     Status {
         engine_running: shared.engine_running.load(Ordering::SeqCst),
         paused: shared.paused.load(Ordering::SeqCst),
@@ -315,8 +334,26 @@ fn status(shared: State<'_, Arc<Shared>>) -> Status {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_some(),
+        ui_agent_stage: ui_stage,
         cwd: jarvis_core::tools::cwd(),
     }
+}
+
+/// Скачать чекпойнт GUI-агента (~9.7 ГБ); прогресс — в JarvisEvent::Log.
+#[tauri::command]
+fn ui_agent_download(events: State<'_, jarvis_core::events::EventTx>) -> Result<(), String> {
+    let dispatched = jarvis_core::holo::with_service(|h| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Err(e) = h.request(jarvis_core::holo::ServiceQuery::Download { reply: tx }) {
+            return Err(e);
+        }
+        // Ждать завершения в фоне: ответ уйдёт логом, UI не блокируем.
+        std::thread::spawn(move || {
+            let _ = rx.recv();
+        });
+        Ok(())
+    });
+    dispatched.map_err(|e| e.to_string())
 }
 
 /// Текущая рабочая директория агента.
@@ -1091,6 +1128,7 @@ pub fn run() {
             set_cwd,
             get_commands,
             save_commands,
+            ui_agent_download,
             get_settings,
             save_settings,
             get_logs,

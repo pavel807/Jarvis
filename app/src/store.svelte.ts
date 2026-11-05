@@ -61,6 +61,11 @@ export interface Settings {
   speaker_filter: boolean;
   /** Порог косинусного сходства с голосовым профилем владельца. */
   speaker_threshold: number;
+
+  // --- GUI-агент (Holo-3.1 / Holo) ---
+  ui_agent_enabled: boolean;
+  ui_agent_max_steps: number;
+  ui_agent_timeout_secs: number;
 }
 
 export interface Toast {
@@ -244,6 +249,9 @@ export const settings = $state<Settings>({
   topic_memory: true,
   speaker_filter: true,
   speaker_threshold: 0.6,
+  ui_agent_enabled: true,
+  ui_agent_max_steps: 12,
+  ui_agent_timeout_secs: 240,
 });
 
 export async function loadSettings() {
@@ -302,6 +310,31 @@ export async function initEvents() {
       case "action_started": {
         const summary = ((ev.summary as string) ?? "").slice(0, 120);
         store.logs.unshift(`${now()}  🔧 ${(ev.tool as string) ?? ""} ${summary}`);
+        if (store.logs.length > 300) store.logs.length = 300;
+        break;
+      }
+      case "ui_agent_status":
+        store.logs.unshift(
+          `${now()}  🤖 GUI-агент [${(ev.stage as string) ?? ""}]: ${((ev.detail as string) ?? "").slice(0, 120)}`,
+        );
+        if (store.logs.length > 300) store.logs.length = 300;
+        break;
+      case "ui_agent_step": {
+        const step = (ev.step as number) ?? 0;
+        const max = (ev.max_steps as number) ?? 0;
+        const actions = ((ev.actions as string[]) ?? []).join("; ").slice(0, 160);
+        noteTurn(`GUI-агент: шаг ${step + 1}/${max} — ${actions}`);
+        store.logs.unshift(`${now()}  🤖 шаг ${step + 1}/${max}: ${actions}`);
+        if (store.logs.length > 300) store.logs.length = 300;
+        break;
+      }
+      case "ui_agent_done": {
+        const ok = ev.ok as boolean;
+        const msg = ((ev.message as string) ?? "").slice(0, 200);
+        noteTurn(`GUI-агент: ${ok ? "завершено" : "не завершено"} — ${msg}`);
+        store.logs.unshift(
+          `${now()}  ${ok ? "✅" : "❗"} GUI-агент: ${msg} (${ev.steps ?? 0} шагов)`,
+        );
         if (store.logs.length > 300) store.logs.length = 300;
         break;
       }

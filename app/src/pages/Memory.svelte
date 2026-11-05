@@ -86,9 +86,9 @@
   }
 
   const metaFor = (turn: (typeof store.history)[number]) => {
-    if (turn.role === "user") return { cls: "is-user", label: turn.source === "text" ? "ВВОД" : "ГОЛОС" };
-    if (turn.role === "note") return { cls: "is-action", label: "СИСТЕМА" };
-    if (turn.source === "action") return { cls: "is-action", label: "ДЕЙСТВИЕ" };
+    if (turn.role === "user") return { cls: "is-user", label: turn.source === "text" ? "ввод" : "голос" };
+    if (turn.role === "note") return { cls: "is-action", label: "система" };
+    if (turn.source === "action") return { cls: "is-action", label: "действие" };
     return { cls: "is-ai", label: "J.A.R.V.I.S" };
   };
 </script>

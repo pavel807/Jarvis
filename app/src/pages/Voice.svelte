@@ -122,7 +122,7 @@
 
     <div class="toolbar">
       <div class="search-box">
-        <span class="icon"><AppIcon name="search" size={15} /></span>
+        <span class="search-box__icon"><AppIcon name="search" size={15} /></span>
         <input
           bind:value={query}
           class="input"

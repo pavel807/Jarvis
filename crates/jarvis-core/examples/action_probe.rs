@@ -36,6 +36,18 @@ fn main() -> Result<()> {
                 JarvisEvent::Error { message } => eprintln!("❗ {message}"),
                 JarvisEvent::LlmStatus { status } => println!("🧠 LLM: {status}"),
                 JarvisEvent::Log { message } => println!("ℹ️  {message}"),
+                JarvisEvent::UiAgentStatus { stage, detail } => {
+                    println!("🤖 [{stage}] {detail}")
+                }
+                JarvisEvent::UiAgentStep { step, max_steps, actions } => {
+                    println!("🤖 шаг {}/{}: {}", step + 1, max_steps, actions.join("; "))
+                }
+                JarvisEvent::UiAgentDone { ok, message, steps, elapsed_ms } => {
+                    println!(
+                        "🤖 {} ({steps} шагов, {elapsed_ms} мс)",
+                        if ok { format!("✅ {message}") } else { format!("❗ {message}") }
+                    )
+                }
                 _ => {}
             }
         }
@@ -44,6 +56,10 @@ fn main() -> Result<()> {
 
     let shared = Arc::new(SharedLlmState::new());
     llm::spawn_llm_loader(&shared, &events_tx);
+    // GUI-агент: тот же воркер, что в приложении, иначе ui_task честно
+    // отвечает «сервис не запущен» и агентный сценарий не проверить.
+    let venus = jarvis_core::holo::spawn_service(events_tx.clone());
+    jarvis_core::holo::set_service(venus);
     let history = Arc::new(Mutex::new(Vec::new()));
     let cancel = Arc::new(AtomicBool::new(false));
 

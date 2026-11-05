@@ -22,12 +22,15 @@ serde_json.workspace = true
 flate2 = "1"
 ureq.workspace = true
 regex.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # macOS: AppleScript прямо в процессе приложения (NSAppleScript), а не через
 # порождение osascript. Так запрос разрешения на автоматизацию приходит от
 # самого Джарвиса — «Джарвис хочет управлять Музыкой» — и его можно выдать
 # один раз, вместо поиска нужного пункта в Системных настройках.
 [target.'cfg(target_os = "macos")'.dependencies]
+# CoreML для фильтра говорящего включается только на macOS.
+speakrs = { workspace = true, features = ["coreml"] }
 # Metal-бэкенд candle — только macOS: на Linux и Windows считаем на CPU.
 # Записи ниже дополняют features базовых зависимостей (см. [dependencies]).
 candle-core = { workspace = true, features = ["metal"] }

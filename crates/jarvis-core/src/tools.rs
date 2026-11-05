@@ -141,6 +141,10 @@ pub enum ToolCall {
         action: String,
         app: Option<String>,
     },
+    /// Ввод текста, клавиатурные сочетания и мышь в активном приложении.
+    DesktopInput { action: crate::platform::desktop::DesktopAction },
+    /// Пауза между действиями интерфейса (например, после запуска программы).
+    Wait { seconds: u64 },
     /// Пользовательская команда из commands.toml по имени. Каталог команд с
     /// параметрами приходит в системном промпте; параметры подставляются в
     /// плейсхолдеры `{...}` в значении действия.
@@ -169,6 +173,16 @@ pub enum ToolCall {
     /// браузера (Яндекс Музыка, YouTube) — управление идёт туда, где звук.
     MusicControl {
         action: String,
+    },
+    /// Поручить GUI-агенту (Holo-3.1) задачу на экране: он видит пиксели,
+    /// сам кликает/печатает/прокручивает и проверяет результат повторными
+    /// скриншотами. Задачу формулировать по-английски.
+    UiTask {
+        task: String,
+    },
+    /// Спросить GUI-агента, что сейчас на экране (текстовое описание).
+    ScreenLook {
+        question: String,
     },
 }
 
@@ -271,6 +285,18 @@ const ALIASES: &[(&str, &str)] = &[
     ("команда", "shell"),
     ("командная_строка", "shell"),
     ("выполнить", "shell"),
+    // GUI-агент Holo-3.1
+    ("ui_task", "ui_task"),
+    ("gui_task", "ui_task"),
+    ("ui_agent", "ui_task"),
+    ("screen_task", "ui_task"),
+    ("gui_агент", "ui_task"),
+    ("экранная_задача", "ui_task"),
+    ("screen_look", "screen_look"),
+    ("look_at_screen", "screen_look"),
+    ("describe_screen", "screen_look"),
+    ("что_на_экране", "screen_look"),
+    ("посмотри_экран", "screen_look"),
     // open_url
     ("open_url", "open_url"),
     ("openurl", "open_url"),
@@ -574,6 +600,18 @@ const ALIASES: &[(&str, &str)] = &[
     ("player", "music_control"),
     ("музыка_управление", "music_control"),
     ("play_pause", "music_control"),
+    // keyboard/mouse control
+    ("desktop_input", "desktop_input"),
+    ("type_text", "desktop_input"),
+    ("press_key", "desktop_input"),
+    ("hotkey", "desktop_input"),
+    ("mouse_click", "desktop_input"),
+    ("click", "desktop_input"),
+    ("double_click", "desktop_input"),
+    ("right_click", "desktop_input"),
+    ("move_mouse", "desktop_input"),
+    ("scroll_mouse", "desktop_input"),
+    ("wait", "wait"),
 ];
 
 /// Обобщённые имена, для которых инструмент определяется по аргументам:
@@ -694,6 +732,30 @@ fn arg_u64(args: &Value, keys: &[&str]) -> Option<u64> {
 }
 
 /// Секунды: принимает `seconds`/`sec`/`time`/`duration`, а также `minutes`.
+fn arg_i32(args: &Value, keys: &[&str]) -> Option<i32> {
+    keys.iter().find_map(|k| args.get(*k)).and_then(|value| match value {
+        Value::Number(n) => n.as_i64().and_then(|v| i32::try_from(v).ok()),
+        Value::String(s) => s.trim().parse::<i32>().ok(),
+        _ => None,
+    })
+}
+
+fn arg_string_array_or_split(args: &Value, keys: &[&str]) -> Option<Vec<String>> {
+    let value = keys.iter().find_map(|k| args.get(*k))?;
+    match value {
+        Value::Array(items) => {
+            let out: Vec<String> = items.iter().filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)).collect();
+            (!out.is_empty()).then_some(out)
+        }
+        Value::String(s) => {
+            let out: Vec<String> = s.split(|c: char| c == '+' || c == ',' || c.is_whitespace())
+                .map(str::trim).filter(|x| !x.is_empty()).map(str::to_string).collect();
+            (!out.is_empty()).then_some(out)
+        }
+        _ => None,
+    }
+}
+
 fn arg_seconds(args: &Value) -> Option<u64> {
     if let Some(s) = arg_u64(
         args,
@@ -799,10 +861,26 @@ pub fn parse(text: &str) -> ToolParse {
         return ToolParse::Failed("в tool-блоке нет поля name".into());
     };
 
-    let args = extract_args(&v);
+    let mut args = extract_args(&v);
     let Some(name) = resolve_tool(raw_name, &args) else {
         return ToolParse::Failed(format!("неизвестный инструмент «{raw_name}», args: {args}"));
     };
+    // У коротких имён (type_text, press_key, hotkey, click) тип действия
+    // является самим именем инструмента. Поддерживаем их как удобные алиасы.
+    if name == "desktop_input" && args.get("action").is_none() {
+        let invoked = normalize_name(raw_name);
+        if matches!(invoked.as_str(), "type_text" | "press_key" | "hotkey" | "mouse_click" | "click" | "double_click" | "right_click" | "move_mouse" | "scroll_mouse") {
+            if let Some(map) = args.as_object_mut() {
+                let action = match invoked.as_str() {
+                    "mouse_click" => "click",
+                    "move_mouse" => "move",
+                    "scroll_mouse" => "scroll",
+                    other => other,
+                };
+                map.insert("action".into(), Value::String(action.into()));
+            }
+        }
+    }
 
     match build_call(name, &args) {
         Some(Ok(call)) => ToolParse::Call(call),
@@ -1208,6 +1286,60 @@ fn build(name: &str, args: &Value) -> Result<ToolCall, String> {
             )
             .map(fix_lookalikes),
         },
+        "desktop_input" => {
+            use crate::platform::desktop::{DesktopAction, MouseButton, ScrollDirection};
+            let action = normalize_name(&get_str(&["action", "type", "operation", "действие"])?);
+            let action = match action.as_str() {
+                "type_text" | "type" | "text" | "write" | "ввести_текст" | "напечатать" => DesktopAction::TypeText {
+                    text: get_str(&["text", "content", "value", "текст"])?
+                },
+                "press_key" | "key" | "press" | "нажать_клавишу" => DesktopAction::PressKey {
+                    key: get_str(&["key", "name", "клавиша"])?
+                },
+                "hotkey" | "shortcut" | "chord" | "сочетание_клавиш" => DesktopAction::Hotkey {
+                    keys: arg_string_array_or_split(args, &["keys", "key", "shortcut", "сочетание"])
+                        .ok_or("укажи keys массивом или строкой, например CTRL+SHIFT+S")?
+                },
+                "click" | "mouse_click" | "double_click" | "right_click" | "клик" | "нажать_мышью" => {
+                    const CLICK_HINT: &str = "координаты наугад запрещены: экран видит только агент зрения. Кликни через ui_task {\"task\":\"<описание по-английски>\"} — он найдёт кнопку сам";
+                    let x = arg_i32(args, &["x", "left", "горизонталь"])
+                        .ok_or_else(|| format!("для клика указаны не все координаты: {CLICK_HINT}"))?;
+                    let y = arg_i32(args, &["y", "top", "вертикаль"])
+                        .ok_or_else(|| format!("для клика указаны не все координаты: {CLICK_HINT}"))?;
+                    let button = match arg_str(args, &["button", "кнопка"]).unwrap_or(if action == "right_click" { "right" } else { "left" }).to_lowercase().as_str() {
+                        "left" | "левая" | "l" => MouseButton::Left,
+                        "right" | "правая" | "r" => MouseButton::Right,
+                        "middle" | "средняя" | "m" => MouseButton::Middle,
+                        other => return Err(format!("неизвестная кнопка мыши: {other}")),
+                    };
+                    let count = if action == "double_click" { 2 } else { arg_u64(args, &["count", "clicks", "раз"]).unwrap_or(1).try_into().unwrap_or(255) };
+                    DesktopAction::Click { x, y, button, count }
+                }
+                "move" | "move_mouse" | "переместить_курсор" => DesktopAction::Move {
+                    x: arg_i32(args, &["x", "горизонталь"]).ok_or("для перемещения укажи x")?,
+                    y: arg_i32(args, &["y", "вертикаль"]).ok_or("для перемещения укажи y")?,
+                },
+                "scroll" | "wheel" | "прокрутить" => {
+                    let direction = match get_str(&["direction", "dir", "направление"])?.to_lowercase().as_str() {
+                        "up" | "вверх" => ScrollDirection::Up,
+                        "down" | "вниз" => ScrollDirection::Down,
+                        "left" | "влево" => ScrollDirection::Left,
+                        "right" | "вправо" => ScrollDirection::Right,
+                        other => return Err(format!("неизвестное направление прокрутки: {other}")),
+                    };
+                    DesktopAction::Scroll { direction, amount: arg_u64(args, &["amount", "steps", "количество"]).unwrap_or(3).min(50) as u8 }
+                }
+                other => return Err(format!("неизвестное действие desktop_input: {other}")),
+            };
+            ToolCall::DesktopInput { action }
+        }
+        "wait" => {
+            let seconds = get_seconds()?;
+            if seconds == 0 || seconds > 30 {
+                return Err("ожидание должно быть от 1 до 30 секунд".into());
+            }
+            ToolCall::Wait { seconds }
+        }
         "run_command" => {
             let name = get_str(&["name", "command_name", "id", "название", "имя"])?;
             // Параметры команды: вложенный объект args/params/arguments.
@@ -1258,6 +1390,19 @@ fn build(name: &str, args: &Value) -> Result<ToolCall, String> {
         "music_control" => ToolCall::MusicControl {
             action: normalize_music_action(&get_str(&["action", "what", "op", "действие"])?),
         },
+        "ui_task" => {
+            let task = get_str(&["task", "goal", "instruction", "задача"])?;
+            if task.trim().is_empty() {
+                return Err("пустая задача для GUI-агента".into());
+            }
+            ToolCall::UiTask { task }
+        }
+        "screen_look" => {
+            let question = arg_str(args, &["question", "q", "prompt", "вопрос"])
+                .map(String::from)
+                .unwrap_or_else(|| "Опиши, что сейчас на экране.".into());
+            ToolCall::ScreenLook { question }
+        }
         other => return Err(format!("инструмент {other} не поддерживается")),
     })
 }
@@ -1456,6 +1601,8 @@ fn tool_name(call: &ToolCall) -> &'static str {
         ToolCall::AppleScript { .. } => "applescript",
         ToolCall::SystemInfo => "system_info",
         ToolCall::Window { .. } => "window",
+        ToolCall::DesktopInput { .. } => "desktop_input",
+        ToolCall::Wait { .. } => "wait",
         ToolCall::FileRead { .. } => "file_read",
         ToolCall::FileWrite { .. } => "file_write",
         ToolCall::FileAppend { .. } => "file_append",
@@ -1474,6 +1621,8 @@ fn tool_name(call: &ToolCall) -> &'static str {
         ToolCall::AddNote { .. } => "add_note",
         ToolCall::CreateEvent { .. } => "create_event",
         ToolCall::MusicControl { .. } => "music_control",
+        ToolCall::UiTask { .. } => "ui_task",
+        ToolCall::ScreenLook { .. } => "screen_look",
     }
 }
 
@@ -1518,6 +1667,8 @@ fn tool_summary(call: &ToolCall) -> String {
             .as_deref()
             .map(|a| format!("{action} {a}"))
             .unwrap_or_else(|| action.clone()),
+        ToolCall::DesktopInput { action } => format!("{action:?}"),
+        ToolCall::Wait { seconds } => format!("{seconds} с"),
         ToolCall::FileRead { path, .. }
         | ToolCall::FileWrite { path, .. }
         | ToolCall::FileAppend { path, .. }
@@ -1566,6 +1717,8 @@ fn tool_summary(call: &ToolCall) -> String {
             }
         }
         ToolCall::MusicControl { action } => action.clone(),
+        ToolCall::UiTask { task } => task.chars().take(120).collect(),
+        ToolCall::ScreenLook { question } => question.chars().take(120).collect(),
     }
 }
 
@@ -1731,7 +1884,10 @@ fn verify_outcome(
             },
             _ => outcome,
         },
-        Postcondition::ProcessState | Postcondition::ExitCode | Postcondition::None => outcome,
+        // AgentReport: постусловие проверяется самим замкнутым циклом
+        // (ok ставится только по Termination::Done — см. execute_inner).
+        Postcondition::AgentReport | Postcondition::ProcessState | Postcondition::ExitCode
+        | Postcondition::None => outcome,
     }
 }
 
@@ -1971,6 +2127,81 @@ fn execute_inner(
             }
         }
 
+        ToolCall::UiTask { task } => {
+            println!("🔧 ui_task");
+            log(format!("🤖 GUI-агент: задача «{}»", task.chars().take(100).collect::<String>()));
+            // Горячая загрузка: не подвешиваем действие на полминуты.
+            if crate::holo::is_loading() {
+                ToolOutcome::fail(
+                    "Подождите, пожалуйста, идёт загрузка модели зрения — повторите через полминуты.",
+                )
+            } else {
+                match crate::holo::service::with_service(|h| h.run_task(&task.clone())) {
+                    Ok(report) => {
+                        let (ok, message) = match &report.termination {
+                            crate::holo::Termination::Done(m) => {
+                                (true, m.clone())
+                            }
+                            crate::holo::Termination::MaxSteps => {
+                                (false, format!("Лимит шагов ({}) исчерпан", report.steps.len()))
+                            }
+                            crate::holo::Termination::Cancelled => {
+                                (false, "Остановлено пользователем".into())
+                            }
+                            crate::holo::Termination::Timeout => {
+                                (false, "Время задачи истекло".into())
+                            }
+                            crate::holo::Termination::ActionError(e) => {
+                                (false, format!("Ошибка действия: {e}"))
+                            }
+                        };
+                        let log_tail = report
+                            .steps
+                            .iter()
+                            .rev()
+                            .take(3)
+                            .flat_map(|s| s.log.iter())
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        let detail = format!(
+                            "{message} (шагов: {}, действий: {})\nПоследние действия: {}",
+                            report.steps.len(),
+                            report.total_actions,
+                            log_tail.chars().take(400).collect::<String>()
+                        );
+                        if ok {
+                            ToolOutcome::with_detail(message, detail)
+                        } else {
+                            ToolOutcome::fail_with_detail(message, detail)
+                        }
+                    }
+                    Err(e) => ToolOutcome::fail(format!("GUI-агент недоступен: {e:#}")),
+                }
+            }
+        }
+
+        ToolCall::ScreenLook { question } => {
+            println!("🔧 screen_look");
+            log(format!("👀 screen_look: {}", question.chars().take(80).collect::<String>()));
+            if crate::holo::is_loading() {
+                ToolOutcome::fail(
+                    "Подождите, пожалуйста, идёт загрузка модели зрения — повторите через полминуты.",
+                )
+            } else {
+                match crate::holo::service::with_service(|h| h.look(&question.clone())) {
+                Ok(description) => {
+                    let bounded: String = description.chars().take(900).collect();
+                        ToolOutcome::with_detail(
+                            "Экран разобран агентом зрения".to_string(),
+                            format!("{question}\nОтвет агента зрения: {bounded}"),
+                        )
+                    }
+                    Err(e) => ToolOutcome::fail(format!("Разбор экрана недоступен: {e:#}")),
+                }
+            }
+        }
+
         ToolCall::LockScreen => {
             println!("🔧 lock_screen");
             log("🔧 lock_screen".into());
@@ -2068,6 +2299,22 @@ fn execute_inner(
             println!("🔧 system_info");
             log("🔧 system_info".into());
             ToolOutcome::ok(crate::platform::system_info())
+        }
+
+        ToolCall::DesktopInput { action } => {
+            println!("🔧 desktop_input: {action:?}");
+            log(format!("🔧 desktop_input: {action:?}"));
+            match crate::platform::desktop::execute(&action) {
+                Ok(message) => ToolOutcome::with_detail(message, "Системе отправлена команда ввода; содержимое целевого окна отдельно не проверено"),
+                Err(reason) => ToolOutcome::fail(reason),
+            }
+        }
+
+        ToolCall::Wait { seconds } => {
+            println!("⏳ wait: {seconds}s");
+            log(format!("⏳ wait: {seconds}s"));
+            std::thread::sleep(Duration::from_secs(seconds));
+            ToolOutcome::ok(format!("Подождал {seconds} с"))
         }
 
         ToolCall::Window { action, app } => {
@@ -3516,6 +3763,34 @@ mod tests {
             Some(ToolCall::OpenApp { name }) => assert_eq!(name, "Zed"),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_desktop_keyboard_and_mouse_actions() {
+        assert!(matches!(
+            parse(r#"<tool>{"name":"desktop_input","args":{"action":"type_text","text":"Привет"}}</tool>"#),
+            ToolParse::Call(ToolCall::DesktopInput { action: crate::platform::desktop::DesktopAction::TypeText { text } }) if text == "Привет"
+        ));
+        assert!(matches!(
+            parse(r#"<tool>{"name":"hotkey","args":{"keys":["CTRL","S"]}}</tool>"#),
+            ToolParse::Call(ToolCall::DesktopInput { action: crate::platform::desktop::DesktopAction::Hotkey { keys } }) if keys == vec![String::from("CTRL"), String::from("S")]
+        ));
+        assert!(matches!(
+            parse(r#"<tool>{"name":"click","args":{"x":420,"y":300}}</tool>"#),
+            ToolParse::Call(ToolCall::DesktopInput { action: crate::platform::desktop::DesktopAction::Click { x: 420, y: 300, .. } })
+        ));
+    }
+
+    #[test]
+    fn parse_wait_between_desktop_steps() {
+        assert!(matches!(
+            parse(r#"<tool>{"name":"wait","args":{"seconds":2}}</tool>"#),
+            ToolParse::Call(ToolCall::Wait { seconds: 2 })
+        ));
+        assert!(matches!(
+            parse(r#"<tool>{"name":"wait","args":{"seconds":31}}</tool>"#),
+            ToolParse::Failed(_)
+        ));
     }
 
     #[test]

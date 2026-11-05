@@ -44,12 +44,12 @@
   class="mic-btn"
   class:is-listening={!paused && running}
   class:is-off={paused && running && !denied}
-  class:is-error={denied || !running}
+  class:is-error={denied}
   {disabled}
   aria-pressed={!paused && running}
   aria-label={label}
   title={label}
   onclick={toggle}
 >
-  <AppIcon name={denied ? "micOff" : paused ? "mic" : "mic"} size={24} />
+  <AppIcon name={denied ? "micOff" : "mic"} size={24} />
 </button>

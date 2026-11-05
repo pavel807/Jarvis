@@ -68,14 +68,14 @@ export function getOrbState(): OrbState {
   return tone;
 }
 
-/** Короткий технический статус голосовой зоны (моноширинный капс). */
+/** Короткий статус голосовой зоны. */
 export function voiceStatusLabel(): string {
-  if (!store.status.engineRunning) return "ЗАГРУЗКА СИСТЕМ";
-  if (store.status.paused) return "МИКРОФОН ВЫКЛ";
-  if (store.status.llmStatus === "error") return "ОШИБКА ЯДРА";
-  if (store.speaking) return "ПЕРЕДАЧА";
-  if (store.chat.busy) return "ОБРАБОТКА ЗАПРОСА";
-  if (assistantBusy()) return "АНАЛИЗ ФРАЗЫ";
-  if (store.engineState === "listening") return "СЛУШАЮ";
-  return "ГОТОВ";
+  if (!store.status.engineRunning) return "Загрузка систем";
+  if (store.status.paused) return "Микрофон выключен";
+  if (store.status.llmStatus === "error") return "Ошибка ядра";
+  if (store.speaking) return "Передача";
+  if (store.chat.busy) return "Обработка запроса";
+  if (assistantBusy()) return "Анализ фразы";
+  if (store.engineState === "listening") return "Слушаю";
+  return "Готов";
 }

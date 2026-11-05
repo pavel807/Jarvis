@@ -287,20 +287,20 @@
     </button>
     <div class="page-head__body">
       <h1 class="page-title">Команды</h1>
-      <p class="page-sub">
-        Джарвис выполняет команду, когда слышит одно из её слов. Чем выше строка,
-        тем раньше команда срабатывает — порядок можно менять перетаскиванием.
-      </p>
     </div>
     <button class="btn btn--primary" onclick={openNew}>
       <AppIcon name="plus" size={16} />
       Новая команда
     </button>
   </div>
+  <p class="page-sub commands-sub">
+    Джарвис выполняет команду, когда слышит одно из её слов. Чем выше строка,
+    тем раньше команда срабатывает — порядок можно менять перетаскиванием.
+  </p>
 
   <div class="toolbar">
     <div class="search-box">
-      <span class="icon"><AppIcon name="search" size={15} /></span>
+      <span class="search-box__icon"><AppIcon name="search" size={15} /></span>
       <input
         bind:value={query}
         class="input"
@@ -309,20 +309,20 @@
         aria-label="Поиск по командам"
       />
     </div>
-    <select bind:value={filterType} class="select" style="width: auto" aria-label="Фильтр по действию">
+    <select bind:value={filterType} class="select" aria-label="Фильтр по действию">
       <option value="all">Все действия</option>
       {#each ACTION_ORDER as type (type)}
         <option value={type}>{meta(type).label}</option>
       {/each}
     </select>
-    <select bind:value={sortMode} class="select" style="width: auto" aria-label="Сортировка">
+    <select bind:value={sortMode} class="select" aria-label="Сортировка">
       <option value="priority">По приоритету</option>
       <option value="name">По алфавиту</option>
     </select>
     <div class="toolbar__spacer"></div>
     {#if config}
-      <span class="badge">
-        {config.commands.filter((c) => c.enabled).length} из {config.commands.length} активны
+      <span class="badge" title="Активных команд из всех">
+        {config.commands.filter((c) => c.enabled).length} из {config.commands.length}
       </span>
     {/if}
   </div>
@@ -554,5 +554,12 @@
   .back-btn {
     flex-shrink: 0;
     align-self: flex-start;
+  }
+
+  /* Подзаголовок под шапкой на всю ширину: с кнопкой в строке заголовка
+     он сжимался до узкой колонки и растягивался на восемь строк. */
+  .commands-sub {
+    margin: -6px 0 14px;
+    padding-left: 44px;
   }
 </style>

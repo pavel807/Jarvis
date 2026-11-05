@@ -932,6 +932,83 @@ fn followup_expired_or_none(deadline: Option<Instant>) -> bool {
     }
 }
 
+/// Фразы-триггеры детерминированного пути к агенту зрения.
+const SCREEN_QUESTION_PATTERNS: &[&str] = &[
+    "что на экране",
+    "что сейчас на экране",
+    "что ты видишь",
+    "что видишь",
+    "что открыто",
+    "что на мониторе",
+    "что написано на экране",
+    "посмотри на экран",
+    "проверь экран",
+    "опиши экран",
+    "опиши что на экране",
+    "что у меня на экране",
+];
+
+/// Короткий фиксированный вопрос агенту зрения: детерминированный путь
+/// отвечает на «что на экране», так что и вопрос Holo фиксированный —
+/// короткий ответ меньше подвержен порче слов в его файнтюне.
+const SCREEN_LOOK_PROMPT: &str = "Опиши кратко в двух-трёх предложениях, что сейчас открыто на экране: приложения, окна и ключевой текст.";
+
+/// «Что ты видишь на экране?» — скриншот + Holo, без LLM-рулетки.
+/// Возвращает `Some(Outcome)`, если фраза распознана как вопрос про экран.
+fn is_screen_question(text: &str) -> bool {
+    let lowered = crate::text::clean_wakewords_and_prompt(text).to_lowercase();
+    SCREEN_QUESTION_PATTERNS.iter().any(|p| lowered.contains(p))
+}
+
+fn try_screen_question(text: &str, h: &EngineHandles) -> Option<Outcome> {
+    if !is_screen_question(text) {
+        return None;
+    }
+    // Модель ещё готовится (горячая загрузка на старте): не подвешиваем
+    // движок на полминуты, а честно просим подождать.
+    if crate::holo::is_loading() {
+        const WAIT: &str = "Подождите, пожалуйста, идёт загрузка модели зрения. Повторите вопрос через полминуты.";
+        println!("👀 Модель зрения загружается — вежливая фраза ожидания");
+        let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(WAIT.into()));
+        let _ = h.events.send(JarvisEvent::Reply { text: WAIT.into() });
+        return Some(Outcome::Followup);
+    }
+    println!("👀 Вопрос про экран: детерминированный путь к агенту зрения");
+    let _ = h.events.send(JarvisEvent::UiAgentStatus {
+        stage: "running".into(),
+        detail: "опрос экрана".into(),
+    });
+
+    let started = std::time::Instant::now();
+    let description = match crate::holo::service::with_service(|svc| svc.look(SCREEN_LOOK_PROMPT)) {
+        Ok(text) => text,
+        Err(e) => {
+            let reply = format!("Агент зрения недоступен: {:#}", e);
+            println!("❗ {reply}");
+            let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(reply.clone()));
+            let _ = h.events.send(JarvisEvent::Reply { text: reply });
+            return Some(Outcome::Followup);
+        }
+    };
+    // Сырой ответ модели может содержать think-хвост — отделяем.
+    let (_, answer) = crate::holo::split_think(&description);
+    let reply: String = if answer.trim().is_empty() {
+        description.chars().take(600).collect()
+    } else {
+        answer
+    };
+    println!(
+        "👀 Экран разобран за {:.1} с: {}",
+        started.elapsed().as_secs_f64(),
+        reply.chars().take(120).collect::<String>()
+    );
+    let _ = h
+        .audio_tx
+        .send(AudioMessage::SynthesizeAndPlay(reply.clone()));
+    let _ = h.events.send(JarvisEvent::Reply { text: reply });
+    Some(Outcome::Followup)
+}
+
 /// Ответ на вопрос «задача N сделана?». Молчание и невнятный ответ оставляют
 /// задачу открытой — лучше лишняя открытая галочка, чем потерянная задача.
 fn handle_task_confirmation(
@@ -1080,6 +1157,14 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
         return Outcome::Followup;
     }
 
+    // «Что ты видишь / что на экране?» — детерминированно агенту зрения.
+    // Перездавать это в LLM нельзя: маленькая модель отвечает текстом про
+    // «текстовое поле» и галлюцинирует — здесь нужен Holo, который видит
+    // пиксели. Описание экрана проговаривается как обычный ответ.
+    if let Some(outcome) = try_screen_question(text, h) {
+        return outcome;
+    }
+
     let (matched_cmd, global_cfg) = {
         let lock = h.commands.read().unwrap_or_else(|e| e.into_inner());
         // Детерминированно выполняем системные команды — стоп речи и
@@ -1105,6 +1190,12 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
         if cmd.action_type == "stop" {
             h.stop_audio_flag.store(true, Ordering::SeqCst);
             h.llm_cancel.store(true, Ordering::SeqCst);
+            // «Стоп» прерывает и GUI-агента: цикл останавливается между
+            // действиями, экран больше не трогается.
+            let _ = crate::holo::with_service(|svc| {
+                svc.cancel.store(true, Ordering::SeqCst);
+                Ok(())
+            });
             let _ = h.audio_tx.send(AudioMessage::Stop);
 
             let reply_error = global_cfg.reply_error.clone();
@@ -1414,4 +1505,17 @@ mod vad_tests {
         }
         assert!(floor <= ceiling);
     }
+
+    #[test]
+    fn screen_question_patterns_match_real_phrases() {
+        assert!(is_screen_question("что ты видишь на экране?"));
+        assert!(is_screen_question("джарвис что на экране"));
+        assert!(is_screen_question("посмотри на экран"));
+        assert!(is_screen_question("Что открыто у меня сейчас?"));
+        // Не вопросы про экран — не перехватываем.
+        assert!(!is_screen_question("какая погода в москве"));
+        assert!(!is_screen_question("поставь таймер на пять минут"));
+        assert!(!is_screen_question("открой ютуб"));
+    }
 }
+

@@ -37,6 +37,9 @@ pub enum Postcondition {
     /// Постусловие невозможно: статус остаётся неподтверждённым, и ответ
     /// обязан это отражать (open_url — «браузер запущен», а не «сайт открыт»).
     None,
+    /// Отчёт замкнутого GUI-цикла (ui_task): подтверждение — Termination::Done
+    /// по свежему скриншоту; проверяется в самой реализации цикла.
+    AgentReport,
 }
 
 /// Спецификация инструмента: метаданные реестра.
@@ -98,11 +101,15 @@ pub const KNOWN_NAMES: &[&str] = &[
     "task_open",
     "web_search",
     "window",
+    "desktop_input",
+    "wait",
     "run_command",
     "send_message",
     "add_note",
     "create_event",
     "music_control",
+    "ui_task",
+    "screen_look",
 ];
 
 const FIVE_SECONDS: Duration = Duration::from_secs(5);
@@ -178,6 +185,20 @@ pub fn spec_for(name: &str) -> Option<ToolSpec> {
             Postcondition::None,
             platforms::ALL,
         ),
+        "ui_task" => (
+            // Агент кликает и печатает на реальном экране: средний риск,
+            // длинный таймаут, подтверждение — собственный Done-цикл.
+            RiskLevel::Medium,
+            Duration::from_secs(240),
+            Postcondition::AgentReport,
+            platforms::ALL,
+        ),
+        "screen_look" => (
+            RiskLevel::Low,
+            Duration::from_secs(60),
+            Postcondition::None,
+            platforms::ALL,
+        ),
         "file_read" | "file_list" | "file_search" | "file_glob" => (
             RiskLevel::Low,
             FIVE_SECONDS,
@@ -212,6 +233,18 @@ pub fn spec_for(name: &str) -> Option<ToolSpec> {
             RiskLevel::Medium,
             FIVE_SECONDS,
             Postcondition::StateReadback,
+            platforms::ALL,
+        ),
+        "desktop_input" => (
+            RiskLevel::Medium,
+            THIRTY_SECONDS,
+            Postcondition::None,
+            platforms::ALL,
+        ),
+        "wait" => (
+            RiskLevel::Low,
+            THIRTY_SECONDS,
+            Postcondition::None,
             platforms::ALL,
         ),
         "run_command" => (

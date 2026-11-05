@@ -22,10 +22,10 @@
    */
 
   const NAV = [
-    { key: "home", label: "ГЛАВНАЯ", icon: "core" },
-    { key: "memory", label: "ПАМЯТЬ", icon: "memory" },
-    { key: "system", label: "СИСТЕМА", icon: "activity" },
-    { key: "settings", label: "НАСТРОЙКИ", icon: "gear" },
+    { key: "home", label: "Главная", icon: "core" },
+    { key: "memory", label: "Память", icon: "memory" },
+    { key: "system", label: "Система", icon: "activity" },
+    { key: "settings", label: "Настройки", icon: "gear" },
   ] as const;
 
   const isSubPage = $derived(SUB_PAGES.includes(store.page));

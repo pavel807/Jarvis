@@ -78,16 +78,21 @@ fn main() -> Result<()> {
             .broadcast_as(idx.shape())?;
         let keep = idx.lt(&bound)?.to_dtype(candle_core::DType::F32)?;
         let invalid = keep.affine(-1.0, 1.0)?.affine(-10000.0, 0.0)?;
-        let add = invalid
+        let attn_add = invalid
             .reshape((1, 1, 1, t))?
             .broadcast_add(&invalid.reshape((1, 1, t, 1))?)?;
-        let row_zero = keep.reshape((1, 1, t, 1))?;
-        Some((add, row_zero))
+        let attn_row_zero = keep.reshape((1, 1, t, 1))?;
+        let conv_keep = keep.reshape((1, 1, t))?;
+        Some(jarvis_core::asr::conformer::FrameMask {
+            attn_add,
+            attn_row_zero,
+            conv_keep,
+        })
     } else {
         None
     };
     let block = &model.encoder.blocks[0];
-    let trace = block.forward_trace(&pre, &pos, masks.as_ref().map(|(a, b)| (a, b)))?;
+    let trace = block.forward_trace(&pre, &pos, masks.as_ref())?;
 
     // --- Проба (а): совпадают ли НАБОРЫ значений bd_raw (перестановка?) ---
     {

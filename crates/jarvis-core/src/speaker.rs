@@ -75,11 +75,17 @@ pub struct SpeakerGate {
 impl SpeakerGate {
     /// Загрузка пайплайна. На macOS — CoreML (нативный, FP32), при недоступности — CPU.
     pub fn load(events: &crate::events::EventTx) -> Option<Self> {
-        let modes: [(&str, ExecutionMode); 2] = [
+        // CoreML variant существует только при feature `coreml`, которая
+        // подключается для macOS в Cargo.toml. Остальные ОС компилируют
+        // чистый CPU-путь и не тянут Apple-фреймворки.
+        #[cfg(target_os = "macos")]
+        let modes: &[(&str, ExecutionMode)] = &[
             ("CoreML", ExecutionMode::CoreMl),
             ("CPU", ExecutionMode::Cpu),
         ];
-        for (label, mode) in modes {
+        #[cfg(not(target_os = "macos"))]
+        let modes: &[(&str, ExecutionMode)] = &[("CPU", ExecutionMode::Cpu)];
+        for &(label, mode) in modes {
             match OwnedDiarizationPipeline::from_pretrained(mode) {
                 Ok(pipeline) => {
                     println!("🎙️ speakrs: VAD и фильтр говорящего загружены ({label})");

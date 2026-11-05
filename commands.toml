@@ -3,11 +3,9 @@ reply_success = "resources/audio/ok{}.wav"
 reply_error = "resources/audio/reply1.wav"
 reply_unknown = "resources/audio/reply1.wav"
 reply_ack = "resources/audio/reply1.wav"
-fuzzy_min_score = 0.72
+fuzzy_min_score = 0.7200000286102295
 ringtone_timer = "resources/audio/ringtone_timer.wav"
 ringtone_alarm = "resources/audio/ringtone_alarm.wav"
-
-# --- Поиск: сначала веб-поиск с суммаризацией через LLM, затем открытие Гугла ---
 
 [[commands]]
 name = "web_search"
@@ -17,10 +15,11 @@ trigger_words = [
     "поиск в интернете",
     "спроси у интернета",
     "что нового про",
-    "какие новости про"
+    "какие новости про",
 ]
 action_type = "web"
 action_value = ""
+enabled = true
 
 [[commands]]
 name = "search_google_ai"
@@ -28,12 +27,11 @@ trigger_words = [
     "найди",
     "поищи",
     "загугли",
-    "ищи"
+    "ищи",
 ]
 action_type = "search"
 action_value = "https://www.google.com/search?q={}"
-
-# --- Социальные сети ---
+enabled = true
 
 [[commands]]
 name = "youtube"
@@ -42,32 +40,33 @@ trigger_words = [
     "ютуб",
     "видео",
     "тикток",
-    "tiktok"
+    "tiktok",
 ]
 action_type = "url"
 action_value = "https://www.youtube.com"
+enabled = true
 
 [[commands]]
 name = "vk"
 trigger_words = [
     "vk",
     "вконтакте",
-    "вконтакт"
+    "вконтакт",
 ]
 action_type = "url"
 action_value = "https://vk.com"
+enabled = true
 
 [[commands]]
 name = "telegram"
 trigger_words = [
     "telegram",
     "телеграм",
-    "телега"
+    "телега",
 ]
 action_type = "url"
 action_value = "https://web.telegram.org"
-
-# --- Видеомонтаж и Графика (Ставим выше общих программ) ---
+enabled = true
 
 [[commands]]
 name = "Adobe Premiere Pro"
@@ -77,10 +76,11 @@ trigger_words = [
     "премиер",
     "монтаж",
     "монтажа",
-    "видеомонтаж"
+    "видеомонтаж",
 ]
 action_type = "app"
 action_value = "Adobe Premiere Pro 2026"
+enabled = true
 
 [[commands]]
 name = "Adobe After Effects"
@@ -89,10 +89,11 @@ trigger_words = [
     "афтер эффекты",
     "after",
     "афтер",
-    "для компьютерной графики"
+    "для компьютерной графики",
 ]
 action_type = "app"
 action_value = "Adobe After Effects 2026"
+enabled = true
 
 [[commands]]
 name = "Adobe Illustrator"
@@ -100,25 +101,23 @@ trigger_words = [
     "illustrator",
     "иллюстратор",
     "дизайн",
-    "дизайнер"
+    "дизайнер",
 ]
 action_type = "app"
 action_value = "Adobe Illustrator"
-
-# --- Офис ---
+enabled = true
 
 [[commands]]
 name = "excel"
 trigger_words = [
     "excel",
     "эксель",
-    "таблица"
+    "таблица",
 ]
 action_type = "app"
 action_value = "Microsoft Excel"
 action_fallback = "/Applications/Microsoft Excel.app"
-
-# --- Разработка ---
+enabled = true
 
 [[commands]]
 name = "ide"
@@ -129,11 +128,12 @@ trigger_words = [
     "vscode",
     "иде",
     "редактор",
-    "среда разработки"
+    "среда разработки",
 ]
 action_type = "app"
 action_value = "Zed"
 action_fallback = "/Applications/Zed.app"
+enabled = true
 
 [[commands]]
 name = "github"
@@ -142,22 +142,22 @@ trigger_words = [
     "гитхаб",
     "гитхабу",
     "гитхабе",
-    "git"
+    "git",
 ]
 action_type = "url"
 action_value = "https://github.com"
-
-# --- Сервисы ---
+enabled = true
 
 [[commands]]
 name = "google"
 trigger_words = [
     "google",
     "гугл",
-    "поиск"
+    "поиск",
 ]
 action_type = "url"
 action_value = "https://www.google.com"
+enabled = true
 
 [[commands]]
 name = "mail"
@@ -165,10 +165,11 @@ trigger_words = [
     "mail",
     "мейл",
     "почта",
-    "почту"
+    "почту",
 ]
 action_type = "url"
 action_value = "https://mail.google.com"
+enabled = true
 
 [[commands]]
 name = "Yandex Music"
@@ -176,18 +177,18 @@ trigger_words = [
     "яндекс музыка",
     "яндекс",
     "спотифай",
-    "музыка"
+    "музыка",
 ]
 action_type = "url"
 action_value = "https://music.yandex.ru"
+enabled = true
 
 [[commands]]
 name = "yandex_maps"
-trigger_words = [
-    "яндекс карты"
-]
+trigger_words = ["яндекс карты"]
 action_type = "url"
 action_value = "https://yandex.ru/maps"
+enabled = true
 
 [[commands]]
 name = "sdek"
@@ -195,19 +196,21 @@ trigger_words = [
     "сдек шоп",
     "сдэк шоп",
     "сдек",
-    "сдэк"
+    "сдэк",
 ]
 action_type = "url"
 action_value = "https://cdek.shopping"
+enabled = true
 
 [[commands]]
 name = "kinopoisk"
 trigger_words = [
     "запусти кинопоиск",
-    "кино"
+    "кино",
 ]
 action_type = "url"
 action_value = "https://www.kinopoisk.ru"
+enabled = true
 
 [[commands]]
 name = "sdo"
@@ -215,10 +218,11 @@ trigger_words = [
     "sdo",
     "сдо",
     "сво",
-    "информатика"
+    "информатика",
 ]
 action_type = "url"
 action_value = "https://sdo.1580.ru/course/view.php?id=188"
+enabled = true
 
 [[commands]]
 name = "меш"
@@ -228,12 +232,11 @@ trigger_words = [
     "дневник",
     "электронный дневник",
     "мой дневник",
-    "оценки"
+    "оценки",
 ]
 action_type = "url"
 action_value = "https://dnevnik.mos.ru"
-
-# --- Системные ---
+enabled = true
 
 [[commands]]
 name = "finder"
@@ -241,10 +244,11 @@ trigger_words = [
     "finder",
     "файлы",
     "папка",
-    "проводник"
+    "проводник",
 ]
 action_type = "app"
 action_value = "Finder"
+enabled = true
 
 [[commands]]
 name = "Замолчать"
@@ -255,10 +259,11 @@ trigger_words = [
     "хватит",
     "молчать",
     "тишина",
-    "отмена"
+    "отмена",
 ]
 action_type = "stop"
 action_value = ""
+enabled = true
 
 [[commands]]
 name = "Завершение работы"
@@ -268,8 +273,7 @@ trigger_words = [
 ]
 action_type = "exit"
 action_value = ""
-
-# --- Задачник: быстрый доступ к файлу со списком задач ---
+enabled = true
 
 [[commands]]
 name = "Открыть задачник"
@@ -281,3 +285,4 @@ trigger_words = [
 ]
 action_type = "path"
 action_value = "tasks.md"
+enabled = true
