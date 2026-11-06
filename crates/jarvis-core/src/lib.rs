@@ -29,7 +29,7 @@ pub mod topic;
 pub mod tts;
 pub mod tts_normalizer;
 pub mod tts_silero;
+pub mod auto;
 pub mod wake;
 pub mod wake_train;
 pub mod web;
-pub mod holo;

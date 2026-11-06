@@ -176,17 +176,28 @@ pub enum ToolCall {
     MusicControl {
         action: String,
     },
-    /// Поручить GUI-агенту (Holo-3.1) задачу на экране: он видит пиксели,
-    /// сам кликает/печатает/прокручивает и проверяет результат повторными
-    /// скриншотами. Задачу и критерии формулировать по-английски.
-    UiTask {
-        task: String,
-        /// Критерии успеха — по чему агент решит, что цель достигнута.
-        success: Option<String>,
+    /// Прочитать экран текстом через Accessibility: активное приложение,
+    /// окна, кнопки, поля, меню. Без скриншотов и модели зрения.
+    UiRead,
+    /// Нажать элемент экрана по имени (кнопку, флажок, ссылку, пункт меню).
+    UiClick {
+        app: Option<String>,
+        role: String,
+        name: String,
+        window: Option<String>,
     },
-    /// Спросить GUI-агента, что сейчас на экране (текстовое описание).
-    ScreenLook {
-        question: String,
+    /// Вписать текст в поле экрана по имени. `submit` — нажать Enter после.
+    UiType {
+        app: Option<String>,
+        name: String,
+        text: String,
+        submit: bool,
+        window: Option<String>,
+    },
+    /// Выбрать пункт меню приложения: путь из 1–3 пунктов.
+    UiMenu {
+        app: Option<String>,
+        path: Vec<String>,
     },
 }
 
@@ -286,18 +297,15 @@ const ALIASES: &[(&str, &str)] = &[
     ("команда", "shell"),
     ("командная_строка", "shell"),
     ("выполнить", "shell"),
-    // GUI-агент Holo-3.1
-    ("ui_task", "ui_task"),
-    ("gui_task", "ui_task"),
-    ("ui_agent", "ui_task"),
-    ("screen_task", "ui_task"),
-    ("gui_агент", "ui_task"),
-    ("экранная_задача", "ui_task"),
-    ("screen_look", "screen_look"),
-    ("look_at_screen", "screen_look"),
-    ("describe_screen", "screen_look"),
-    ("что_на_экране", "screen_look"),
-    ("посмотри_экран", "screen_look"),
+    // Автоматизация экрана через Accessibility (без модели зрения)
+    ("ui_read", "ui_read"),
+    ("read_screen_tool", "ui_read"),
+    ("ui_click", "ui_click"),
+    ("click_element", "ui_click"),
+    ("ui_type", "ui_type"),
+    ("fill_field", "ui_type"),
+    ("ui_menu", "ui_menu"),
+    ("menu_item", "ui_menu"),
     // open_url
     ("open_url", "open_url"),
     ("openurl", "open_url"),
@@ -993,7 +1001,7 @@ fn truncation_repair_ok(call: &ToolCall) -> bool {
             | ToolCall::FileList { .. }
             | ToolCall::FileSearch { .. }
             | ToolCall::FileGlob { .. }
-            | ToolCall::ScreenLook { .. }
+            | ToolCall::UiRead
             | ToolCall::SystemInfo
             | ToolCall::ClipboardRead
     )
@@ -1317,9 +1325,10 @@ fn build(name: &str, args: &Value) -> Result<ToolCall, String> {
                         .ok_or("укажи keys массивом или строкой, например CTRL+SHIFT+S")?
                 },
                 "click" | "mouse_click" | "double_click" | "right_click" | "клик" | "нажать_мышью" => {
-                    const CLICK_HINT: &str = "координаты наугад запрещены: экран видит только агент зрения. Кликни через ui_task {\"task\":\"<описание по-английски>\"} — он найдёт кнопку сам";
-                    // Клик по описанию («search button») без координат — работа
-                    // агента зрения: превращаем в ui_task, а не отказываем.
+                    const CLICK_HINT: &str = "указывай x/y в координатах экрана либо кликай по элементу по имени через ui_click {\"name\":\"...\"}";
+                    // Клик по описанию без координат: координаты наугад
+                    // запрещены — модель должна смотреть ui_read и кликать
+                    // по имени элемента.
                     if arg_i32(args, &["x", "left", "горизонталь"]).is_none()
                         && arg_i32(args, &["y", "top", "вертикаль"]).is_none()
                         && let Some(target) = arg_str(
@@ -1327,12 +1336,12 @@ fn build(name: &str, args: &Value) -> Result<ToolCall, String> {
                             &["text", "target", "description", "element", "label", "query", "цель", "описание"],
                         )
                     {
-                        let verb = match action.as_str() {
-                            "double_click" => "double-click",
-                            "right_click" => "right-click",
-                            _ => "click",
-                        };
-                        return Ok(ToolCall::UiTask { task: format!("{verb} on {target}"), success: None });
+                        return Ok(ToolCall::UiClick {
+                            app: None,
+                            role: "button".into(),
+                            name: target.to_string(),
+                            window: None,
+                        });
                     }
                     let x = arg_i32(args, &["x", "left", "горизонталь"])
                         .ok_or_else(|| format!("для клика указаны не все координаты: {CLICK_HINT}"))?;
@@ -1422,22 +1431,25 @@ fn build(name: &str, args: &Value) -> Result<ToolCall, String> {
         "music_control" => ToolCall::MusicControl {
             action: normalize_music_action(&get_str(&["action", "what", "op", "действие"])?),
         },
-        "ui_task" => {
-            let task = get_str(&["task", "goal", "instruction", "задача"])?;
-            if task.trim().is_empty() {
-                return Err("пустая задача для GUI-агента".into());
-            }
-            let success = arg_str(args, &["success", "criteria", "критерий"])
-                .map(String::from)
-                .filter(|s| !s.trim().is_empty());
-            ToolCall::UiTask { task, success }
-        }
-        "screen_look" => {
-            let question = arg_str(args, &["question", "q", "prompt", "вопрос"])
-                .map(String::from)
-                .unwrap_or_else(|| "Опиши, что сейчас на экране.".into());
-            ToolCall::ScreenLook { question }
-        }
+        "ui_read" => ToolCall::UiRead,
+        "ui_click" => ToolCall::UiClick {
+            app: arg_str(args, &["app", "application", "приложение", "программа"]).map(String::from),
+            role: arg_str(args, &["role", "тип", "вид"]).unwrap_or("button").to_string(),
+            name: get_str(&["name", "element", "label", "title", "имя", "название"])?,
+            window: arg_str(args, &["window", "окно"]).map(String::from),
+        },
+        "ui_type" => ToolCall::UiType {
+            app: arg_str(args, &["app", "application", "приложение", "программа"]).map(String::from),
+            name: get_str(&["name", "field", "element", "имя", "поле"])?,
+            text: get_str(&["text", "value", "content", "текст", "значение"])?,
+            submit: arg_bool(args, &["submit", "enter", "отправить"]),
+            window: arg_str(args, &["window", "окно"]).map(String::from),
+        },
+        "ui_menu" => ToolCall::UiMenu {
+            app: arg_str(args, &["app", "application", "приложение", "программа"]).map(String::from),
+            path: arg_string_array_or_split(args, &["path", "menu", "item", "путь", "пункт"])
+                .ok_or("укажи path массивом (например [\"Файл\",\"Сохранить\"]) или строкой")?,
+        },
         other => return Err(format!("инструмент {other} не поддерживается")),
     })
 }
@@ -1656,8 +1668,10 @@ fn tool_name(call: &ToolCall) -> &'static str {
         ToolCall::AddNote { .. } => "add_note",
         ToolCall::CreateEvent { .. } => "create_event",
         ToolCall::MusicControl { .. } => "music_control",
-        ToolCall::UiTask { .. } => "ui_task",
-        ToolCall::ScreenLook { .. } => "screen_look",
+        ToolCall::UiRead => "ui_read",
+        ToolCall::UiClick { .. } => "ui_click",
+        ToolCall::UiType { .. } => "ui_type",
+        ToolCall::UiMenu { .. } => "ui_menu",
     }
 }
 
@@ -1752,8 +1766,13 @@ fn tool_summary(call: &ToolCall) -> String {
             }
         }
         ToolCall::MusicControl { action } => action.clone(),
-        ToolCall::UiTask { task, .. } => task.chars().take(120).collect(),
-        ToolCall::ScreenLook { question } => question.chars().take(120).collect(),
+        ToolCall::UiRead => "прочитать экран".to_string(),
+        ToolCall::UiClick { role, name, .. } => format!("{role} «{name}»"),
+        ToolCall::UiType { name, text, .. } => format!(
+            "в поле «{name}»: {}",
+            text.chars().take(60).collect::<String>()
+        ),
+        ToolCall::UiMenu { path, .. } => path.join(" → "),
     }
 }
 
@@ -1761,77 +1780,6 @@ fn short_err(s: &str, limit: usize) -> String {
     let one_line = s.trim().replace('\n', " ");
     one_line.chars().take(limit).collect()
 }
-
-// =========================================================================
-// Агент зрения (Holo): готовность и запрет слепого ввода
-// =========================================================================
-
-/// Сколько ждать, пока Holo догрузится, прежде чем честно отказать.
-const HOLO_LOAD_WAIT: Duration = Duration::from_secs(90);
-/// Сколько после отказа агента зрения считаем ввод вслепую запрещённым.
-const BLIND_INPUT_BAN: Duration = Duration::from_secs(90);
-
-static HOLO_FAILED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-
-fn note_holo_failure() {
-    *HOLO_FAILED_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
-}
-
-fn clear_holo_failure() {
-    *HOLO_FAILED_AT.lock().unwrap_or_else(|e| e.into_inner()) = None;
-}
-
-/// Печать и клики вслепую после отказа агента зрения запрещены: экран видит
-/// только он, а 2B-модель иначе печатает в то окно, которое оказалось в фокусе.
-fn blind_input_blocked(action: &crate::platform::desktop::DesktopAction) -> bool {
-    use crate::platform::desktop::DesktopAction;
-    if !matches!(action, DesktopAction::TypeText { .. } | DesktopAction::Click { .. }) {
-        return false;
-    }
-    HOLO_FAILED_AT
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_some_and(|at| at.elapsed() < BLIND_INPUT_BAN)
-}
-
-/// Holo заметно хуже пишет по-русски (вставляет китайские токены и
-/// придумывает детали), поэтому смотрим по-английски, а пересказывает
-/// пользователю основная LLM.
-fn vision_question(question: &str) -> String {
-    format!(
-        "{question}\n\nAnswer in English in at most three short plain sentences. \
-         Mention only what is clearly visible; do not guess."
-    )
-}
-
-/// Готов ли агент зрения. Идёт загрузка — ждём её (один раз сказав об этом
-/// вслух), иначе возвращаем причину отказа.
-fn holo_gate(audio_tx: &Sender<AudioMessage>) -> Result<(), String> {
-    use crate::holo::service::{HoloAvailability, availability, wait_until_ready};
-    match availability() {
-        HoloAvailability::Ready | HoloAvailability::Idle => Ok(()),
-        HoloAvailability::Loading => {
-            let _ = audio_tx.send(AudioMessage::SynthesizeAndPlay(
-                "Загружаю модель зрения, секунду.".into(),
-            ));
-            if wait_until_ready(HOLO_LOAD_WAIT) {
-                Ok(())
-            } else {
-                note_holo_failure();
-                Err("модель зрения не догрузилась вовремя".into())
-            }
-        }
-        HoloAvailability::NotStarted => {
-            note_holo_failure();
-            Err("сервис модели зрения не запущен".into())
-        }
-        HoloAvailability::Unavailable => {
-            note_holo_failure();
-            Err("модель зрения не скачана или не загрузилась".into())
-        }
-    }
-}
-
 
 impl ToolCall {
     /// Выполнить инструмент — обёртка над [`execute`] для вызова из
@@ -2246,71 +2194,85 @@ fn execute_inner(
             }
         }
 
-        ToolCall::UiTask { task, success } => {
-            println!("🔧 ui_task");
-            log(format!("🤖 GUI-агент: задача «{}»", task.chars().take(100).collect::<String>()));
-            // Идёт загрузка — ждём её здесь, а не возвращаем отказ: модель в
-            // ответ на отказ начинала печатать и кликать вслепую.
-            if let Err(why) = holo_gate(audio_tx) {
-                ToolOutcome::fail_with_detail(
-                    format!("Агент зрения недоступен: {why}"),
-                    format!("{why}. Экран увидеть нельзя: не вводи текст и не кликай вслепую, сообщи пользователю причину."),
-                )
-            } else {
-                // Единый контракт: основной цикл получает TaskResult с честным
-                // состоянием; результат задачи финален, продолжение цепочки
-                // не требуется (needs_next_step → false).
-                match crate::holo::service::with_service(|h| {
-                    h.run_task_full(&task.clone(), success.as_deref())
-                }) {
-                    Ok(result) => {
-                        let evidence = result.evidence.last().cloned().unwrap_or_default();
-                        let detail = format!(
-                            "{} (шагов: {}, действий: {}){}",
-                            result.summary,
-                            result.steps,
-                            result.total_actions,
-                            if evidence.is_empty() {
-                                String::new()
-                            } else {
-                                format!("\nПоследнее наблюдение: {}", evidence.chars().take(300).collect::<String>())
-                            }
-                        );
-                        let _ = log(detail.clone());
-                        if result.succeeded() {
-                            clear_holo_failure();
-                            ToolOutcome::with_detail(result.summary, detail)
-                        } else {
-                            ToolOutcome::fail_with_detail(result.summary, detail)
-                        }
-                    }
-                    Err(e) => {
-                        note_holo_failure();
-                        ToolOutcome::fail(format!("GUI-агент недоступен: {e:#}"))
-                    }
+        ToolCall::UiRead => {
+            println!("🔧 ui_read");
+            log("👀 ui_read: читаю экран через Accessibility".into());
+            match crate::auto::describe_screen() {
+                Ok(description) => {
+                    let bounded: String = description.chars().take(1200).collect();
+                    ToolOutcome::with_detail(
+                        "Экран прочитан".to_string(),
+                        bounded,
+                    )
                 }
+                Err(e) => ToolOutcome::fail(format!("Экран прочитать не удалось: {e:#}")),
             }
         }
 
-        ToolCall::ScreenLook { question } => {
-            println!("🔧 screen_look");
-            log(format!("👀 screen_look: {}", question.chars().take(80).collect::<String>()));
-            if let Err(why) = holo_gate(audio_tx) {
-                ToolOutcome::fail_with_detail(
-                    format!("Агент зрения недоступен: {why}"),
-                    format!("{why}. Экран увидеть нельзя: не вводи текст и не кликай вслепую, сообщи пользователю причину."),
-                )
-            } else {
-                match crate::holo::service::with_service(|h| h.look(&vision_question(&question))) {
-                Ok(description) => {
-                    let bounded: String = description.chars().take(900).collect();
-                        ToolOutcome::with_detail(
-                            "Экран разобран агентом зрения".to_string(),
-                            format!("{question}\nОтвет агента зрения (по-английски, перескажи пользователю по-русски): {bounded}"),
-                        )
-                    }
-                    Err(e) => ToolOutcome::fail(format!("Разбор экрана недоступен: {e:#}")),
+        ToolCall::UiClick {
+            app,
+            role,
+            name,
+            window,
+        } => {
+            println!("🔧 ui_click: {role} «{name}»");
+            log(format!("🖱️ ui_click: {role} «{}»", name.chars().take(60).collect::<String>()));
+            match crate::auto::click_element(
+                app.as_deref(),
+                &role,
+                &name,
+                window.as_deref(),
+            ) {
+                Ok(what) => {
+                    // Самопроверка: перечитываем экран, чтобы модель видела
+                    // фактический итог клика, а не только сообщение об успехе.
+                    let after = crate::auto::read_screen()
+                        .map(|d| d.to_text())
+                        .unwrap_or_default();
+                    let detail = if after.is_empty() {
+                        what.clone()
+                    } else {
+                        format!("{what}\nЭкран после клика:\n{}",
+                            after.chars().take(800).collect::<String>())
+                    };
+                    ToolOutcome::with_detail(what, detail)
                 }
+                Err(e) => ToolOutcome::fail(format!("Клик не удался: {e:#}")),
+            }
+        }
+
+        ToolCall::UiType {
+            app,
+            name,
+            text,
+            submit,
+            window,
+        } => {
+            println!("🔧 ui_type: «{name}»");
+            log(format!("⌨️ ui_type: в поле «{}»", name.chars().take(60).collect::<String>()));
+            match crate::auto::set_field_value(app.as_deref(), "text field", &name, &text, submit, window.as_deref()) {
+                Ok(actual) => {
+                    // Readback: поле обязано содержать то, что писали.
+                    if actual == text {
+                        ToolOutcome::ok(format!("Вписал «{}» в поле «{name}»", text.chars().take(60).collect::<String>()))
+                    } else {
+                        ToolOutcome::fail(format!(
+                            "Поле «{name}» после записи содержит не то, что писали: «{}»",
+                            actual.chars().take(80).collect::<String>()
+                        ))
+                    }
+                }
+                Err(e) => ToolOutcome::fail(format!("Ввод не удался: {e:#}")),
+            }
+        }
+
+        ToolCall::UiMenu { app, path } => {
+            let path_refs: Vec<&str> = path.iter().map(String::as_str).collect();
+            println!("🔧 ui_menu: {}", path_refs.join(" → "));
+            log(format!("📋 ui_menu: {}", path_refs.join(" → ")));
+            match crate::auto::menu_path(app.as_deref(), &path_refs) {
+                Ok(what) => ToolOutcome::ok(what),
+                Err(e) => ToolOutcome::fail(format!("Пункт меню не выбран: {e:#}")),
             }
         }
 
@@ -2416,12 +2378,6 @@ fn execute_inner(
         ToolCall::DesktopInput { action } => {
             println!("🔧 desktop_input: {action:?}");
             log(format!("🔧 desktop_input: {action:?}"));
-            if blind_input_blocked(&action) {
-                return ToolOutcome::fail_with_detail(
-                    "Не могу вводить вслепую: агент зрения недоступен",
-                    "ЗАПРЕТ: агент зрения только что отказал, экран не виден. Ввод текста и клики вслепую заблокированы — сообщи пользователю причину текстом.",
-                );
-            }
             match crate::platform::desktop::execute(&action) {
                 Ok(message) => ToolOutcome::with_detail(message, "Системе отправлена команда ввода; содержимое целевого окна отдельно не проверено"),
                 Err(reason) => ToolOutcome::fail(reason),
@@ -4311,9 +4267,9 @@ mod tests {
     }
 
     #[test]
-    fn click_by_description_becomes_ui_task() {
+    fn click_by_description_becomes_ui_click() {
         match parse(r#"<tool>{"name":"desktop_input","args":{"action":"click","text":"search button"}}</tool>"#) {
-            ToolParse::Call(ToolCall::UiTask { task, .. }) => assert_eq!(task, "click on search button"),
+            ToolParse::Call(ToolCall::UiClick { name, .. }) => assert_eq!(name, "search button"),
             other => panic!("unexpected: {other:?}"),
         }
         // Координаты наугад по-прежнему запрещены.

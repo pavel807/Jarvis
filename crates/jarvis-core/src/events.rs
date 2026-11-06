@@ -111,24 +111,6 @@ pub enum JarvisEvent {
     Error {
         message: String,
     },
-    /// GUI-агент (Holo-3.1): статус жизненного цикла модели/задачи.
-    UiAgentStatus {
-        stage: String,
-        detail: String,
-    },
-    /// GUI-агент выполнил шаг: какие действия и с каким итогом.
-    UiAgentStep {
-        step: usize,
-        max_steps: usize,
-        actions: Vec<String>,
-    },
-    /// GUI-задача завершена: честный итог цикла.
-    UiAgentDone {
-        ok: bool,
-        message: String,
-        steps: usize,
-        elapsed_ms: u128,
-    },
     Log {
         message: String,
     },

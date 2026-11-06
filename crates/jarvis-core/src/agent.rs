@@ -113,8 +113,10 @@ pub const KNOWN_NAMES: &[&str] = &[
     "add_note",
     "create_event",
     "music_control",
-    "ui_task",
-    "screen_look",
+    "ui_read",
+    "ui_click",
+    "ui_type",
+    "ui_menu",
 ];
 
 const FIVE_SECONDS: Duration = Duration::from_secs(5);
@@ -190,19 +192,28 @@ pub fn spec_for(name: &str) -> Option<ToolSpec> {
             Postcondition::None,
             platforms::ALL,
         ),
-        "ui_task" => (
-            // Агент кликает и печатает на реальном экране: средний риск,
-            // длинный таймаут, подтверждение — собственный Done-цикл.
-            RiskLevel::Medium,
-            Duration::from_secs(240),
-            Postcondition::AgentReport,
-            platforms::ALL,
-        ),
-        "screen_look" => (
+        "ui_read" => (
+            // Чтение Accessibility-дерева: только смотрите, ничего не меняете.
             RiskLevel::Low,
-            Duration::from_secs(60),
+            Duration::from_secs(20),
             Postcondition::None,
-            platforms::ALL,
+            platforms::MACOS_ONLY,
+        ),
+        "ui_click" | "ui_menu" => (
+            // Клик/меню меняют состояние приложения: средний риск, результат
+            // подтверждается перечитыванием экрана внутри исполнителя.
+            RiskLevel::Medium,
+            Duration::from_secs(30),
+            Postcondition::None,
+            platforms::MACOS_ONLY,
+        ),
+        "ui_type" => (
+            // Ввод текста в чужое поле: средний риск, верификация — readback
+            // значения поля (в исполнителе, честный fail при расхождении).
+            RiskLevel::Medium,
+            Duration::from_secs(30),
+            Postcondition::None,
+            platforms::MACOS_ONLY,
         ),
         "file_read" | "file_list" | "file_search" | "file_glob" => (
             RiskLevel::Low,

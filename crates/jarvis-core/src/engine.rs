@@ -1187,48 +1187,13 @@ fn try_screen_question(text: &str, h: &EngineHandles) -> Option<Outcome> {
     if !is_screen_question(text) {
         return None;
     }
-    // Модель ещё готовится (горячая загрузка на старте): не подвешиваем
-    // движок на полминуты, а честно просим подождать.
-    if crate::holo::is_loading() {
-        const WAIT: &str = "Подождите, пожалуйста, идёт загрузка модели зрения. Повторите вопрос через полминуты.";
-        println!("👀 Модель зрения загружается — вежливая фраза ожидания");
-        let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(WAIT.into()));
-        let _ = h.events.send(JarvisEvent::Reply { text: WAIT.into() });
-        return Some(Outcome::Followup);
-    }
-    println!("👀 Вопрос про экран: детерминированный путь к агенту зрения");
-    let _ = h.events.send(JarvisEvent::UiAgentStatus {
-        stage: "running".into(),
-        detail: "опрос экрана".into(),
-    });
-
-    let started = std::time::Instant::now();
-    let description = match crate::holo::service::with_service(|svc| svc.look(SCREEN_LOOK_PROMPT)) {
-        Ok(text) => text,
-        Err(e) => {
-            let reply = format!("Агент зрения недоступен: {:#}", e);
-            println!("❗ {reply}");
-            let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(reply.clone()));
-            let _ = h.events.send(JarvisEvent::Reply { text: reply });
-            return Some(Outcome::Followup);
-        }
-    };
-    // Сырой ответ модели может содержать think-хвост — отделяем.
-    let (_, answer) = crate::holo::split_think(&description);
-    let reply: String = if answer.trim().is_empty() {
-        description.chars().take(600).collect()
-    } else {
-        answer
-    };
-    println!(
-        "👀 Экран разобран за {:.1} с: {}",
-        started.elapsed().as_secs_f64(),
-        reply.chars().take(120).collect::<String>()
-    );
-    let _ = h
-        .audio_tx
-        .send(AudioMessage::SynthesizeAndPlay(reply.clone()));
-    let _ = h.events.send(JarvisEvent::Reply { text: reply });
+    // Модель зрения удалена: честный отказ вместо выдуманного описания.
+    // Детерминированное описание экрана через Accessibility вернётся вместе
+    // с модулем автоматизации.
+    println!("👀 Вопрос про экран: модель зрения удалена — честный отказ");
+    let reply = "Смотреть экран я пока не умею: модель зрения убрали. Могу выполнять команды вслепую — скажи, что сделать.";
+    let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(reply.into()));
+    let _ = h.events.send(JarvisEvent::Reply { text: reply.into() });
     Some(Outcome::Followup)
 }
 
@@ -1413,12 +1378,9 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
         if cmd.action_type == "stop" {
             h.stop_audio_flag.store(true, Ordering::SeqCst);
             h.llm_cancel.store(true, Ordering::SeqCst);
-            // «Стоп» прерывает и GUI-агента: цикл останавливается между
-            // действиями, экран больше не трогается.
-            let _ = crate::holo::with_service(|svc| {
-                svc.cancel.store(true, Ordering::SeqCst);
-                Ok(())
-            });
+            // «Стоп» прерывает и автоматизацию экрана: цикл останавливается
+            // между действиями, экран больше не трогается.
+            crate::auto::request_cancel();
             let _ = h.audio_tx.send(AudioMessage::Stop);
 
             let reply_error = global_cfg.reply_error.clone();

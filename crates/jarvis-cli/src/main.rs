@@ -70,18 +70,6 @@ fn main() -> Result<()> {
                         println!("❗ {summary}")
                     }
                 }
-                JarvisEvent::UiAgentStatus { stage, detail } => {
-                    println!("🤖 GUI-агент [{stage}]: {detail}")
-                }
-                JarvisEvent::UiAgentStep { step, max_steps, actions } => {
-                    println!("🤖 шаг {}/{}: {}", step + 1, max_steps, actions.join("; "))
-                }
-                JarvisEvent::UiAgentDone { ok, message, steps, elapsed_ms } => {
-                    println!(
-                        "🤖 {} ({steps} шагов, {elapsed_ms} мс)",
-                        if ok { format!("✅ {message}") } else { format!("❗ {message}") }
-                    )
-                }
                 JarvisEvent::TopicResumed { topic } => println!("🧠 Возврат к теме: {}", topic),
                 JarvisEvent::LlmChunk { text } => print!("🤖 {}", text),
                 JarvisEvent::LlmDone { text } => println!("🤖 [готово] {}", text),
@@ -169,10 +157,6 @@ fn main() -> Result<()> {
 
     // LLM: фоновая загрузка Qwen3.
     spawn_llm_loader(&shared_llm, &events_tx);
-    let venus_handle = jarvis_core::holo::spawn_service(events_tx.clone());
-    jarvis_core::holo::set_service(venus_handle);
-    // Горячая загрузка модели зрения при старте (фоном, интерфейс живой).
-    let _ = jarvis_core::holo::with_service(|h| h.request(jarvis_core::holo::ServiceQuery::Preload));
 
     println!("📥 Загрузка FastConformer (ASR)...");
     let model = Stt::load(&models_dir)?;

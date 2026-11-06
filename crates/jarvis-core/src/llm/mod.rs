@@ -1105,13 +1105,15 @@ fn needs_next_step(call: &tools::ToolCall, outcome: &tools::ToolOutcome) -> bool
         // круг модели тут только добавлял «Задача завершена» после команды.
         // Неудача — наоборот: пусть модель объяснит причину словами.
         tools::ToolCall::MusicControl { .. } => !outcome.ok,
-        // GUI-агент возвращает финальный отчёт: успех финален, провал —
-        // модель объясняет причину или переформулирует задачу.
-        tools::ToolCall::UiTask { .. } => !outcome.ok,
-        // Описание экрана — информация для следующего шага, как file_read.
-        tools::ToolCall::ScreenLook { .. } => true,
+        // Экранная автоматизация: ui_read — информация для следующего шага,
+        // как file_read; клик/ввод/меню — звенья сценария, модель сама
+        // решает, доведена ли задача (итог клика приходит со снимком экрана).
+        tools::ToolCall::UiRead { .. }
+        | tools::ToolCall::UiClick { .. }
+        | tools::ToolCall::UiType { .. }
+        | tools::ToolCall::UiMenu { .. } => true,
         // Запуск/закрытие приложения и открытие ссылки — звенья цепочки
-        // («открой сафари сайт авиасейлс» = open_app + open_url/ui_task).
+        // («открой сафари сайт авиасейлс» = open_app + open_url).
         // Раньше цикл обрывался после первого шага, и задача не доводилась.
         tools::ToolCall::OpenApp { .. } | tools::ToolCall::QuitApp { .. } => true,
         tools::ToolCall::OpenUrl { .. } | tools::ToolCall::OpenPath { .. } => true,
@@ -1130,6 +1132,9 @@ fn run_action(
     cancel: &Arc<AtomicBool>,
     history: &Arc<std::sync::Mutex<Vec<ChatTurn>>>,
 ) {
+    // Новый запрос пользователя — новая задача: флаг отмены автоматизации от
+    // прошлого «стоп» снят, экран снова можно трогать.
+    crate::auto::clear_cancel();
     let mut loop_history: Vec<ChatTurn> = Vec::new();
     let mut user_msg = prompt.to_string();
     // Промпт шага не постоянен: после веб-поиска переключаемся на веб-промпт
@@ -1429,11 +1434,15 @@ fn run_action(
                              приложение не найдено."
                         } else if matches!(
                             &call,
-                            tools::ToolCall::UiTask { .. } | tools::ToolCall::ScreenLook { .. }
+                            tools::ToolCall::UiClick { .. }
+                                | tools::ToolCall::UiType { .. }
+                                | tools::ToolCall::UiMenu { .. }
                         ) && !outcome.ok
                         {
-                            " Агент зрения не отработал. НЕ вводи текст и не кликай вслепую \
-                             (desktop_input), не повторяй тот же ui_task. Скажи пользователю причину."
+                            " Действие на экране не удалось. Сперва ui_read — узнай реальные \
+                             имена элементов, затем попробуй другое имя/роль или другой путь \
+                             (applescript, desktop_input с точными координатами). \
+                             Скажи пользователю причину."
                         } else {
                             ""
                         };
