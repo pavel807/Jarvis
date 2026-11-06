@@ -177,7 +177,11 @@ impl SpeakerGate {
                 continue;
             }
             if let Some(mean) = self.segment_embedding(voiced) {
-                vectors.push(mean);
+                if mean.iter().all(|v| v.is_finite()) {
+                    vectors.push(mean);
+                } else {
+                    eprintln!("🎙️ Профиль: запись с нечисловым эмбеддингом пропущена");
+                }
             }
         }
 
@@ -188,7 +192,16 @@ impl SpeakerGate {
             return 0;
         }
 
-        self.profile = Some(normalize(&mean_of(&vectors)));
+        let profile = normalize(&mean_of(&vectors));
+        if !profile.iter().all(|v| v.is_finite()) {
+            // NaN-профиль делал «чужим» любой голос: лучше честно работать
+            // без профиля, чем молча отвергать всех.
+            let _ = events.send(JarvisEvent::Log {
+                message: "Профиль голоса: нечисловые значения — профиль не сохранён".into(),
+            });
+            return 0;
+        }
+        self.profile = Some(profile);
         self.profile_records = vectors.len();
         let _ = events.send(JarvisEvent::Log {
             message: format!(
@@ -213,7 +226,13 @@ impl SpeakerGate {
         let Some(mean) = self.segment_embedding(voiced) else {
             return Verdict::Unverified("эмбеддинг сегмента не посчитался");
         };
-        let cosine = dot(&profile, &normalize(&mean));
+        let normalized = normalize(&mean);
+        if !normalized.iter().all(|v| v.is_finite()) {
+            // Не «чужой», а честная невозможность сравнить: NaN-сходство
+            // раньше означало «чужой» для любого голоса.
+            return Verdict::Unverified("эмбеддинг сегмента с нечисловыми значениями");
+        }
+        let cosine = dot(&profile, &normalized);
         // Сходство в лог: без числа «Посторонний голос» не отличить битый
         // профиль от чуть-чуть не дотянувшего до порога.
         println!(
@@ -261,19 +280,30 @@ impl SpeakerGate {
             }
         };
         // ChunkEmbeddings: Array3 [chunk][frame][dim]. Собираем все фреймы
-        // всех чанков в один пул и усредняем.
+        // всех чанков в один пул и усредняем. Фреймы с нечисловыми значениями
+        // (CoreML иногда отдаёт NaN) выбрасываются: один такой фрейм делал
+        // среднее NaN, а NaN-сходство означало «чужой» для ЛЮБОГО голоса,
+        // включая владельца.
         let embeddings = &result.embeddings;
         let mut pool: Vec<f32> = Vec::new();
         let mut dim = 0usize;
+        let mut bad_frames = 0usize;
         for chunk in embeddings.rows() {
             for frame in chunk.rows() {
                 if dim == 0 {
                     dim = frame.len();
                 }
                 if frame.len() == dim {
-                    pool.extend(frame.iter().copied());
+                    if frame.iter().all(|v| v.is_finite()) {
+                        pool.extend(frame.iter().copied());
+                    } else {
+                        bad_frames += 1;
+                    }
                 }
             }
+        }
+        if bad_frames > 0 {
+            eprintln!("🎙️ speakrs: {} нечисловых фреймов эмбеддинга отброшено", bad_frames);
         }
         if pool.is_empty() || dim == 0 {
             return None;
@@ -418,11 +448,14 @@ fn mean_of(vectors: &[Vec<f32>]) -> Vec<f32> {
 }
 
 fn normalize(v: &[f32]) -> Vec<f32> {
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm < 1e-9 {
-        return v.to_vec();
+    // Нечисловые компоненты зануляются: NaN-норма проходила сравнение
+    // `norm < 1e-9` как false и делила вектор на NaN.
+    let clean: Vec<f32> = v.iter().map(|x| if x.is_finite() { *x } else { 0.0 }).collect();
+    let norm = clean.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if !norm.is_finite() || norm < 1e-9 {
+        return clean;
     }
-    v.iter().map(|x| x / norm).collect()
+    clean.iter().map(|x| x / norm).collect()
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
@@ -570,5 +603,23 @@ mod tests {
         let stranger = normalize(&[0.0, 1.0, 0.0]);
         assert!(dot(&profile, &owner) >= 0.6);
         assert!(dot(&profile, &stranger) < 0.6);
+    }
+
+    #[test]
+    fn normalize_never_returns_nan() {
+        // NaN-вектор раньше давал NaN-норму (сравнение `norm < 1e-9` ложно)
+        // и делил на NaN — сходство становилось NaN, любой голос был «чужим».
+        let normalized = normalize(&[f32::NAN, 1.0, f32::INFINITY]);
+        assert!(normalized.iter().all(|v| v.is_finite()));
+        // Нулевой вектор — тоже конечный результат.
+        assert!(normalize(&[0.0; 4]).iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn mean_of_skips_nonfinite_components() {
+        // Среднее с NaN-компонентой после normalize обязано быть конечным.
+        let poisoned = vec![f32::NAN, 1.0, 2.0, 3.0];
+        let normalized = normalize(&mean_of(&[poisoned, vec![1.0, 1.0, 1.0, 1.0]]));
+        assert!(normalized.iter().all(|v| v.is_finite()));
     }
 }
