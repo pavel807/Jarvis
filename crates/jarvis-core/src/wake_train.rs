@@ -32,6 +32,154 @@ pub fn sample_dirs() -> (PathBuf, PathBuf) {
     )
 }
 
+/// Каталог записей диктанта для профиля голоса (`train/voice`).
+pub fn voice_samples_dir() -> PathBuf {
+    paths::train_dir().join("voice")
+}
+
+/// Фраза диктанта для профиля голоса: покрывает все фонемы русской речи
+/// (шипящие ш/щ/ж/ч, ц, ф, х, ы, э, ю, я, ё) и разные интонации — вопрос,
+/// перечисление, команда, смена темпа. Слово «Джарвис» сознательно не входит:
+/// его тональность покрывает обучение wake word, а здесь важен весь остальной
+/// диапазон голоса. Чтение занимает ~40 секунд.
+pub const VOICE_TRAINING_PHRASE: &str = "\
+За окном светит солнце, и щебечут воробьи. Ты слышишь этот шум? \
+Запиши в задачник: купить хлеб, молоко и шесть спелых яблок. \
+Открой жёлтую папку, найди чужой документ и проверь цифры: восемьсот сорок семь. \
+Маленькая Юля едет на юг в июле. \
+Что ты видишь на экране? \
+Повтори всё чётко и с выражением — громко, тихо, быстро и медленно.";
+
+/// Доля слов эталонной фразы, найденных в расшифровке (0..1).
+///
+/// Сравнение устойчиво к ошибкам ASR: слово считается найденным при полном
+/// совпадении после нормализации (нижний регистр, ё→е, только буквы/цифры).
+pub fn phrase_overlap(target: &str, transcript: &str) -> f32 {
+    fn words(text: &str) -> Vec<String> {
+        text.to_lowercase()
+            .replace('ё', "е")
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+    let target = words(target);
+    if target.is_empty() {
+        return 0.0;
+    }
+    let spoken_words = words(transcript);
+    let spoken: std::collections::HashSet<&String> = spoken_words.iter().collect();
+    let matched = target.iter().filter(|w| spoken.contains(w)).count();
+    matched as f32 / target.len() as f32
+}
+
+/// Жёсткий предел диктанта: защита от забытой кнопки «Стоп».
+pub const VOICE_MAX_SECS: f32 = 180.0;
+
+/// Открытая запись диктанта: пишет микрофон до флага `stop` (или жёсткого
+/// капа [`VOICE_MAX_SECS`]). В отличие от [`record_sample`], паузы в речи
+/// запись не завершают — пользователь читает текст в своём темпе. Файл
+/// сохраняется всегда (проверку прочитанного делает вызывающая сторона).
+pub fn record_until_stop(dir: &Path, label: &str, stop: &AtomicBool) -> Result<PathBuf> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use std::sync::mpsc::sync_channel;
+
+    fs::create_dir_all(dir)?;
+    let label_tag = format!("[{label}]");
+
+    let (tx, rx) = sync_channel::<Vec<f32>>(64);
+
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .context("Нет устройства ввода")?;
+    let sup = device.default_input_config()?;
+    let ch = sup.channels() as usize;
+    let native_sr = sup.sample_rate() as usize;
+
+    let mut cfg: cpal::StreamConfig = sup.into();
+    cfg.buffer_size = cpal::BufferSize::Fixed(1024);
+
+    let stream = match sup.sample_format() {
+        cpal::SampleFormat::F32 => device.build_input_stream(
+            cfg,
+            move |d: &[f32], _| {
+                let _ = tx.send(crate::audio::downmix_f32(d, ch));
+            },
+            |e| eprintln!("❌ Ошибка входного потока: {e}"),
+            None,
+        )?,
+        cpal::SampleFormat::I16 => device.build_input_stream(
+            cfg,
+            move |d: &[i16], _| {
+                let _ = tx.send(crate::audio::downmix_i16(d, ch));
+            },
+            |e| eprintln!("❌ Ошибка входного потока: {e}"),
+            None,
+        )?,
+        cpal::SampleFormat::U16 => device.build_input_stream(
+            cfg,
+            move |d: &[u16], _| {
+                let _ = tx.send(crate::audio::downmix_u16(d, ch));
+            },
+            |e| eprintln!("❌ Ошибка входного потока: {e}"),
+            None,
+        )?,
+        f => bail!("Неподдерживаемый формат микрофона: {f:?}"),
+    };
+    stream.play()?;
+
+    println!("🎙️ Диктант: запись до кнопки «Стоп»");
+    let max_samples = (TARGET_RATE as f32 * VOICE_MAX_SECS) as usize;
+    let mut buffer: Vec<f32> = Vec::with_capacity(max_samples.min(TARGET_RATE * 120));
+
+    while buffer.len() < max_samples {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        let chunk = match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(c) => c,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("Поток микрофона закрыт"),
+        };
+        let chunk_16k = if native_sr != TARGET_RATE {
+            resample_audio(&chunk, native_sr, TARGET_RATE)
+        } else {
+            chunk
+        };
+        buffer.extend_from_slice(&chunk_16k);
+    }
+
+    drop(stream);
+
+    if buffer.len() < (TARGET_RATE as f32 * 0.5) as usize {
+        bail!("Слишком короткая запись — нажми «Стоп», когда дочитаешь");
+    }
+
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = dir.join(format!("{label_tag}_{}_{}.wav", ts, std::process::id()));
+
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: TARGET_RATE as u32,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(&path, spec)
+        .with_context(|| format!("Не удалось создать {:?}", path))?;
+    for &s in &buffer {
+        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        writer.write_sample(v)?;
+    }
+    writer.finalize()?;
+
+    println!("💾 Диктант сохранён: {:?}", path);
+    Ok(path)
+}
+
 /// Записывает сэмпл с микрофона: ждёт начала речи, копит до тишины,
 /// сохраняет 16 кГц mono WAV с ярлыком в имени файла.
 pub fn record_sample(
@@ -317,4 +465,57 @@ fn read_wav_i16_16k(path: &Path) -> Result<Vec<i16>> {
         .into_iter()
         .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
         .collect())
+}
+#[cfg(test)]
+mod voice_train_tests {
+    use super::*;
+
+    #[test]
+    fn phrase_overlap_full_reading() {
+        // Читал ровно фразу — совпадение 1.0 независимо от пунктуации и регистра.
+        assert_eq!(phrase_overlap(VOICE_TRAINING_PHRASE, VOICE_TRAINING_PHRASE), 1.0);
+        assert_eq!(
+            phrase_overlap("Привет, мир!", "привет   МИР!!!"),
+            1.0
+        );
+    }
+
+    #[test]
+    fn phrase_overlap_partial_reading() {
+        // Дочитал до середины — примерно половина слов.
+        let half = "За окном светит солнце, и щебечут воробьи. Ты слышишь этот шум?";
+        let overlap = phrase_overlap(VOICE_TRAINING_PHRASE, half);
+        assert!(
+            (0.2..=0.3).contains(&overlap),
+            "четверть фразы ≈ 25% слов, получено {overlap:.2}"
+        );
+        assert_eq!(phrase_overlap(VOICE_TRAINING_PHRASE, "полная чушь"), 0.0);
+        assert_eq!(phrase_overlap(VOICE_TRAINING_PHRASE, ""), 0.0);
+    }
+
+    #[test]
+    fn phrase_overlap_tolerates_ash_and_cases() {
+        // ё/е и регистр не влияют.
+        assert_eq!(phrase_overlap("жёлтый чётко", "ЖЕЛТЫЙ ЧЕТКО"), 1.0);
+    }
+
+    #[test]
+    fn training_phrase_covers_rare_phonemes() {
+        // Ключевые фонемы присутствуют в тексте диктанта.
+        let t = VOICE_TRAINING_PHRASE.to_lowercase();
+        for (phoneme, sample) in [
+            ("щ", "щебечут"),
+            ("ж", "жёлтую"),
+            ("ч", "чётко"),
+            ("ц", "цифры"),
+            ("ф", "цифры"),
+            ("х", "хлеб"),
+            ("ш", "шум"),
+            ("ы", "ты"),
+            ("э", "экран"),
+            ("ю", "юля"),
+        ] {
+            assert!(t.contains(sample), "фонема «{phoneme}» потеряна: нет слова «{sample}»");
+        }
+    }
 }

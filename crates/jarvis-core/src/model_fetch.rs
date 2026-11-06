@@ -71,13 +71,27 @@ pub fn ensure_qwen35_with_progress(dir: &Path, progress: &mut dyn FnMut(u8)) -> 
     }
 }
 
-/// Гарантирует файлы FastConformer-Hybrid Large RU в `models/fastconformer/`,
-/// иначе качает `fastconformer.tar.gz` (~460 МБ: веса, конвертированные из
-/// `.nemo` чекпоинта NVIDIA, config, токенизатор) из релиза.
+/// Гарантирует файлы FastConformer-Hybrid Large RU в `models/fastconformer/`.
+///
+/// Источники по порядку: (1) HF-репозиторий пользователя, если задан в
+/// настройках `asr_hf_repo` — оттуда качаются три файла по отдельности
+/// (`model.safetensors`, `config.json`, `tokenizer.vocab`); (2) архив
+/// `fastconformer.tar.gz` (~460 МБ) из GitHub-релиза, как раньше.
 pub fn ensure_fastconformer() -> Result<()> {
     let dir = crate::paths::models_dir().join("fastconformer");
     if fastconformer_ready(&dir) {
         return Ok(());
+    }
+    let repo = crate::settings::Settings::load(&crate::paths::settings_file())
+        .map(|s| s.asr_hf_repo)
+        .unwrap_or_default();
+    if !repo.trim().is_empty() {
+        match ensure_fastconformer_from_hf(&dir, repo.trim()) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                eprintln!("⚠️ HF-репозиторий {repo} не сработал: {e:#} — пробую релиз GitHub");
+            }
+        }
     }
     ensure_archive("fastconformer.tar.gz", &mut |_| {})?;
     if fastconformer_ready(&dir) {
@@ -88,6 +102,61 @@ pub fn ensure_fastconformer() -> Result<()> {
             dir
         )
     }
+}
+
+/// Скачать FastConformer файлами с Hugging Face: `https://huggingface.co/
+/// <репозиторий>/resolve/main/<файл>`. Прогресс — строкой в stdout (события
+/// UI идут из вызывающего потока).
+pub fn ensure_fastconformer_from_hf(dir: &Path, repo: &str) -> Result<()> {
+    let repo = repo.trim_matches('/');
+    // Формат username/repo: слэш ровно один, без схем и пробелов.
+    if repo.matches('/').count() != 1
+        || repo.contains("://")
+        || repo.split('/').any(|part| {
+            part.is_empty()
+                || part
+                    .chars()
+                    .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'))
+        })
+    {
+        bail!(
+            "репозиторий указан неверно: нужен формат «username/fastconformer-ru», получено «{repo}»"
+        );
+    }
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("Не удалось создать {}", dir.display()))?;
+    for (file, min_size) in [
+        ("config.json", 64u64),
+        ("tokenizer.vocab", 1024),
+        // Веса ~460 МБ: меньше — точно битая загрузка.
+        ("model.safetensors", 100_000_000),
+    ] {
+        let dest = dir.join(file);
+        if dest.is_file() && std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) >= min_size {
+            continue;
+        }
+        let url = format!("https://huggingface.co/{repo}/resolve/main/{file}");
+        println!("📥 HF {repo}: {file}…");
+        // Файлы качаем во временное имя: оборванная загрузка не оставит
+        // «готовый на вид» битый файл.
+        let tmp = dest.with_extension("part");
+        let expected = remote_size(&url);
+        if expected > 0 && expected < min_size {
+            bail!("{file} на HF подозрительно мал ({expected} Б) — проверь содержимое репозитория");
+        }
+        download(&url, &tmp, expected, &mut |pct| {
+            if pct % 10 == 0 {
+                println!("📥 HF {file}: {pct}%");
+            }
+        })?;
+        std::fs::rename(&tmp, &dest)
+            .with_context(|| format!("Не удалось переименовать в {:?}", dest))?;
+    }
+    if !fastconformer_ready(dir) {
+        bail!("в {repo} нет model.safetensors/config.json/tokenizer.vocab");
+    }
+    println!("✅ FastConformer получен с HF: {repo}");
+    Ok(())
 }
 
 /// Размер файлов FastConformer, если модель на месте; иначе `None`.

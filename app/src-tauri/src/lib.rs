@@ -41,6 +41,12 @@ pub struct Shared {
     pub engine_running: Arc<AtomicBool>,
     /// Флаг пересборки голосового профиля (после записи новых образцов).
     pub speaker_invalidate: Arc<AtomicBool>,
+    /// Диктант для профиля голоса: запись идёт / пользователь нажал «Стоп».
+    pub voice_recording: Arc<AtomicBool>,
+    pub voice_stop: Arc<AtomicBool>,
+    /// Ленивая инстанция FastConformer для проверки диктанта: движковый STT
+    /// принадлежит своему воркеру, а вторая загрузка (mmap-веса) дешёвая.
+    pub train_stt: Mutex<Option<jarvis_core::stt::Stt>>,
     pub audio_tx: std::sync::mpsc::Sender<AudioMessage>,
     /// Канал событий движка: нужен хабу таймеров для окна «Утилиты».
     pub utils_events: Mutex<Option<std::sync::mpsc::Sender<JarvisEvent>>>,
@@ -80,6 +86,9 @@ impl Shared {
             record_cancel: Arc::new(AtomicBool::new(false)),
             engine_running: Arc::new(AtomicBool::new(false)),
             speaker_invalidate: Arc::new(AtomicBool::new(false)),
+            voice_recording: Arc::new(AtomicBool::new(false)),
+            voice_stop: Arc::new(AtomicBool::new(false)),
+            train_stt: Mutex::new(None),
             audio_tx,
             utils_events: Mutex::new(None),
             logs: Mutex::new(VecDeque::with_capacity(LOG_CAPACITY)),
@@ -717,8 +726,12 @@ async fn ww_samples() -> WwSamples {
             .map(|(p, d)| (p.to_string_lossy().to_string(), d))
             .collect()
     };
+    // Диктанты профиля голоса (train/voice) идут в общий список train:
+    // статус в настройках считает всё, что строит профиль.
+    let mut train = fmt(&train_dir);
+    train.extend(fmt(&wake_train::voice_samples_dir()));
     WwSamples {
-        train: fmt(&train_dir),
+        train,
         test: fmt(&test_dir),
     }
 }
@@ -816,6 +829,146 @@ fn ww_delete(path: String, shared: State<'_, Arc<Shared>>) -> Result<(), String>
         .speaker_invalidate
         .store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
+}
+
+// ---------- Диктант для профиля голоса ----------
+
+/// Гвардия диктанта: на выходе (успех, ошибка, паника) снимает флаг записи
+/// и возвращает движок из паузы — чтение фразы не должно оставлять Джарвиса
+/// глухим, даже если что-то упало.
+struct VoiceRecordGuard {
+    shared: Arc<Shared>,
+}
+
+impl Drop for VoiceRecordGuard {
+    fn drop(&mut self) {
+        self.shared.voice_recording.store(false, Ordering::SeqCst);
+        self.shared.paused.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Начать запись диктанта: микрофон пишет, пока пользователь не нажмёт
+/// «Стоп» ([`voice_record_stop`]). Движок на время записи на паузе.
+#[tauri::command]
+fn voice_record_start(shared: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> {
+    if shared.voice_recording.swap(true, Ordering::SeqCst) {
+        return Err("Запись уже идёт".into());
+    }
+    shared.voice_stop.store(false, Ordering::SeqCst);
+    shared.paused.store(true, Ordering::SeqCst);
+    let _ = app.emit(
+        "engine-event",
+        &JarvisEvent::Log {
+            message: "Диктант: запись пошла — читай фразу и нажми «Стоп»".into(),
+        },
+    );
+
+    let shared_arc = Arc::clone(&shared);
+    std::thread::spawn(move || {
+        let _guard = VoiceRecordGuard {
+            shared: Arc::clone(&shared_arc),
+        };
+        let result = check_dictation_take(&shared_arc);
+        match result {
+            Ok((overlap, transcript)) => {
+                shared_arc
+                    .speaker_invalidate
+                    .store(true, Ordering::SeqCst);
+                let _ = app.emit(
+                    "engine-event",
+                    &JarvisEvent::VoiceCheck {
+                        ok: true,
+                        overlap,
+                        transcript,
+                    },
+                );
+            }
+            Err(VoiceTakeError::Mismatch(overlap, transcript)) => {
+                let _ = app.emit(
+                    "engine-event",
+                    &JarvisEvent::VoiceCheck {
+                        ok: false,
+                        overlap,
+                        transcript,
+                    },
+                );
+            }
+            Err(VoiceTakeError::Failed(message)) => {
+                let _ = app.emit(
+                    "engine-event",
+                    &JarvisEvent::Error {
+                        message: format!("Диктант не удался: {message}"),
+                    },
+                );
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Пользователь дочитал: остановить запись и проверить.
+#[tauri::command]
+fn voice_record_stop(shared: State<'_, Arc<Shared>>) {
+    shared.voice_stop.store(true, Ordering::SeqCst);
+}
+
+/// Чем закончилась проверка диктанта.
+enum VoiceTakeError {
+    /// Прочитано не то: совпадение ниже порога, запись удалена.
+    Mismatch(f32, String),
+    /// Техническая ошибка (микрофон, диск, модель).
+    Failed(String),
+}
+
+/// Порог совпадения слов с фразой, ниже которого диктант не принимается.
+const VOICE_OVERLAP_MIN: f32 = 0.5;
+
+/// Записать до «Стоп», расшифровать FastConformer'ом, сверить с фразой.
+/// Успех — файл остаётся в `train/voice/`, профиль готов к пересборке.
+fn check_dictation_take(shared: &Shared) -> Result<(f32, String), VoiceTakeError> {
+    let path = wake_train::record_until_stop(
+        &wake_train::voice_samples_dir(),
+        "voice",
+        &shared.voice_stop,
+    )
+    .map_err(|e| VoiceTakeError::Failed(format!("{e:#}")))?;
+
+    // Проверка прочитанного. ASR недоступен — принимаем без сверки, но
+    // честно помечаем в расшифровке.
+    let mut stt_guard = shared.train_stt.lock().unwrap_or_else(|e| e.into_inner());
+    if stt_guard.is_none() {
+        println!("📥 Загрузка FastConformer для проверки диктанта…");
+        match jarvis_core::stt::Stt::load(&paths::models_dir()) {
+            Ok(stt) => *stt_guard = Some(stt),
+            Err(e) => {
+                eprintln!("⚠️ Проверка диктанта недоступна: {e:#}");
+                return Ok((0.0, "проверка недоступна — принято без сверки".into()));
+            }
+        }
+    }
+    let transcript = match stt_guard
+        .as_mut()
+        .expect("STT загружен выше")
+        .transcribe(&jarvis_core::speaker::read_wav_16k(&path).map_err(|e| {
+            VoiceTakeError::Failed(format!("запись не читается: {e:#}"))
+        })?) {
+        Ok(t) => t,
+        Err(e) => return Err(VoiceTakeError::Failed(format!("расшифровка не удалась: {e:#}"))),
+    };
+
+    let overlap =
+        wake_train::phrase_overlap(wake_train::VOICE_TRAINING_PHRASE, &transcript);
+    if overlap < VOICE_OVERLAP_MIN {
+        // Прочитано не то (шум, чужой текст, слишком тихо): файл не храним,
+        // профиль не портим.
+        let _ = std::fs::remove_file(&path);
+        return Err(VoiceTakeError::Mismatch(overlap, transcript));
+    }
+    println!(
+        "🎙️ Диктант принят: совпадение {:.0}% — профиль голоса пересоберётся",
+        overlap * 100.0
+    );
+    Ok((overlap, transcript))
 }
 
 #[tauri::command]
@@ -1108,6 +1261,8 @@ pub fn run() {
             get_commands,
             save_commands,
             llm_api_test,
+            voice_record_start,
+            voice_record_stop,
             get_settings,
             save_settings,
             get_logs,

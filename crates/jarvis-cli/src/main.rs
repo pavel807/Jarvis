@@ -70,6 +70,14 @@ fn main() -> Result<()> {
                         println!("❗ {summary}")
                     }
                 }
+                JarvisEvent::VoiceCheck { ok, overlap, transcript } => {
+                    println!(
+                        "🎙️ Диктант {}: совпадение {:.0}% — «{}»",
+                        if ok { "принят" } else { "отклонён" },
+                        overlap * 100.0,
+                        transcript
+                    )
+                }
                 JarvisEvent::TopicResumed { topic } => println!("🧠 Возврат к теме: {}", topic),
                 JarvisEvent::LlmChunk { text } => print!("🤖 {}", text),
                 JarvisEvent::LlmDone { text } => println!("🤖 [готово] {}", text),

@@ -63,6 +63,9 @@ pub struct Settings {
     pub llm_max_tokens: usize,
 
     // --- Облачная модель (OpenAI-совместимый API) ---
+    /// Мастер первого запуска пройден. false — при старте показывается
+    /// онбординг: загрузка моделей, выбор мозга, диктант для профиля голоса.
+    pub setup_done: bool,
     /// Пресет провайдера: "yandex" (Api-Key + URI модели) или "openai"
     /// (Bearer, адрес и модель как введены).
     pub api_preset: String,
@@ -76,6 +79,11 @@ pub struct Settings {
     /// Идентификатор каталога Яндекс.Облака (только для пресета "yandex"):
     /// из него собирается URI модели `gpt://<каталог>/<модель>/latest`.
     pub api_folder_id: String,
+    /// HF-репозиторий с FastConformer пользователя (`username/repo`): при
+    /// первом запуске модель качается оттуда, а не из GitHub-релиза. Файлы
+    /// в репозитории: model.safetensors, config.json, tokenizer.vocab.
+    /// Пусто — источник по умолчанию (релиз).
+    pub asr_hf_repo: String,
 
     // --- TTS ---
     /// Голос Silero v5: ru_eduard | ru_dmitriy | ru_alexandr | ru_bogdan | ... (29 голосов).
@@ -129,11 +137,16 @@ impl Default for Settings {
             llm_temperature: 0.6,
             // 0 — без искусственного лимита (длинные ответы не обрываются).
             llm_max_tokens: 0,
+            // Мастер первого запуска: показывается, пока не пройден.
+            setup_done: false,
             api_preset: "yandex".to_string(),
             api_base_url: "https://llm.api.cloud.yandex.net/v1".to_string(),
             api_key: String::new(),
             api_model: "yandexgpt-lite".to_string(),
             api_folder_id: String::new(),
+            // Пусто — FastConformer качается из GitHub-релиза; впиши свой
+            // HF-репозиторий (username/repo), когда выложишь конверсию.
+            asr_hf_repo: String::new(),
             tts_voice: "ru_eduard".to_string(),
             tts_speed: 1.0,
             ack_before_llm: false,

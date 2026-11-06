@@ -125,20 +125,30 @@ impl SpeakerGate {
         None
     }
 
-    /// Пересобрать профиль из wake word-образцов владельца.
-    /// Возвращает число использованных записей.
+    /// Пересобрать профиль из записей владельца: короткие образцы wake word
+    /// (`train/jarvis`, метка `jarvis`) и диктанты (`train/voice`, метка
+    /// `voice`). Возвращает число использованных записей.
     pub fn rebuild_profile(&mut self, events: &EventTx) -> usize {
         self.profile = None;
         self.profile_records = 0;
 
         let (train_dir, _) = crate::wake_train::sample_dirs();
-        let records = tts::list_wav_samples(&train_dir)
+        let mut records = tts::list_wav_samples(&train_dir)
             .into_iter()
             .filter(|(path, _)| {
                 tts::label_of_sample(&path.file_name().unwrap_or_default().to_string_lossy())
                     != "none"
             })
             .collect::<Vec<_>>();
+        records.extend(
+            tts::list_wav_samples(&crate::wake_train::voice_samples_dir())
+                .into_iter()
+                .filter(|(path, _)| {
+                    tts::label_of_sample(
+                        &path.file_name().unwrap_or_default().to_string_lossy(),
+                    ) == "voice"
+                }),
+        );
 
         if records.is_empty() {
             let _ = events.send(JarvisEvent::Log {
@@ -152,8 +162,17 @@ impl SpeakerGate {
             let read = read_wav_16k(path);
             let Ok(samples) = read else { continue };
             // Тишина по краям записи размывает средний эмбеддинг: сравнение
-            // идёт только по звучавшей части.
+            // идёт только по звучавшей части. У длинного диктанта берём
+            // середину: эмбеддинг записи на 3+ минуты нестабилен, а первых
+            // 60 секунд звучавшей речи достаточно для точного среднего.
             let voiced = trim_silence(&samples, TARGET_RATE);
+            let voiced = if voiced.len() > TARGET_RATE * 60 {
+                let mid = voiced.len() / 2;
+                let half = TARGET_RATE * 30;
+                &voiced[mid - half..mid + half]
+            } else {
+                voiced
+            };
             if voiced.len() < (MIN_SEGMENT_SECS * TARGET_RATE as f32) as usize {
                 continue;
             }
@@ -349,7 +368,7 @@ fn dummy_events() -> crate::events::EventTx {
 }
 
 /// Читает WAV как моно f32 на 16 кГц (ресемплирование при необходимости).
-fn read_wav_16k(path: &Path) -> Result<Vec<f32>> {
+pub fn read_wav_16k(path: &Path) -> Result<Vec<f32>> {
     let mut reader = hound::WavReader::open(path)
         .with_context(|| format!("Не удалось открыть {:?}", path))?;
     let spec = reader.spec();
@@ -452,10 +471,10 @@ fn trim_silence(samples: &[f32], rate: usize) -> &[f32] {
     &samples[start..end]
 }
 
-/// Каталог образцов владельца — для UI-подсказки.
+/// Записи владельца для UI-подсказки: образцы wake word + диктанты.
 pub fn profile_sources() -> Vec<(String, f64)> {
     let (train_dir, _) = crate::wake_train::sample_dirs();
-    tts::list_wav_samples(&train_dir)
+    let mut sources = tts::list_wav_samples(&train_dir)
         .into_iter()
         .filter(|(path, _)| {
             tts::label_of_sample(&path.file_name().unwrap_or_default().to_string_lossy()) != "none"
@@ -463,7 +482,19 @@ pub fn profile_sources() -> Vec<(String, f64)> {
         .map(|(path, duration)| {
             (path.file_name().unwrap_or_default().to_string_lossy().into_owned(), duration)
         })
-        .collect()
+        .collect::<Vec<_>>();
+    sources.extend(
+        tts::list_wav_samples(&crate::wake_train::voice_samples_dir())
+            .into_iter()
+            .filter(|(path, _)| {
+                tts::label_of_sample(&path.file_name().unwrap_or_default().to_string_lossy())
+                    == "voice"
+            })
+            .map(|(path, duration)| {
+                (path.file_name().unwrap_or_default().to_string_lossy().into_owned(), duration)
+            }),
+    );
+    sources
 }
 
 /// Путь к файлу профиля не нужен: профиль пересобирается из образцов.

@@ -54,9 +54,11 @@
   async function refreshVoiceSamples() {
     try {
       const samples = await invoke<{ train: [string, number][] }>("ww_samples");
-      // В профиле участвуют только записи с меткой владельца ([jarvis] в имени);
-      // записи фона (none) в фильтре не используются.
-      voiceSamples = samples.train.filter((entry) => entry[0].includes("[jarvis]")).length;
+      // В профиле участвуют записи владельца: образцы «Джарвис» ([jarvis]) и
+      // диктанты ([voice], приходят в общем списке); фоновые (none) не считаются.
+      voiceSamples = samples.train.filter(
+        (entry) => entry[0].includes("[jarvis]") || entry[0].includes("[voice]"),
+      ).length;
     } catch {
       voiceSamples = null;
     }
@@ -328,6 +330,18 @@
           <span class="row-item__chevron"><AppIcon name="chevronRight" size={15} /></span>
         </button>
       {/if}
+      {#if hit("диктант", "профиль голоса", "фильтр голоса", "мой голос")}
+        <button class="row-item" onclick={() => go("voicetrain")}>
+          <span class="row-item__icon"><AppIcon name="speaker" size={16} /></span>
+          <span class="row-item__text">
+            <span class="row-item__title">Диктант для профиля голоса</span>
+            <span class="row-item__hint">
+              Прочитай фразу с экрана — Джарвис запомнит, как звучит твой голос
+            </span>
+          </span>
+          <span class="row-item__chevron"><AppIcon name="chevronRight" size={15} /></span>
+        </button>
+      {/if}
       {#if hit("помощь", "проблемы", "журнал", "диагностика")}
         <button class="row-item" onclick={() => go("help")}>
           <span class="row-item__icon"><AppIcon name="help" size={16} /></span>
@@ -427,15 +441,15 @@
         {#if voiceSamples !== null}
           <button
             class="row-item"
-            onclick={() => go("wakeword")}
-            aria-label="Профиль голоса — перейти к обучению"
+            onclick={() => go("voicetrain")}
+            aria-label="Профиль голоса — обучение диктантом"
           >
             <span class="row-item__text">
               <span class="row-item__title">Профиль голоса</span>
               <span class="row-item__hint">
                 {voiceSamples > 0
-                  ? `Готов: ${voiceSamples} ${voiceSamples === 1 ? "образец" : (voiceSamples < 5 ? "образца" : "образцов")} голоса`
-                  : "Нет образцов — фильтр не работает. Запиши их в «Обучении»"}
+                  ? `Готов: ${voiceSamples} ${voiceSamples === 1 ? "запись" : (voiceSamples < 5 ? "записи" : "записей")}. Обучить ещё`
+                  : "Нет записей — фильтр не работает. Прочитай фразу в обучении"}
               </span>
             </span>
             <span class="badge" class:badge--ok={voiceSamples > 0}>
@@ -570,6 +584,25 @@
             onchange={toggleAutostart}
           />
         {/if}
+      </div>
+    {/if}
+    {#if hit("fastconformer", "hugging", "hf", "репозиторий", "модель asr", "распознавание")}
+      <div class="card card--flush">
+        <div class="row-item" style="flex-direction: column; align-items: stretch; gap: 6px">
+          <span class="row-item__title">Репозиторий FastConformer на Hugging Face</span>
+          <span class="row-item__hint">
+            Формат username/repo; файлы model.safetensors, config.json, tokenizer.vocab.
+            Пусто — скачивание из стандартного релиза. Изменение применится после
+            удаления папки models/fastconformer.
+          </span>
+          <input
+            class="input"
+            type="text"
+            value={settings.asr_hf_repo}
+            placeholder="username/fastconformer-ru"
+            onchange={(e) => void patchSettings({ asr_hf_repo: e.currentTarget.value })}
+          />
+        </div>
       </div>
     {/if}
   </section>

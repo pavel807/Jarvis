@@ -104,6 +104,13 @@ pub enum JarvisEvent {
     RecordSaved {
         path: String,
     },
+    /// Итог диктанта для профиля голоса: совпадение слов с фразой (0..1)
+    /// и расшифровка. `ok` — диктант принят и сохранён в профиль.
+    VoiceCheck {
+        ok: bool,
+        overlap: f32,
+        transcript: String,
+    },
     AudioLevel {
         level: f32,
         source: String,
