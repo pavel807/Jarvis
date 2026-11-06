@@ -139,9 +139,9 @@
     <button class="row-item" onclick={() => go("system")}>
       <span class="row-item__icon"><AppIcon name="activity" size={16} /></span>
       <span class="row-item__text">
-        <span class="row-item__title">Состояние подсистем и журнал</span>
+        <span class="row-item__title">Состояние подсистем</span>
         <span class="row-item__hint">
-          Живые статусы движка и технический журнал — в разделе «Система»
+          Статусы движка, речи и микрофона — в разделе «Система»
         </span>
       </span>
       <span class="row-item__chevron"><AppIcon name="chevronRight" size={15} /></span>

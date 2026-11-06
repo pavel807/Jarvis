@@ -14,12 +14,9 @@
 
   const SECTIONS = [
     { key: "modules", title: "Разделы" },
+    { key: "ai", title: "Модель" },
     { key: "general", title: "Общие" },
-    { key: "stt", title: "Распознавание" },
-    { key: "tts", title: "Синтез речи" },
     { key: "mic", title: "Микрофон" },
-    { key: "ai", title: "AI-модель" },
-    { key: "web", title: "Интернет" },
     { key: "system", title: "Система" },
 ] as const;
 
@@ -208,18 +205,6 @@
     await patchSettings(patch);
   }
 
-  const maxTokenChoices = [
-    { value: 0, label: "Без лимита" },
-    { value: 128, label: "128 токенов" },
-    { value: 256, label: "256 токенов" },
-    { value: 512, label: "512 токенов" },
-    { value: 1024, label: "1024 токена" },
-  ];
-
-  async function pickMaxTokens(value: number) {
-    await patchSettings({ llm_max_tokens: value });
-  }
-
   // ---------- Система ----------
 
   onMount(() => {
@@ -361,85 +346,14 @@
           onchange={(value) => void patchSettings({ topic_memory: value })}
         />
       {/if}
-    </div>
-  </section>
-
-  <!-- Распознавание -->
-  <section class="settings-section" data-section="stt" bind:this={sectionEls.stt}>
-    <h2 class="section-title">Распознавание речи</h2>
-    <div class="card">
-      {#if hit("чувствительность", "порог", "wake", "джарвис")}
-        <p class="card__title">Чувствительность к слову «Джарвис»</p>
-        <p class="card__hint">
-          Ниже порог — срабатывает чаще, но и на постороннюю речь тоже.
-          Сейчас: {Math.round(settings.wake_threshold * 100)}%
-        </p>
-        <input
-          type="range"
-          min="0.4"
-          max="0.85"
-          step="0.05"
-          bind:value={settings.wake_threshold}
-          aria-label="Чувствительность к слову Джарвис"
-          onchange={() => void patchSettings({ wake_threshold: settings.wake_threshold })}
+      {#if hit("интернет", "поиск", "погода", "новости")}
+        <SwitchRow
+          checked={settings.web_search_auto}
+          title="Искать свежие данные в интернете"
+          hint="Погода, курсы, новости. Требуется подключение к сети."
+          onchange={(value) => void patchSettings({ web_search_auto: value })}
         />
       {/if}
-          {#if hit("диалог", "продолжение", "followup", "уточнение")}
-            <div class="row-item" style="margin-top: 8px">
-              <span class="row-item__text">
-                <span class="row-item__title">Продолжение диалога</span>
-                <span class="row-item__hint">
-                  После ответа Джарвис слушает уточнение {settings.followup_window_secs} секунд —
-                  можно не повторять «Джарвис»
-                </span>
-              </span>
-              <button
-                class="switch"
-                class:is-on={settings.followup_window_secs > 0}
-                role="switch"
-                aria-checked={settings.followup_window_secs > 0}
-                aria-label="Продолжение диалога"
-                onclick={(event) => {
-                  const value = !(event.currentTarget as HTMLElement).classList.contains("is-on");
-                  void patchSettings({ followup_window_secs: value ? 8 : 0 });
-                }}
-              ></button>
-            </div>
-          {/if}
-          {#if hit("посторонние", "голоса", "фильтр", "мой голос", "speakers", "диаризация")}
-            <SwitchRow
-              checked={settings.speaker_filter}
-              title="Только мой голос"
-              hint="Посторонние голоса на фоне отсекаются до распознавания и не доходят до ответов. Профиль строится из записей в «Обучении» и обновляется сам после новых записей."
-              onchange={(value) => void patchSettings({ speaker_filter: value })}
-            />
-            {#if voiceSamples !== null}
-              <button
-                class="row-item"
-                onclick={() => go("wakeword")}
-                aria-label="Профиль голоса — перейти к обучению"
-              >
-                <span class="row-item__text">
-                  <span class="row-item__title">Профиль голоса</span>
-                  <span class="row-item__hint">
-                    {voiceSamples > 0
-                      ? `Готов: ${voiceSamples} ${voiceSamples === 1 ? "образец" : (voiceSamples < 5 ? "образца" : "образцов")} голоса`
-                      : "Нет образцов — фильтр не работает. Запиши их в «Обучении»"}
-                  </span>
-                </span>
-                <span class="badge" class:badge--ok={voiceSamples > 0}>
-                  {voiceSamples > 0 ? "OK" : "ПУСТО"}
-                </span>
-              </button>
-            {/if}
-          {/if}
-    </div>
-  </section>
-
-  <!-- Синтез речи -->
-  <section class="settings-section" data-section="tts" bind:this={sectionEls.tts}>
-    <h2 class="section-title">Синтез речи</h2>
-    <div class="card card--flush">
       {#if hit("числа", "сокращения", "нормализация")}
         <SwitchRow
           checked={settings.llm_normalize}
@@ -488,12 +402,39 @@
           <span class="row-item__chevron"><AppIcon name="gear" size={15} /></span>
         </button>
       {/if}
+      {#if hit("посторонние", "голоса", "фильтр", "мой голос", "speakers", "диаризация")}
+        <SwitchRow
+          checked={settings.speaker_filter}
+          title="Только мой голос"
+          hint="Посторонние голоса на фоне отсекаются до распознавания и не доходят до ответов. Профиль строится из записей в «Обучении» и обновляется сам после новых записей."
+          onchange={(value) => void patchSettings({ speaker_filter: value })}
+        />
+        {#if voiceSamples !== null}
+          <button
+            class="row-item"
+            onclick={() => go("wakeword")}
+            aria-label="Профиль голоса — перейти к обучению"
+          >
+            <span class="row-item__text">
+              <span class="row-item__title">Профиль голоса</span>
+              <span class="row-item__hint">
+                {voiceSamples > 0
+                  ? `Готов: ${voiceSamples} ${voiceSamples === 1 ? "образец" : (voiceSamples < 5 ? "образца" : "образцов")} голоса`
+                  : "Нет образцов — фильтр не работает. Запиши их в «Обучении»"}
+              </span>
+            </span>
+            <span class="badge" class:badge--ok={voiceSamples > 0}>
+              {voiceSamples > 0 ? "OK" : "ПУСТО"}
+            </span>
+          </button>
+        {/if}
+      {/if}
     </div>
   </section>
 
-  <!-- AI-модель -->
+  <!-- Модель -->
   <section class="settings-section" data-section="ai" bind:this={sectionEls.ai}>
-    <h2 class="section-title">AI-модель</h2>
+    <h2 class="section-title">Модель</h2>
     <div class="card card--flush">
       {#each llmChoices as choice (choice.backend + choice.model)}
         {#if hit(choice.title, choice.hint, "модель")}
@@ -595,21 +536,6 @@
     </div>
   </section>
 
-  <!-- Интернет -->
-  <section class="settings-section" data-section="web" bind:this={sectionEls.web}>
-    <h2 class="section-title">Интернет и поиск</h2>
-    <div class="card card--flush">
-      {#if hit("интернет", "поиск", "погода", "новости")}
-        <SwitchRow
-          checked={settings.web_search_auto}
-          title="Искать свежие данные в интернете"
-          hint="Погода, курсы, новости. Требуется подключение к сети."
-          onchange={(value) => void patchSettings({ web_search_auto: value })}
-        />
-      {/if}
-    </div>
-  </section>
-
   <!-- Система -->
   <section class="settings-section" data-section="system" bind:this={sectionEls.system}>
     <h2 class="section-title">Система</h2>
@@ -623,15 +549,6 @@
             onchange={toggleAutostart}
           />
         {/if}
-      </div>
-    {/if}
-    {#if hit("файлы", "toml", "данные")}
-      <div class="card">
-        <p class="dim" style="font-size: 12.5px; line-height: 1.55">
-          Команды и тонкая настройка хранятся в
-          <span class="mono">commands.toml</span> и <span class="mono">settings.toml</span>.
-          Их можно править вручную — Джарвис подхватит изменения без перезапуска.
-        </p>
       </div>
     {/if}
   </section>

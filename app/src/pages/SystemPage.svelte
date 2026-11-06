@@ -1,18 +1,12 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
   import { store, go } from "../store.svelte";
   import { getAssistant } from "../assistant";
   import AppIcon from "../components/AppIcon.svelte";
 
   /**
-   * Система: реальные состояния подсистем, технический журнал движка
-   * и сведения о данных. Ничего выдуманного: статус — из status-опроса,
-   * журнал — из get_logs и живых событий.
+   * Система: состояния подсистем и диагностика. Технический журнал убран
+   * из интерфейса — статус подсистем говорит всё, что нужно пользователю.
    */
-
-  let fileLogs = $state<string[]>([]);
-  let showLog = $state(true);
 
   const assistant = $derived(getAssistant());
 
@@ -46,20 +40,6 @@
       },
     ] as const;
   });
-
-  const allLogs = $derived.by(() => {
-    // Живые события (новые сверху) + стартовый журнал файла (старые снизу).
-    const file = [...fileLogs].reverse();
-    return [...store.logs, ...file];
-  });
-
-  onMount(async () => {
-    try {
-      fileLogs = await invoke<string[]>("get_logs");
-    } catch {
-      // движок ещё не поднят — журнал будет только из живых событий
-    }
-  });
 </script>
 
 <div class="page">
@@ -73,26 +53,8 @@
           <span class="status-item__value">{sub.value}</span>
         </div>
       {/each}
-      <div class="status-item">
-        <span class="status-item__dot is-ok"></span>
-        <span class="status-item__name">Приватность</span>
-        <span class="status-item__value">ВСЁ ЛОКАЛЬНО</span>
-      </div>
     </div>
   </div>
-
-  <div class="section-title">Технический журнал</div>
-  <button class="btn btn--secondary btn--sm" onclick={() => (showLog = !showLog)}>
-    <AppIcon name={showLog ? "chevronDown" : "chevronRight"} size={14} />
-    {showLog ? "Скрыть журнал" : "Показать журнал"}
-  </button>
-  {#if showLog}
-    <div class="card" style="margin-top: 10px">
-      <div class="log">
-        {allLogs.length ? allLogs.join("\n") : "Журнал пуст — движок ещё не присылал событий."}
-      </div>
-    </div>
-  {/if}
 
   <div class="section-title">Диагностика</div>
   <div class="card card--flush">
@@ -121,9 +83,9 @@
       <span class="row-item__text">
         <span class="row-item__title">Джарвис 0.2 · Mark V</span>
         <span class="row-item__hint">
-          Голосовой ассистент, который работает целиком на этом компьютере.
-          Речь распознаётся и синтезируется локально, ответы готовит модель на диске —
-          без отправки данных в облако. Текущая фаза: {assistant.full.toLowerCase()}.
+          Голосовой ассистент: речь распознаётся и синтезируется локально.
+          Ответы готовит модель на выбор — локальная на диске или облачная
+          через API. Текущая фаза: {assistant.full.toLowerCase()}.
         </span>
       </span>
     </div>

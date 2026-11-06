@@ -2,7 +2,6 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { store, toast } from "../store.svelte";
-  import { settings } from "../store.svelte";
   import AppIcon from "../components/AppIcon.svelte";
   import Markdown from "../components/Markdown.svelte";
 
@@ -126,22 +125,6 @@
       {/each}
     </div>
   {/if}
-
-  <!-- Память тем -->
-  <div class="section-title">Память тем</div>
-  <div class="card card--flush">
-    <div class="row-item">
-      <span class="row-item__text">
-        <span class="row-item__title">Помнить незакрытые темы</span>
-        <span class="row-item__hint">
-          «Мы это забыли» — Джарвис вернёт разговор к теме, от которой отвлеклись
-        </span>
-      </span>
-      <span class="badge" class:badge--accent={settings.topic_memory}>
-        {settings.topic_memory ? "ВКЛ" : "ВЫКЛ"}
-      </span>
-    </div>
-  </div>
 
   <!-- Задачник -->
   <div class="section-title">Задачник</div>
