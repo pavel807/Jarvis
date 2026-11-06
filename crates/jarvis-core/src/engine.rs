@@ -402,6 +402,9 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     // Перебивание сработало: после конца речи Джарвиса буфер фразы
     // пользователя (уже посеянный из кольца) не выбрасывать.
     let mut barge_triggered = false;
+    // Сколько сэмплов в начале фразы — пре-ролл перебивания: для проверки
+    // голоса он вырезается (там эхо ответа Джарвиса), для STT остаётся.
+    let mut barge_preroll_samples = 0usize;
     // Последний исход диалога был Followup: после конца ответа окно
     // уточнения начинается заново (раньше оно истекало во время речи).
     let mut last_outcome_followup = false;
@@ -704,6 +707,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                 let _ = h.audio_tx.send(AudioMessage::Stop);
                 // Сказанное до триггера — начало фразы пользователя.
                 command_buffer = barge.take_preroll();
+                barge_preroll_samples = command_buffer.len();
                 has_speech_started = true;
                 voiced_samples = command_buffer.len();
                 silence_samples = 0;
@@ -973,10 +977,20 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 
                         // Фильтр говорящего: сегмент уходит на проверку голоса
                         // параллельно с STT — вердикт забирается в Processing.
+                        // На проверку идёт фраза БЕЗ пре-ролла перебивания
+                        // (там эхо ответа Джарвиса портит сходство).
                         speaker_check_sent = settings_snap.speaker_filter;
                         if speaker_check_sent {
+                            let clean = verify_slice(
+                                &padded,
+                                pad,
+                                barge_preroll_samples,
+                                (crate::speaker::MIN_SEGMENT_SECS * wake::SAMPLE_RATE as f32)
+                                    as usize,
+                            )
+                            .to_vec();
                             let query = SpeakerQuery::Verify {
-                                samples: padded.clone(),
+                                samples: clean,
                                 threshold: settings_snap.speaker_threshold,
                             };
                             if h.speaker_tx.try_send(query).is_err() {
@@ -990,6 +1004,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                         }
 
                         state = AppState::Processing;
+                        barge_preroll_samples = 0;
                         // Фраза ушла в STT: ответы VAD на неё больше не нужны.
                         vad.reset_phrase();
                         // Сообщаем UI, что фраза закончилась и пошла обработка.
@@ -1019,9 +1034,13 @@ const BARGE_CONFIRM_SECS: f32 = 0.22;
 /// Речь пользователя должна быть во столько раз громче эха голоса Джарвиса
 /// (при играющих колонках), чтобы считаться перебиванием.
 const BARGE_BASELINE_MARGIN: f32 = 1.8;
-/// Разогрев: сколько секунд речи Джарвиса слушать, прежде чем разрешить
-/// перебивание — за это время базлайн эха выходит на рабочий уровень.
-const BARGE_WARMUP_SECS: f32 = 0.3;
+/// Разогрев: сколько секунд непрерывной речи Джарвиса слушать, прежде чем
+/// разрешить перебивание. За это время базлайн эха выходит на рабочий
+/// уровень И короткие системные звуки (отклик на «Джарвис» ~0.6 с, таймеры)
+/// не вооружают детектор — иначе ложное перебивание на собственную речь
+/// владельца сразу после отклика вклеивало эхо в начало его команды и
+/// проверка голоса отвергала чистую фразу.
+const BARGE_WARMUP_SECS: f32 = 1.2;
 /// Хвост кольца, который становится началом фразы пользователя, сек.
 const BARGE_PREROLL_SECS: f32 = 0.35;
 /// Глубина кольца микрофона во время речи Джарвиса, сек.
@@ -1144,6 +1163,20 @@ fn reset_phrase_state(
     *silence_samples = 0;
     *voiced_samples = 0;
     vad.reset_phrase();
+}
+
+/// Сегмент для проверки голоса: без пре-ролла перебивания. Префикс фразы,
+/// захваченный триггером перебивания, содержит эхо ответа Джарвиса из
+/// колонок — смешанный эмбеддинг не дотягивал до порога, и владелец
+/// получал «Посторонний голос». STT при этом видит всю фразу целиком.
+/// Чистого хвоста меньше минимума — возвращаем всё (решение за фильтром).
+fn verify_slice<'a>(padded: &'a [f32], pad: usize, preroll: usize, min_samples: usize) -> &'a [f32] {
+    let start = pad.saturating_add(preroll);
+    if start < padded.len() && padded.len() - start >= min_samples {
+        &padded[start..]
+    } else {
+        padded
+    }
 }
 
 /// Порог, выше которого чанк считается речью: настройка пользователя, но не
@@ -1594,18 +1627,19 @@ mod vad_tests {
 
     #[test]
     fn barge_triggers_when_user_is_louder_than_echo() {
-        // Эхо ~0.05, пользователь говорит втрое громче: после разогрева и
-        // накопления BARGE_CONFIRM_SECS — перебивание.
+        // Эхо ~0.05, пользователь говорит втрое громче: после разогрева
+        // (1.2 с — отклик/короткие звуки не вооружают) и накопления
+        // BARGE_CONFIRM_SECS — перебивание.
         let mut barge = BargeTracker::new(true);
         let now = Instant::now();
         let echo = vec![0.05f32; 1600];
-        for i in 0..10 {
+        for i in 0..15 {
             barge.on_playback_chunk(&echo, now + Duration::from_millis(i * 100), 0.018);
         }
         let voice = vec![0.15f32; 1600]; // 0.1 с голоса
         let mut triggered = false;
         for i in 0..10 {
-            if barge.on_playback_chunk(&voice, now + Duration::from_millis(1000 + i * 100), 0.018) {
+            if barge.on_playback_chunk(&voice, now + Duration::from_millis(1500 + i * 100), 0.018) {
                 triggered = true;
                 break;
             }
@@ -1615,6 +1649,30 @@ mod vad_tests {
         let preroll = barge.take_preroll();
         assert!(!preroll.is_empty());
         assert!(preroll.len() <= (BARGE_PREROLL_SECS * wake::SAMPLE_RATE as f32) as usize);
+    }
+
+    #[test]
+    fn barge_does_not_arm_during_short_ack() {
+        // Отклик на «Джарвис» ~0.6 с эха: разогрев 1.2 с не пройден —
+        // даже громкая речь владельца сразу после отклика не триггерит.
+        let mut barge = BargeTracker::new(true);
+        let now = Instant::now();
+        let ack_echo = vec![0.05f32; 1600];
+        for i in 0..6 {
+            assert!(!barge.on_playback_chunk(
+                &ack_echo,
+                now + Duration::from_millis(i * 100),
+                0.018
+            ));
+        }
+        let voice = vec![0.3f32; 1600];
+        for i in 0..6 {
+            assert!(
+                !barge.on_playback_chunk(&voice, now + Duration::from_millis(600 + i * 100), 0.018),
+                "перебивание не должно срабатывать на отклике"
+            );
+        }
+        assert!(!barge.triggered);
     }
 
     #[test]
@@ -1650,6 +1708,41 @@ mod vad_tests {
             ));
         }
         assert!(!barge.triggered);
+    }
+
+    #[test]
+    fn verify_slice_cuts_barge_preroll_with_echo() {
+        const RATE: usize = 16_000;
+        let pad = 3200; // 0.2 с
+        let preroll = 5600; // 0.35 с пре-ролла перебивания
+        let speech = vec![1.0f32; RATE * 3]; // 3 с чистой речи после эха
+        let mut padded = vec![0.0f32; pad];
+        padded.extend(vec![2.0f32; preroll]); // «эхо»
+        padded.extend_from_slice(&speech);
+        padded.extend(vec![0.0f32; pad]);
+
+        let clean = verify_slice(&padded, pad, preroll, RATE);
+        // Срез начинается после эха: внутри нет «эха» (2.0), начинается
+        // сразу с чистой речи; хвостовой паддинг допустим — trim_silence
+        // внутри верификации его снимет.
+        assert_eq!(clean.len(), RATE * 3 + pad);
+        assert_eq!(clean[0], 1.0);
+        assert!(!clean.iter().any(|&s| s == 2.0), "эхо попало в срез");
+
+        // Хвоста после пре-ролла меньше минимума — отдаём всю фразу
+        // (решение примет фильтр, а не молчаливый пропуск).
+        let short_speech = vec![1.0f32; RATE / 2];
+        let mut short_padded = vec![0.0f32; pad];
+        short_padded.extend(vec![2.0f32; preroll]);
+        short_padded.extend_from_slice(&short_speech);
+        short_padded.extend(vec![0.0f32; pad]);
+        assert_eq!(
+            verify_slice(&short_padded, pad, preroll, RATE).len(),
+            short_padded.len()
+        );
+
+        // Без перебивания срез = фраза с хвостовым паддингом (без ведущего).
+        assert_eq!(verify_slice(&padded, pad, 0, RATE).len(), padded.len() - pad);
     }
 
     #[test]

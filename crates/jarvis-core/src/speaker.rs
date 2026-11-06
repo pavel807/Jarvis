@@ -32,7 +32,7 @@ use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::Arc;
 
 /// Минимальная длительность сегмента для верификации, секунд.
-const MIN_SEGMENT_SECS: f32 = 0.8;
+pub const MIN_SEGMENT_SECS: f32 = 0.8;
 /// Частота дискретизации профиля и сегментов.
 const TARGET_RATE: usize = wake::SAMPLE_RATE;
 
@@ -214,6 +214,14 @@ impl SpeakerGate {
             return Verdict::Unverified("эмбеддинг сегмента не посчитался");
         };
         let cosine = dot(&profile, &normalize(&mean));
+        // Сходство в лог: без числа «Посторонний голос» не отличить битый
+        // профиль от чуть-чуть не дотянувшего до порога.
+        println!(
+            "🎙️ Сходство голоса: {:.3} (порог {:.2}) — {}",
+            cosine,
+            threshold,
+            if cosine >= threshold { "владелец" } else { "чужой" }
+        );
         if cosine >= threshold {
             Verdict::Owner
         } else {
