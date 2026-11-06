@@ -11,6 +11,7 @@
 //! недоступен (нет сети для каталога, модель не скачалась) — автоматический
 //! откат на candle.
 
+pub mod api_backend;
 pub mod candle_backend;
 pub mod config;
 pub mod model;
@@ -121,6 +122,8 @@ enum Backend {
     Candle(Box<candle_backend::CandleEngine>),
     #[cfg(target_os = "macos")]
     Uzu(Box<uzu_backend::UzuEngine>),
+    /// Облачная модель через OpenAI-совместимый API (Яндекс GPT и другие).
+    Api(Box<api_backend::ApiEngine>),
 }
 
 impl LlmEngine {
@@ -128,6 +131,24 @@ impl LlmEngine {
     /// на macOS; если он недоступен — откат на candle, чтобы ассистент
     /// не оставался без мозга.
     pub fn load(models_dir: &std::path::Path, events: &EventTx) -> Result<Self> {
+        if config::backend() == "api" {
+            match api_backend::ApiEngine::load(events) {
+                Ok(engine) => {
+                    return Ok(Self {
+                        backend: Backend::Api(Box::new(engine)),
+                    });
+                }
+                Err(e) => {
+                    // Облако выбрано явно — откат на локальную модель был бы
+                    // сюрпризом (и трафиком): честная ошибка, ключ вводится в
+                    // настройках.
+                    let _ = events.send(JarvisEvent::Error {
+                        message: format!("Облачная модель не запустилась: {e:#}"),
+                    });
+                    return Err(e);
+                }
+            }
+        }
         if config::backend() == "uzu" {
             #[cfg(target_os = "macos")]
             match uzu_backend::UzuEngine::load(models_dir, events) {
@@ -248,6 +269,16 @@ impl LlmEngine {
             ),
             #[cfg(target_os = "macos")]
             Backend::Uzu(engine) => engine.generate_streaming_with_params(
+                system,
+                history,
+                user,
+                params_override,
+                cancel,
+                prefill,
+                on_sentence,
+                on_progress,
+            ),
+            Backend::Api(engine) => engine.generate_streaming_with_params(
                 system,
                 history,
                 user,

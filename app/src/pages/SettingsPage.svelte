@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { settings, patchSettings, toast, go, store } from "../store.svelte";
+  import { settings, patchSettings, toast, go, store, type Settings } from "../store.svelte";
   import { voiceName } from "../voices";
   import SwitchRow from "../components/SwitchRow.svelte";
   import AppIcon from "../components/AppIcon.svelte";
@@ -154,6 +154,24 @@
     },
   ];
 
+  /** Облачные варианты: отдельная логика выбора (пресет + поля ключа). */
+  const apiChoices = [
+    {
+      preset: "yandex" as const,
+      title: "Яндекс GPT — облако",
+      hint: "Ответы в интернете через Яндекс. Нужен API-ключ Яндекс.Облака и идентификатор каталога.",
+    },
+    {
+      preset: "openai" as const,
+      title: "Своя модель (API) — облако",
+      hint: "Любой OpenAI-совместимый сервис: OpenAI, OpenRouter, LM Studio и другие. Ключ, адрес и модель — ниже.",
+    },
+  ];
+
+  function apiPicked(preset: string): boolean {
+    return settings.llm_backend === "api" && settings.api_preset === preset;
+  }
+
   function llmPicked(choice: (typeof llmChoices)[number]): boolean {
     return settings.llm_backend === choice.backend && settings.llm_model === choice.model;
   }
@@ -162,6 +180,32 @@
     if (llmPicked(choice)) return;
     await patchSettings({ llm_backend: choice.backend, llm_model: choice.model });
     toast("Модель сменится после перезапуска Джарвиса", "ok");
+  }
+
+  // ---------- Облачная модель ----------
+
+  /** Облако выбрано? */
+  const apiActive = $derived(settings.llm_backend === "api");
+  const yandexActive = $derived(apiActive && settings.api_preset === "yandex");
+
+  async function pickApi(preset: "yandex" | "openai") {
+    if (apiActive && settings.api_preset === preset) return;
+    const base =
+      preset === "yandex"
+        ? "https://llm.api.cloud.yandex.net/openai/v1"
+        : "https://api.openai.com/v1";
+    const model = preset === "yandex" ? "yandexgpt-lite" : "gpt-4o-mini";
+    await patchSettings({ llm_backend: "api", api_preset: preset, api_base_url: base, api_model: model });
+    toast(
+      settings.api_key
+        ? "Облако включится после перезапуска Джарвиса"
+        : "Впиши API-ключ ниже — он сохранится сам",
+      "ok",
+    );
+  }
+
+  async function saveApiField(patch: Partial<Settings>) {
+    await patchSettings(patch);
   }
 
   const maxTokenChoices = [
@@ -466,43 +510,86 @@
           </button>
         {/if}
       {/each}
-      {#if hit("вариативность", "температура", "temperature")}
-        <div class="row-item" style="flex-direction: column; align-items: stretch; gap: 6px">
-          <div style="display: flex; justify-content: space-between; align-items: baseline">
-            <span class="row-item__title">Вариативность ответов</span>
-            <span class="row-item__value">{settings.llm_temperature.toFixed(2)}</span>
-          </div>
-          <input
-            type="range"
-            min="0"
-            max="1.2"
-            step="0.05"
-            bind:value={settings.llm_temperature}
-            aria-label="Температура модели"
-            onchange={() => void patchSettings({ llm_temperature: settings.llm_temperature })}
-          />
-          <span class="row-item__hint">
-            Ниже — точнее и суше, выше — свободнее. 0.6 подходит большинству.
-          </span>
+      {#each apiChoices as choice (choice.preset)}
+        {#if hit(choice.title, choice.hint, "модель", "облако", "api")}
+          <button class="row-item" onclick={() => pickApi(choice.preset)}>
+            <span class="row-item__text">
+              <span class="row-item__title">{choice.title}</span>
+              <span class="row-item__hint">{choice.hint}</span>
+            </span>
+            {#if apiPicked(choice.preset)}
+              <span class="row-item__value">
+                <AppIcon name="check" size={15} />
+              </span>
+            {/if}
+          </button>
+        {/if}
+      {/each}
+      {#if apiActive && yandexActive}
+        <div class="api-fields">
+          <label class="api-field">
+            <span class="api-field__label">API-ключ</span>
+            <input
+              class="input"
+              type="password"
+              value={settings.api_key}
+              placeholder="AQVN… или IAM-токен"
+              onchange={(e) => void saveApiField({ api_key: e.currentTarget.value })}
+            />
+          </label>
+          <label class="api-field">
+            <span class="api-field__label">Каталог (folder id)</span>
+            <input
+              class="input"
+              type="text"
+              value={settings.api_folder_id}
+              placeholder="b1g…"
+              onchange={(e) => void saveApiField({ api_folder_id: e.currentTarget.value })}
+            />
+          </label>
+          <label class="api-field">
+            <span class="api-field__label">Модель</span>
+            <input
+              class="input"
+              type="text"
+              value={settings.api_model}
+              placeholder="yandexgpt-lite"
+              onchange={(e) => void saveApiField({ api_model: e.currentTarget.value })}
+            />
+          </label>
         </div>
-      {/if}
-      {#if hit("длина", "лимит", "токены")}
-        <div class="row-item">
-          <span class="row-item__text">
-            <span class="row-item__title">Максимальная длина ответа</span>
-            <span class="row-item__hint">Страховка от слишком долгих монологов</span>
-          </span>
-          <select
-            class="select"
-            style="width: auto"
-            aria-label="Максимальная длина ответа"
-            bind:value={settings.llm_max_tokens}
-            onchange={() => void pickMaxTokens(settings.llm_max_tokens)}
-          >
-            {#each maxTokenChoices as choice (choice.value)}
-              <option value={choice.value}>{choice.label}</option>
-            {/each}
-          </select>
+      {:else if apiActive}
+        <div class="api-fields">
+          <label class="api-field">
+            <span class="api-field__label">API-ключ</span>
+            <input
+              class="input"
+              type="password"
+              value={settings.api_key}
+              placeholder="sk-…"
+              onchange={(e) => void saveApiField({ api_key: e.currentTarget.value })}
+            />
+          </label>
+          <label class="api-field">
+            <span class="api-field__label">Адрес API</span>
+            <input
+              class="input"
+              type="text"
+              value={settings.api_base_url}
+              placeholder="https://api.openai.com/v1"
+              onchange={(e) => void saveApiField({ api_base_url: e.currentTarget.value })}
+            />
+          </label>
+          <label class="api-field">
+            <span class="api-field__label">Модель</span>
+            <input
+              class="input"
+              type="text"
+              value={settings.api_model}
+              placeholder="gpt-4o-mini"
+              onchange={(e) => void saveApiField({ api_model: e.currentTarget.value })}
+            />
+          </label>
         </div>
       {/if}
     </div>
@@ -549,3 +636,24 @@
     {/if}
   </section>
 </div>
+
+<style>
+  .api-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px 14px;
+    border-top: 1px solid var(--border-soft, rgba(128, 128, 128, 0.15));
+  }
+
+  .api-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .api-field__label {
+    font-size: 12px;
+    opacity: 0.7;
+  }
+</style>

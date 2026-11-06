@@ -62,6 +62,21 @@ pub struct Settings {
     /// от зацикливания и конец контекста модели.
     pub llm_max_tokens: usize,
 
+    // --- Облачная модель (OpenAI-совместимый API) ---
+    /// Пресет провайдера: "yandex" (Api-Key + URI модели) или "openai"
+    /// (Bearer, адрес и модель как введены).
+    pub api_preset: String,
+    /// Базовый адрес OpenAI-совместимого API без хвостового слэша.
+    pub api_base_url: String,
+    /// API-ключ провайдера. Живёт в settings.toml — файл личных данных
+    /// Джарвиса, права на запись ограничиваются 0600.
+    pub api_key: String,
+    /// Имя модели у провайдера: `yandexgpt-lite`, `gpt-4o-mini`, `meta-llama/...`.
+    pub api_model: String,
+    /// Идентификатор каталога Яндекс.Облака (только для пресета "yandex"):
+    /// из него собирается URI модели `gpt://<каталог>/<модель>/latest`.
+    pub api_folder_id: String,
+
     // --- TTS ---
     /// Голос Silero v5: ru_eduard | ru_dmitriy | ru_alexandr | ru_bogdan | ... (29 голосов).
     pub tts_voice: String,
@@ -114,6 +129,11 @@ impl Default for Settings {
             llm_temperature: 0.6,
             // 0 — без искусственного лимита (длинные ответы не обрываются).
             llm_max_tokens: 0,
+            api_preset: "yandex".to_string(),
+            api_base_url: "https://llm.api.cloud.yandex.net/openai/v1".to_string(),
+            api_key: String::new(),
+            api_model: "yandexgpt-lite".to_string(),
+            api_folder_id: String::new(),
             tts_voice: "ru_eduard".to_string(),
             tts_speed: 1.0,
             ack_before_llm: false,
@@ -143,6 +163,18 @@ impl Settings {
         let tmp = path.with_extension("toml.tmp");
         fs::write(&tmp, content)?;
         fs::rename(&tmp, path)?;
+        // В settings.toml живёт API-ключ облачной модели: ограничиваем
+        // доступ личным пользователем (0600). Не критично при ошибке —
+        // файловlui-системы без UNIX-прав (FAT) не умеют.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = fs::metadata(path) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o600);
+                let _ = fs::set_permissions(path, perms);
+            }
+        }
         Ok(())
     }
 
@@ -153,6 +185,13 @@ impl Settings {
         crate::llm::config::set_backend(&self.llm_backend);
         crate::llm::config::set_model_name(&self.llm_model);
         crate::llm::config::update_generation_params(self.llm_params());
+        crate::llm::config::set_api_config(
+            &self.api_preset,
+            &self.api_base_url,
+            &self.api_key,
+            &self.api_model,
+            &self.api_folder_id,
+        );
     }
 
     /// Применяет настройки, безопасные на живую (hot-reload settings.toml):
