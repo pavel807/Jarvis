@@ -298,10 +298,11 @@ impl VadTracker {
     }
 }
 
-/// Ждёт вердикт фильтра говорящего, пропуская ответы VAD от прошлых фраз.
-/// Таймаут — тоже [`Verdict::Unverified`]: при включённом фильтре фраза
-/// не проходит без проверки (fail-closed).
-fn wait_for_verdict(rx: &Receiver<SpeakerReply>, timeout: Duration) -> Verdict {
+/// Ждёт вердикт фильтра говорящего с ожидаемым `id`, пропуская ответы VAD
+/// и устаревшие проверки (фоновые проверки перебивания). Таймаут — тоже
+/// [`Verdict::Unverified`]: при включённом фильтре фраза не проходит без
+/// проверки (fail-closed).
+fn wait_for_verdict(rx: &Receiver<SpeakerReply>, expected_id: u64, timeout: Duration) -> Verdict {
     let deadline = Instant::now() + timeout;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -309,7 +310,14 @@ fn wait_for_verdict(rx: &Receiver<SpeakerReply>, timeout: Duration) -> Verdict {
             return Verdict::Unverified("фильтр не ответил вовремя");
         }
         match rx.recv_timeout(left) {
-            Ok(SpeakerReply::Verified(verdict)) => return verdict,
+            Ok(SpeakerReply::Verified { id, verdict }) => {
+                if id == expected_id {
+                    return verdict;
+                }
+                // Ответ чужого запроса (например, фоновой проверки перебивания
+                // прошлой реплики): не наш вердикт, ждём свой.
+                continue;
+            }
             Ok(SpeakerReply::Speech(_)) => continue,
             Err(_) => return Verdict::Unverified("фильтр не ответил вовремя"),
         }
@@ -386,6 +394,10 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     // Фильтр говорящего включён для текущей фразы: сегмент ушёл на
     // верификацию голоса, и в Processing нужно забрать вердикт.
     let mut speaker_check_sent = false;
+    // Метка текущей проверки фразы: ответы фоновых проверок перебивания
+    // с другими id не принимаются за вердикт фразы.
+    let mut speaker_check_id: u64 = 0;
+    let mut verify_id: u64 = 1;
     // Подсказка «образцов голоса нет» звучит один раз за сессию, а не на
     // каждой фразе.
     let mut speaker_hint_spoken = false;
@@ -405,6 +417,13 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     // Сколько сэмплов в начале фразы — пре-ролл перебивания: для проверки
     // голоса он вырезается (там эхо ответа Джарвиса), для STT остаётся.
     let mut barge_preroll_samples = 0usize;
+    // Проверка владельца во время ответа: один запрос в полёте, свежий
+    // вердикт «владелец» открывает окно триггера перебивания.
+    let mut barge_probe_id: Option<u64> = None;
+    let mut barge_last_probe: Option<Instant> = None;
+    let mut barge_owner_until: Option<Instant> = None;
+    // Профиль отсутствует: перебивание по чистой энергии (как раньше).
+    let mut barge_free_gate = false;
     // Последний исход диалога был Followup: после конца ответа окно
     // уточнения начинается заново (раньше оно истекало во время речи).
     let mut last_outcome_followup = false;
@@ -505,7 +524,8 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                     // Вердикт фильтра говорящего: чужая речь не идёт ни в
                     // LLM, ни в команды — движок просто ждёт дальше.
                     if speaker_check_sent {
-                        let verdict = wait_for_verdict(&h.speaker_rx, Duration::from_millis(2000));
+                        let verdict =
+                            wait_for_verdict(&h.speaker_rx, speaker_check_id, Duration::from_millis(2000));
                         speaker_check_sent = false;
                         match verdict {
                             Verdict::Owner => {}
@@ -693,12 +713,62 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             has_speech_started = false;
             vad.reset_phrase();
 
+            // --- Перебивание по голосу владельца (speakrs) ---
+            // Энергетический трекер даёт «кто-то говорит громче эха»;
+            // фоновая проверка speakrs подтверждает, что это ВЛАДЕЛЕЦ, а не
+            // телевизор или видео: эхо Silero-голоса Джарвиса на профиль
+            // владельца не похоже. Нет профиля или фильтр выключен —
+            // перебивание работает по энергии, как раньше.
+            if settings_snap.speaker_filter
+                && !barge_free_gate
+                && barge.warmed_up()
+                && barge_probe_id.is_none()
+                && barge_last_probe
+                    .map_or(true, |t| now.duration_since(t) >= Duration::from_millis(BARGE_VERIFY_INTERVAL_MS))
+                && barge.ring_secs() >= BARGE_VERIFY_WINDOW_SECS
+            {
+                barge_last_probe = Some(now);
+                barge_probe_id = Some(verify_id);
+                verify_id = verify_id.wrapping_add(1);
+                let _ = h.speaker_tx.try_send(SpeakerQuery::Verify {
+                    id: barge_probe_id.unwrap(),
+                    samples: barge.recent_window(BARGE_VERIFY_WINDOW_SECS),
+                    threshold: (settings_snap.speaker_threshold - BARGE_VERIFY_DELTA)
+                        .max(0.4),
+                });
+            }
+
+            // Ответы фоновых проверок: свежий «владелец» открывает окно
+            // триггера; «нет профиля» — постоянный пропуск проверки.
+            while let Ok(reply) = h.speaker_rx.try_recv() {
+                match reply {
+                    SpeakerReply::Verified { id, verdict } => {
+                        if Some(id) == barge_probe_id {
+                            barge_probe_id = None;
+                            match verdict {
+                                Verdict::Owner => {
+                                    barge_owner_until = Some(
+                                        now + Duration::from_millis(BARGE_OWNER_TTL_MS),
+                                    );
+                                }
+                                Verdict::NoProfile => barge_free_gate = true,
+                                _ => {}
+                            }
+                        }
+                        // Чужой id — устаревший ответ, пропускаем.
+                    }
+                    SpeakerReply::Speech(_) => {}
+                }
+            }
+
             let floor = speech_floor(settings_snap.silence_rms_threshold, noise_floor);
-            if barge.on_playback_chunk(&chunk_16k, now, floor) {
+            let owner_confirmed = barge_free_gate
+                || barge_owner_until.is_some_and(|until| now <= until);
+            if owner_confirmed && barge.on_playback_chunk(&chunk_16k, now, floor) {
                 barge_triggered = true;
-                println!("🎤 Перебивание: пользователь заговорил — глушу речь");
+                println!("🎤 Перебивание: голос владельца — глушу речь");
                 let _ = h.events.send(JarvisEvent::Log {
-                    message: "Перебивание: голос пользователя во время ответа".into(),
+                    message: "Перебивание: голос владельца во время ответа".into(),
                 });
                 // Мгновенная тишина + отмена остатка ответа — тот же путь,
                 // что у голосовой команды «замолчи».
@@ -729,6 +799,11 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             let keep_phrase = barge_triggered;
             barge_triggered = false;
             barge.reset_playback();
+            // Фоновые проверки перебивания завершены вместе с ответом.
+            barge_probe_id = None;
+            barge_last_probe = None;
+            barge_owner_until = None;
+            barge_free_gate = false;
             if keep_phrase {
                 while mic_rx.try_recv().is_ok() {}
                 // Хвост эха уже вырезан триггером: пре-ролл фразы важнее
@@ -898,7 +973,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                             }
                             SpeakerReply::Speech(None) => vad.note_failure(),
                             // Вердикт фильтра от прошлой фразы: текущая его не ждёт.
-                            SpeakerReply::Verified(_) => {}
+                            SpeakerReply::Verified { .. } => {}
                         }
                     }
 
@@ -989,7 +1064,10 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                                     as usize,
                             )
                             .to_vec();
+                            speaker_check_id = verify_id;
+                            verify_id = verify_id.wrapping_add(1);
                             let query = SpeakerQuery::Verify {
+                                id: speaker_check_id,
                                 samples: clean,
                                 threshold: settings_snap.speaker_threshold,
                             };
@@ -1047,6 +1125,18 @@ const BARGE_PREROLL_SECS: f32 = 0.35;
 const BARGE_RING_SECS: f32 = 3.0;
 /// Пауза между перебиваниями, мс.
 const BARGE_COOLDOWN_MS: u64 = 2000;
+
+// --- Подтверждение владельца для перебивания (speakrs) ---
+
+/// Как часто во время ответа проверять окно микрофона на голос владельца, мс.
+const BARGE_VERIFY_INTERVAL_MS: u64 = 350;
+/// Окно микрофона для фоновой проверки, сек: короче — шумный эмбеддинг.
+const BARGE_VERIFY_WINDOW_SECS: f32 = 2.0;
+/// Порог для подтверждения владельца: мягче основного (окно содержит эхо
+/// ответа вперемешку с голосом), но не ниже разумного пола.
+const BARGE_VERIFY_DELTA: f32 = 0.1;
+/// Сколько живёт вердикт «владелец» для триггера, мс.
+const BARGE_OWNER_TTL_MS: u64 = 1000;
 
 /// Детектор перебивания: во время речи Джарвиса следит за микрофоном поверх
 /// эха его собственного голоса и решает, заговорил ли пользователь.
@@ -1138,6 +1228,26 @@ impl BargeTracker {
             .skip(self.ring.len() - take)
             .copied()
             .collect()
+    }
+
+    /// Последние `secs` секунд кольца — окно для фоновой проверки владельца.
+    fn recent_window(&self, secs: f32) -> Vec<f32> {
+        let take = ((secs * wake::SAMPLE_RATE as f32) as usize).min(self.ring.len());
+        self.ring
+            .iter()
+            .skip(self.ring.len() - take)
+            .copied()
+            .collect()
+    }
+
+    /// Глубина кольца в секундах.
+    fn ring_secs(&self) -> f32 {
+        self.ring.len() as f32 / wake::SAMPLE_RATE as f32
+    }
+
+    /// Разогрев пройден: перебивание разрешено решать.
+    fn warmed_up(&self) -> bool {
+        (self.playback_samples as f32 / wake::SAMPLE_RATE as f32) >= BARGE_WARMUP_SECS
     }
 
     /// Речь Джарвиса закончилась без перебивания — сброс калибровки.
@@ -1848,10 +1958,47 @@ mod vad_tests {
     fn verdict_waits_through_stale_vad_replies() {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(SpeakerReply::Speech(None)).unwrap();
-        tx.send(SpeakerReply::Verified(Verdict::Stranger)).unwrap();
+        tx.send(SpeakerReply::Verified {
+            id: 7,
+            verdict: Verdict::Stranger,
+        })
+        .unwrap();
         assert_eq!(
-            wait_for_verdict(&rx, Duration::from_millis(100)),
+            wait_for_verdict(&rx, 7, Duration::from_millis(100)),
             Verdict::Stranger
+        );
+    }
+
+    #[test]
+    fn verdict_skips_stale_barge_replies_by_id() {
+        // Ответ фоновой проверки перебивания (id 3) не принимается за
+        // вердикт фразы (id 9): иначе перебивание прошлого ответа «признавало»
+        // чужую фразу владельцем.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(SpeakerReply::Verified {
+            id: 3,
+            verdict: Verdict::Owner,
+        })
+        .unwrap();
+        tx.send(SpeakerReply::Verified {
+            id: 9,
+            verdict: Verdict::Stranger,
+        })
+        .unwrap();
+        assert_eq!(
+            wait_for_verdict(&rx, 9, Duration::from_millis(100)),
+            Verdict::Stranger
+        );
+        // Ожидаемого id нет — fail-closed, а не чужой устаревший вердикт.
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        tx2.send(SpeakerReply::Verified {
+            id: 3,
+            verdict: Verdict::Owner,
+        })
+        .unwrap();
+        assert_eq!(
+            wait_for_verdict(&rx2, 9, Duration::from_millis(50)),
+            Verdict::Unverified("фильтр не ответил вовремя")
         );
     }
 
@@ -1860,7 +2007,7 @@ mod vad_tests {
         let (_tx, rx) = std::sync::mpsc::channel::<SpeakerReply>();
         // Воркер молчит — фраза не проходит, а не «пропущена фильтром».
         assert_eq!(
-            wait_for_verdict(&rx, Duration::from_millis(30)),
+            wait_for_verdict(&rx, 1, Duration::from_millis(30)),
             Verdict::Unverified("фильтр не ответил вовремя")
         );
     }

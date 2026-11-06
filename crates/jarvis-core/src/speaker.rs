@@ -55,8 +55,11 @@ pub enum Verdict {
 pub enum SpeakerQuery {
     /// Пересобрать профиль из образцов владельца.
     Rebuild,
-    /// Верифицировать сегмент; f32-порог косинусного сходства.
+    /// Верифицировать сегмент; f32-порог косинусного сходства. `id` —
+    /// метка запроса: движок различает ответы на проверку фразы и фоновые
+    /// проверки перебивания (устаревшие ответы пропускаются по id).
     Verify {
+        id: u64,
         samples: Vec<f32>,
         threshold: f32,
     },
@@ -76,8 +79,8 @@ pub struct SpeechProbeResult {
 
 /// Ответ воркера speakrs.
 pub enum SpeakerReply {
-    /// Вердикт фильтра говорящего.
-    Verified(Verdict),
+    /// Вердикт фильтра говорящего; `id` — метка запроса [`SpeakerQuery::Verify`].
+    Verified { id: u64, verdict: Verdict },
     /// Результат VAD; `None` — пайплайн недоступен или произошла ошибка.
     Speech(Option<SpeechProbeResult>),
 }
@@ -348,15 +351,20 @@ pub fn spawn_speaker_worker(
         let mut gate = gate;
         while let Ok(query) = rx.recv() {
             let answer = match (&mut gate, query) {
-                (None, SpeakerQuery::Rebuild) => SpeakerReply::Verified(Verdict::Unverified(
-                    "пайплайн проверки голоса не загрузился",
-                )),
-                (None, SpeakerQuery::Verify { .. }) => SpeakerReply::Verified(Verdict::Unverified(
-                    "пайплайн проверки голоса не загрузился",
-                )),
+                (None, SpeakerQuery::Rebuild) => SpeakerReply::Verified {
+                    id: 0,
+                    verdict: Verdict::Unverified("пайплайн проверки голоса не загрузился"),
+                },
+                (None, SpeakerQuery::Verify { id, .. }) => SpeakerReply::Verified {
+                    id,
+                    verdict: Verdict::Unverified("пайплайн проверки голоса не загрузился"),
+                },
                 (None, SpeakerQuery::SpeechProbe { .. }) => SpeakerReply::Speech(None),
-                (Some(_), SpeakerQuery::Rebuild) => SpeakerReply::Verified(Verdict::Owner),
-                (Some(g), SpeakerQuery::Verify { samples, threshold }) => {
+                (Some(_), SpeakerQuery::Rebuild) => SpeakerReply::Verified {
+                    id: 0,
+                    verdict: Verdict::Owner,
+                },
+                (Some(g), SpeakerQuery::Verify { id, samples, threshold }) => {
                     if invalidate.swap(false, Ordering::SeqCst) {
                         let events = dummy_events();
                         g.rebuild_profile(&events);
@@ -371,7 +379,7 @@ pub fn spawn_speaker_worker(
                     } else {
                         Verdict::NoProfile
                     };
-                    SpeakerReply::Verified(verdict)
+                    SpeakerReply::Verified { id, verdict }
                 }
                 (Some(g), SpeakerQuery::SpeechProbe { id, samples }) => {
                     let total_secs = samples.len() as f32 / TARGET_RATE as f32;
