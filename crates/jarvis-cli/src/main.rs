@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex, RwLock};
 fn main() -> Result<()> {
     println!("🎙️ Запуск Jarvis CLI ...");
 
+    // Модели живут в системной папке программы; старые переносятся туда один раз.
+    jarvis_core::paths::migrate_models();
     let models_dir = paths::models_dir();
     std::fs::create_dir_all(&models_dir)?;
 

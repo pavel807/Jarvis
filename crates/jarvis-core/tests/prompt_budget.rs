@@ -18,11 +18,15 @@ fn repo_root() -> PathBuf {
 }
 
 /// Пути к данным в тестах не должны зависеть от текущего каталога: модели
-/// лежат в корне репозитория, а не там, откуда запущен cargo.
+/// лежат в корне репозитория, а не там, откуда запущен cargo. Модели идут в
+/// системную папку программы (не за JARVIS_HOME), поэтому задаём её отдельно.
 fn use_repo_as_home() {
     if std::env::var_os("JARVIS_HOME").is_none() {
         // Однопоточная инициализация до первого обращения к путям.
         unsafe { std::env::set_var("JARVIS_HOME", repo_root()) };
+    }
+    if std::env::var_os("JARVIS_MODELS_DIR").is_none() {
+        unsafe { std::env::set_var("JARVIS_MODELS_DIR", repo_root().join("models")) };
     }
 }
 

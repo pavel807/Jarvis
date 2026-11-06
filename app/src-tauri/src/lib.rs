@@ -251,6 +251,9 @@ fn spawn_engine(
         });
         spawn_llm_loader(&shared_engine.shared_llm, &events_tx);
 
+        // Модели живут в системной папке программы; старые (рядом с
+        // настройками) переносятся туда один раз.
+        paths::migrate_models();
         let models_dir = paths::models_dir();
         let model = match Stt::load(&models_dir) {
             Ok(model) => model,
