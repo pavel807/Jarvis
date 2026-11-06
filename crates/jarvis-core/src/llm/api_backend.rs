@@ -190,7 +190,7 @@ impl ApiEngine {
         }
         // Хвост, который не дорос до конца предложения.
         if !buf.trim().is_empty() {
-            let tail: String = buf.drain(..).collect();
+            let tail = std::mem::take(&mut buf);
             if streaming::speakable(&tail) {
                 on_sentence(&tail);
             }
