@@ -106,15 +106,18 @@ pub struct SpeakerGate {
 }
 
 impl SpeakerGate {
-    /// Загрузка пайплайна. На macOS — CoreML (нативный, FP32), при недоступности — CPU.
+    /// Загрузка пайплайна. Предпочтение — CPU: вся наша нагрузка после
+    /// оконной верификации — короткие 3-с прогоны, а замер
+    /// (`examples/speaker_bench.rs`) на этой длине даёт CPU ~98 мс против
+    /// CoreML ~229 мс (диспетч-оверхед CoreML на коротком входе, тот же
+    /// эффект, что у FastConformer). CoreML остаётся запасным.
     pub fn load(events: &crate::events::EventTx) -> Option<Self> {
-        // CoreML variant существует только при feature `coreml`, которая
-        // подключается для macOS в Cargo.toml. Остальные ОС компилируют
-        // чистый CPU-путь и не тянут Apple-фреймворки.
+        // Обе фичи (cpu/coreml) включены для macOS в Cargo.toml; остальные ОС
+        // компилируют чистый CPU-путь и не тянут Apple-фреймворки.
         #[cfg(target_os = "macos")]
         let modes: &[(&str, ExecutionMode)] = &[
-            ("CoreML", ExecutionMode::CoreMl),
             ("CPU", ExecutionMode::Cpu),
+            ("CoreML", ExecutionMode::CoreMl),
         ];
         #[cfg(not(target_os = "macos"))]
         let modes: &[(&str, ExecutionMode)] = &[("CPU", ExecutionMode::Cpu)];
@@ -142,6 +145,10 @@ impl SpeakerGate {
     /// Пересобрать профиль из записей владельца: короткие образцы wake word
     /// (`train/jarvis`, метка `jarvis`) и диктанты (`train/voice`, метка
     /// `voice`). Возвращает число использованных записей.
+    ///
+    /// Профиль кэшируется на диск: если записи не менялись (отпечаток совпал),
+    /// пересборка мгновенна — первая фраза после запуска не ждёт десятков
+    /// прогонов пайплайна.
     pub fn rebuild_profile(&mut self, events: &EventTx) -> usize {
         self.profile = None;
         self.profile_records = 0;
@@ -171,6 +178,18 @@ impl SpeakerGate {
             return 0;
         }
 
+        // Кэш: тот же набор файлов (имя + размер + mtime) → мгновенная загрузка.
+        let fingerprint = sources_fingerprint(&records);
+        if self.load_profile_cache(&fingerprint) {
+            let _ = events.send(JarvisEvent::Log {
+                message: format!(
+                    "Профиль голоса: загружен из кэша ({} записей) — пересборка не нужна",
+                    self.profile_records
+                ),
+            });
+            return self.profile_records;
+        }
+
         let mut vectors: Vec<Vec<f32>> = Vec::new();
         let mut used_records = 0usize;
         for (path, _) in &records {
@@ -178,12 +197,12 @@ impl SpeakerGate {
             let Ok(samples) = read else { continue };
             // Тишина по краям записи размывает средний эмбеддинг: сравнение
             // идёт только по звучавшей части. У длинного диктанта берём
-            // середину: первые 60 секунд звучавшей речи дают достаточно окон,
-            // а время пересборки остаётся ограниченным.
+            // середину: 24 секунд звучавшей речи дают 8 окон — достаточно
+            // для точного профиля, а пересборка остаётся быстрой.
             let voiced = trim_silence(&samples, TARGET_RATE);
-            let voiced: &[f32] = if voiced.len() > TARGET_RATE * 60 {
+            let voiced: &[f32] = if voiced.len() > TARGET_RATE * 24 {
                 let mid = voiced.len() / 2;
-                let half = TARGET_RATE * 30;
+                let half = TARGET_RATE * 12;
                 &voiced[mid - half..mid + half]
             } else {
                 voiced
@@ -229,6 +248,7 @@ impl SpeakerGate {
         }
         self.profile = Some(profile);
         self.profile_records = used_records;
+        self.save_profile_cache(&fingerprint, &vectors);
         let _ = events.send(JarvisEvent::Log {
             message: format!(
                 "Профиль голоса владельца построен: {} записей, {} окон",
@@ -345,7 +365,9 @@ impl SpeakerGate {
                 }
             }
         }
-        if bad_frames > 0 {
+        if bad_frames > 4 {
+            // 1–2 битых фрейма на окно — норма (паддинг/граница окна); шум
+            // в лог не пишем, аномалии видны.
             eprintln!("🎙️ speakrs: {} нечисловых фреймов эмбеддинга отброшено", bad_frames);
         }
         if pool.is_empty() || dim == 0 {
@@ -400,10 +422,17 @@ pub fn spawn_speaker_worker(
                     verdict: Verdict::Unverified("пайплайн проверки голоса не загрузился"),
                 },
                 (None, SpeakerQuery::SpeechProbe { .. }) => SpeakerReply::Speech(None),
-                (Some(_), SpeakerQuery::Rebuild) => SpeakerReply::Verified {
-                    id: 0,
-                    verdict: Verdict::Owner,
-                },
+                (Some(g), SpeakerQuery::Rebuild) => {
+                    // Стартовая пересборка: с кэшем мгновенна, без — полная.
+                    // Выполняется СЕЙЧАС, чтобы первая фраза владельца не
+                    // ждала десятков прогонов пайплайна в очереди.
+                    let events = dummy_events();
+                    g.rebuild_profile(&events);
+                    SpeakerReply::Verified {
+                        id: 0,
+                        verdict: Verdict::Owner,
+                    }
+                }
                 (Some(g), SpeakerQuery::Verify { id, samples, threshold }) => {
                     if invalidate.swap(false, Ordering::SeqCst) {
                         let events = dummy_events();
@@ -508,6 +537,96 @@ fn normalize(v: &[f32]) -> Vec<f32> {
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+// --- Кэш профиля на диске ---
+
+/// Версия формата кэша профиля.
+const PROFILE_CACHE_VERSION: u32 = 2;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ProfileCache {
+    version: u32,
+    /// Отпечаток источников: (имя файла, размер + mtime) — изменение любого
+    /// образца инвалидирует кэш.
+    sources: Vec<(String, u64)>,
+    vectors: Vec<Vec<f32>>,
+    records: usize,
+}
+
+/// Отпечаток набора записей владельца: любое добавление/удаление/правка
+/// образца меняет его.
+fn sources_fingerprint(records: &[(std::path::PathBuf, f64)]) -> Vec<(String, u64)> {
+    records
+        .iter()
+        .map(|(path, _)| {
+            let meta = std::fs::metadata(path)
+                .map(|m| m.len().wrapping_mul(1_000_003).wrapping_add(m.modified().map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                }).unwrap_or(0)))
+                .unwrap_or(0);
+            (
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                meta,
+            )
+        })
+        .collect()
+}
+
+fn profile_cache_path() -> std::path::PathBuf {
+    crate::wake_train::voice_samples_dir().join("profile.cache")
+}
+
+impl SpeakerGate {
+    /// Загрузить профиль из кэша, если отпечаток источников совпал.
+    fn load_profile_cache(&mut self, fingerprint: &[(String, u64)]) -> bool {
+        let Ok(raw) = std::fs::read(profile_cache_path()) else {
+            return false;
+        };
+        let Ok(cache) = serde_json::from_str::<ProfileCache>(&String::from_utf8_lossy(&raw)) else {
+            return false;
+        };
+        if cache.version != PROFILE_CACHE_VERSION || cache.sources != fingerprint {
+            return false;
+        }
+        if cache.vectors.is_empty() || cache.records == 0 {
+            return false;
+        }
+        let profile = normalize(&mean_of(&cache.vectors));
+        if !profile.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        self.profile = Some(profile);
+        self.profile_records = cache.records;
+        true
+    }
+
+    /// Сохранить профиль в кэш (ошибки не критичны: пересборка просто
+    /// повторится при следующем старте).
+    fn save_profile_cache(&self, fingerprint: &[(String, u64)], vectors: &[Vec<f32>]) {
+        let cache = ProfileCache {
+            version: PROFILE_CACHE_VERSION,
+            sources: fingerprint.to_vec(),
+            vectors: vectors.to_vec(),
+            records: self.profile_records,
+        };
+        let Ok(json) = serde_json::to_string(&cache) else {
+            return;
+        };
+        let path = profile_cache_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = path.with_extension("cache.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
 }
 
 /// Режет звучавшую часть на канонические окна: полные без перекрытия,
@@ -695,5 +814,52 @@ mod tests {
         let poisoned = vec![f32::NAN, 1.0, 2.0, 3.0];
         let normalized = normalize(&mean_of(&[poisoned, vec![1.0, 1.0, 1.0, 1.0]]));
         assert!(normalized.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn windows_of_pads_short_input_to_canonical_length() {
+        // Короткая фраза: одно окно канонической длины (добивка нулями) —
+        // домен сравнения единый с профилем.
+        let voiced = vec![0.5f32; TARGET_RATE / 2]; // 0.5 с
+        let windows = windows_of(&voiced);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].len(), WINDOW_SAMPLES);
+        assert_eq!(windows[0][0], 0.5);
+        assert_eq!(windows[0][TARGET_RATE / 2], 0.0);
+    }
+
+    #[test]
+    fn windows_of_splits_long_input_and_keeps_big_tail() {
+        // 7 с: два полных окна + хвост 1 с (< половины окна) отбрасывается.
+        let seven = vec![0.1f32; TARGET_RATE * 7];
+        let windows = windows_of(&seven);
+        assert_eq!(windows.len(), 2);
+        assert!(windows.iter().all(|w| w.len() == WINDOW_SAMPLES));
+
+        // Хвост ≥ половины окна включается с добивкой (4.5 с = 3 с + 1.5 с).
+        let four_and_half = vec![0.1f32; TARGET_RATE * 4 + TARGET_RATE / 2];
+        let windows = windows_of(&four_and_half);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[1].len(), WINDOW_SAMPLES);
+        assert_eq!(windows[1][WINDOW_SAMPLES - 1], 0.0);
+    }
+
+    #[test]
+    fn profile_cache_fingerprint_tracks_changes() {
+        // Отпечаток меняется при изменении набора файлов или их содержимого.
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.wav");
+        std::fs::write(&a, b"first").unwrap();
+        let records = vec![(a.clone(), 0.0)];
+        let before = sources_fingerprint(&records);
+        std::fs::write(&a, b"second-longer-content").unwrap();
+        let after = sources_fingerprint(&records);
+        assert_ne!(before, after, "правка файла должна менять отпечаток");
+        let removed = vec![(dir.path().join("b.wav"), 0.0)];
+        assert_ne!(
+            sources_fingerprint(&removed),
+            before,
+            "другой набор файлов — другой отпечаток"
+        );
     }
 }

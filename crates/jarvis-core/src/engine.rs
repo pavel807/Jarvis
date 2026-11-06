@@ -389,6 +389,9 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 
     let mut has_speech_started = false;
     let mut silence_samples = 0;
+    // Выдержка тихой речи ниже жёсткого порога: сколько сэмплов подряд
+    // выше мягкого порога — после неё фраза начинается.
+    let mut quiet_streak = 0usize;
     // Сколько сэмплов было именно речью (а не тишиной) в текущей фразе.
     let mut voiced_samples = 0usize;
     // Фильтр говорящего включён для текущей фразы: сегмент ушёл на
@@ -522,10 +525,15 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                     // консоли чужая фраза выглядела принятой, хотя она отброшена.
 
                     // Вердикт фильтра говорящего: чужая речь не идёт ни в
-                    // LLM, ни в команды — движок просто ждёт дальше.
+                    // LLM, ни в команды — движок просто ждёт дальше. Запас до
+                    // 4 с: первая фраза после записи нового образца может
+                    // застать пересборку профиля (без кэша — ~2 с).
                     if speaker_check_sent {
-                        let verdict =
-                            wait_for_verdict(&h.speaker_rx, speaker_check_id, Duration::from_millis(2000));
+                        let verdict = wait_for_verdict(
+                            &h.speaker_rx,
+                            speaker_check_id,
+                            Duration::from_millis(4000),
+                        );
                         speaker_check_sent = false;
                         match verdict {
                             Verdict::Owner => {}
@@ -930,8 +938,18 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 
                 // Порог речи: не ниже настройки и заметно выше фонового шума.
                 let speech_floor = speech_floor(settings_snap.silence_rms_threshold, noise_floor);
+                // Мягкий порог старта: тихая речь (тише жёсткого порога, но
+                // заметно выше фона) начинает фразу после короткой выдержки —
+                // мусор до конца отсекает VAD speakrs (он нейронный и тихую
+                // речь видит) и лимит минимальной фразы.
+                let start_floor = quiet_start_floor(
+                    speech_floor,
+                    noise_floor,
+                    settings_snap.silence_rms_threshold,
+                );
 
                 if chunk_rms >= speech_floor {
+                    quiet_streak = 0;
                     voiced_samples += chunk_16k.len();
                     if !has_speech_started {
                         has_speech_started = true;
@@ -948,7 +966,24 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                     // пользователь мог продолжить фразу.
                     vad.tail_secs = None;
                     vad.tail_at = None;
+                } else if !has_speech_started && chunk_rms >= start_floor {
+                    // Тихая речь: копим выдержку, затем начинаем фразу.
+                    quiet_streak += chunk_16k.len();
+                    if quiet_streak >= (QUIET_START_SECS * wake::SAMPLE_RATE as f32) as usize {
+                        quiet_streak = 0;
+                        has_speech_started = true;
+                        vad.reset_phrase();
+                        let hist_len = audio_history.len();
+                        let take_samples = hist_len.min(preroll_samples);
+                        if take_samples > 0 {
+                            let start_idx = hist_len - take_samples;
+                            command_buffer.extend(audio_history.iter().skip(start_idx).copied());
+                        }
+                        voiced_samples = command_buffer.len();
+                        silence_samples = 0;
+                    }
                 } else {
+                    quiet_streak = 0;
                     // Тишина: обновляем оценку фона (только когда не говорим),
                     // чтобы порог подстраивался под комнату.
                     if !has_speech_started {
@@ -1044,10 +1079,13 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                         }
 
                         let pad = (wake::SAMPLE_RATE as f32 * 0.2) as usize;
-                        let mut padded = Vec::with_capacity(command_buffer.len() + pad * 2);
+                        // Тихая фраза усиливается до целевого уровня: ASR и
+                        // эмбеддинги обучены на речи нормальной громкости.
+                        let voiced_phrase = normalize_gain(&command_buffer);
+                        let mut padded = Vec::with_capacity(voiced_phrase.len() + pad * 2);
 
                         padded.extend(std::iter::repeat_n(0.0f32, pad));
-                        padded.extend_from_slice(&command_buffer);
+                        padded.extend_from_slice(&voiced_phrase);
                         padded.extend(std::iter::repeat_n(0.0f32, pad));
 
                         // Фильтр говорящего: сегмент уходит на проверку голоса
@@ -1293,6 +1331,46 @@ fn verify_slice<'a>(padded: &'a [f32], pad: usize, preroll: usize, min_samples: 
 /// ниже фонового шума комнаты с запасом.
 fn speech_floor(threshold: f32, noise_floor: f32) -> f32 {
     threshold.max(noise_floor * NOISE_MARGIN)
+}
+
+// --- Тихая речь ---
+
+/// Сколько секунд речи выше мягкого порога начинают фразу: меньше — шорохи,
+/// больше — первые слова тихой фразы теряются.
+const QUIET_START_SECS: f32 = 0.35;
+
+/// Мягкий порог старта для тихой речи: заметно выше фона комнаты, но ниже
+/// жёсткого порога. Мусор, пролезший через него, отсекает VAD speakrs
+/// (нейронный: тихую речь видит, шорохи — нет) и лимит минимальной фразы.
+fn quiet_start_floor(speech_floor: f32, noise_floor: f32, threshold: f32) -> f32 {
+    let by_noise = noise_floor * 1.2;
+    let by_setting = threshold * 0.5;
+    speech_floor.min(by_noise).max(by_setting).max(noise_floor * 1.05)
+}
+
+// --- Усиление тихой фразы (AGC) ---
+
+/// Целевой уровень фразы (RMS) после усиления.
+const AGC_TARGET_RMS: f32 = 0.09;
+/// Потолок усиления: тише этого не поднимаем, чтобы не вытягивать шум.
+const AGC_MAX_GAIN: f32 = 8.0;
+
+/// Приведение громкости фразы к целевому уровню: ASR и эмбеддинги обучены
+/// на речи нормальной громкости, тихий вход давал «шум» и слабое сходство.
+/// Только усиление (громкая речь не ослабляется), приращение ограничено.
+fn normalize_gain(samples: &[f32]) -> Vec<f32> {
+    let rms = calculate_rms(samples);
+    if !rms.is_finite() || rms < 1e-4 {
+        return samples.to_vec();
+    }
+    let gain = (AGC_TARGET_RMS / rms).min(AGC_MAX_GAIN).max(1.0);
+    if gain <= 1.0 + f32::EPSILON {
+        return samples.to_vec();
+    }
+    samples
+        .iter()
+        .map(|s| (s * gain).clamp(-1.0, 1.0))
+        .collect()
 }
 
 /// Оценка фонового шума: экспоненциальное сглаживание, обновляется только
@@ -1853,6 +1931,39 @@ mod vad_tests {
 
         // Без перебивания срез = фраза с хвостовым паддингом (без ведущего).
         assert_eq!(verify_slice(&padded, pad, 0, RATE).len(), padded.len() - pad);
+    }
+
+    #[test]
+    fn quiet_start_floor_is_between_noise_and_speech() {
+        // Тихая комната (фон 0.005): жёсткий порог 0.018, мягкий — заметно
+        // ниже него и выше фона: тихая речь 0.012 начинает фразу.
+        let floor = quiet_start_floor(0.018, 0.005, 0.018);
+        assert!(floor < 0.018, "мягкий порог ниже жёсткого: {floor}");
+        assert!(floor > 0.005, "мягкий порог выше фона: {floor}");
+
+        // Шумная комната (фон 0.012): мягкий порог не даёт шуму стартовать.
+        let floor = quiet_start_floor(0.0216, 0.012, 0.018);
+        assert!(floor > 0.012 * 1.05, "порог выше фона с запасом: {floor}");
+    }
+
+    #[test]
+    fn agc_amplifies_quiet_and_leaves_loud() {
+        // Тихая фраза (RMS ~0.01) усиливается к целевому уровню.
+        let quiet = vec![0.01f32; 16_000];
+        let boosted = normalize_gain(&quiet);
+        let new_rms = calculate_rms(&boosted);
+        assert!(
+            (new_rms - AGC_TARGET_RMS).abs() < AGC_TARGET_RMS * 0.2,
+            "RMS после усиления ≈ целевому: {new_rms}"
+        );
+
+        // Громкая речь не ослабляется и не клиппуется принудительно.
+        let loud = vec![0.5f32; 16_000];
+        assert_eq!(normalize_gain(&loud), loud);
+
+        // Цифровая тишина возвращается как есть (усилить тишину = усилить шум).
+        let silence = vec![0.0f32; 16_000];
+        assert!(normalize_gain(&silence).iter().all(|s| *s == 0.0));
     }
 
     #[test]
