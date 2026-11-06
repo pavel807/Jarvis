@@ -51,7 +51,7 @@ pub fn alias(word: &str) -> Option<&'static str> {
 // AppleScript
 // =========================================================================
 
-fn osascript(script: &str) -> Result<String, String> {
+pub(crate) fn osascript(script: &str) -> Result<String, String> {
     // 1. Прямой путь: NSAppleScript в процессе Джарвиса. Системный запрос на
     //    автоматизацию приходит от самого приложения — его можно выдать один
     //    раз, и он действует на все последующие скрипты.
@@ -89,7 +89,7 @@ fn osascript(script: &str) -> Result<String, String> {
 /// Отказ macOS на управление приложением почти всегда означает отсутствие
 /// разрешения, а не поломку. Переводим типовые случаи на человеческий и
 /// сразу подсказываем, где включить.
-fn friendly_access_error(err: &str) -> String {
+pub(crate) fn friendly_access_error(err: &str) -> String {
     let lower = err.to_lowercase();
     if lower.contains("assistive access") || lower.contains("assistiveaccess") {
         "macOS не разрешает управлять окнами. Системные настройки → Конфиденциальность и безопасность → Универсальный доступ — включи Jarvis".into()
@@ -130,7 +130,7 @@ fn permission_hint() -> String {
 }
 
 /// Экранирование строки для AppleScript-литерала.
-fn applescript_escape(s: &str) -> String {
+pub(crate) fn applescript_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 

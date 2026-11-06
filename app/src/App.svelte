@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { store, go, initEvents, toast, NAV_PAGES, SUB_PAGES } from "./store.svelte";
+  import { store, go, initEvents, toast, settings, NAV_PAGES, SUB_PAGES } from "./store.svelte";
   import { INTRO_DURATION } from "./lib/reactor/intro";
   import Header from "./components/Header.svelte";
   import SystemStatus from "./components/SystemStatus.svelte";
@@ -12,6 +12,8 @@
   import SettingsPage from "./pages/SettingsPage.svelte";
   import Commands from "./pages/Commands.svelte";
   import Voice from "./pages/Voice.svelte";
+  import VoiceTrain from "./pages/VoiceTrain.svelte";
+  import Onboarding from "./pages/Onboarding.svelte";
   import WakeWord from "./pages/WakeWord.svelte";
   import Help from "./pages/Help.svelte";
 
@@ -22,10 +24,10 @@
    */
 
   const NAV = [
-    { key: "home", label: "ГЛАВНАЯ", icon: "core" },
-    { key: "memory", label: "ПАМЯТЬ", icon: "memory" },
-    { key: "system", label: "СИСТЕМА", icon: "activity" },
-    { key: "settings", label: "НАСТРОЙКИ", icon: "gear" },
+    { key: "home", label: "Главная", icon: "core" },
+    { key: "memory", label: "Память", icon: "memory" },
+    { key: "system", label: "Система", icon: "activity" },
+    { key: "settings", label: "Настройки", icon: "gear" },
   ] as const;
 
   const isSubPage = $derived(SUB_PAGES.includes(store.page));
@@ -99,6 +101,8 @@
       <Commands />
     {:else if store.page === "voice"}
       <Voice />
+    {:else if store.page === "voicetrain"}
+      <VoiceTrain />
     {:else if store.page === "wakeword"}
       <WakeWord />
     {:else if store.page === "help"}
@@ -149,5 +153,10 @@
       </button>
     </div>
   </div>
+{/if}
+
+<!-- Мастер первого запуска: после бут-анимации, пока setup_done = false. -->
+{#if !store.booting && !settings.setup_done}
+  <Onboarding />
 {/if}
 

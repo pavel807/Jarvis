@@ -1,0 +1,13 @@
+# Пример личных настроек Jarvis. Реальный settings.toml не хранится в git
+# (содержит API-ключ) и создаётся автоматически при первом запуске —
+# значения по умолчанию см. в crates/jarvis-core/src/settings.rs.
+# Ключ облака вводится в интерфейсе: Настройки → Модель.
+
+llm_backend = "uzu"
+llm_model = "qwen3.5-2b-mirai-l"
+api_preset = "yandex"
+api_base_url = "https://llm.api.cloud.yandex.net/v1"
+api_key = ""
+api_model = "yandexgpt-lite"
+api_folder_id = ""
+asr_hf_repo = "pavel00002013/fastconformer-ru"

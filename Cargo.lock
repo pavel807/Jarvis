@@ -3644,6 +3644,7 @@ dependencies = [
  "flate2",
  "hf-hub 1.0.0",
  "hound",
+ "image",
  "objc2",
  "objc2-foundation",
  "open",

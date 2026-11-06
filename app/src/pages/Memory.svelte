@@ -2,7 +2,6 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { store, toast } from "../store.svelte";
-  import { settings } from "../store.svelte";
   import AppIcon from "../components/AppIcon.svelte";
   import Markdown from "../components/Markdown.svelte";
 
@@ -86,9 +85,9 @@
   }
 
   const metaFor = (turn: (typeof store.history)[number]) => {
-    if (turn.role === "user") return { cls: "is-user", label: turn.source === "text" ? "ВВОД" : "ГОЛОС" };
-    if (turn.role === "note") return { cls: "is-action", label: "СИСТЕМА" };
-    if (turn.source === "action") return { cls: "is-action", label: "ДЕЙСТВИЕ" };
+    if (turn.role === "user") return { cls: "is-user", label: turn.source === "text" ? "ввод" : "голос" };
+    if (turn.role === "note") return { cls: "is-action", label: "система" };
+    if (turn.source === "action") return { cls: "is-action", label: "действие" };
     return { cls: "is-ai", label: "J.A.R.V.I.S" };
   };
 </script>
@@ -126,22 +125,6 @@
       {/each}
     </div>
   {/if}
-
-  <!-- Память тем -->
-  <div class="section-title">Память тем</div>
-  <div class="card card--flush">
-    <div class="row-item">
-      <span class="row-item__text">
-        <span class="row-item__title">Помнить незакрытые темы</span>
-        <span class="row-item__hint">
-          «Мы это забыли» — Джарвис вернёт разговор к теме, от которой отвлеклись
-        </span>
-      </span>
-      <span class="badge" class:badge--accent={settings.topic_memory}>
-        {settings.topic_memory ? "ВКЛ" : "ВЫКЛ"}
-      </span>
-    </div>
-  </div>
 
   <!-- Задачник -->
   <div class="section-title">Задачник</div>

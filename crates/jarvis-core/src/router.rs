@@ -75,6 +75,19 @@ const UNAMBIGUOUS: &[&str] = &[
     "запомни",
     "прочитай буфер",
     "скопируй в буфер",
+    "нажми",
+    "нажать",
+    "введи",
+    "ввести",
+    "напечатай",
+    "напечатать",
+    "набери",
+    "вставь",
+    "вставить",
+    "выдели",
+    "напиши текст",
+    "кликни",
+    "прокрути",
     "выключи компьютер",
     "отправь сообщение",
     "напиши сообщение",
@@ -152,6 +165,11 @@ const ACTION_NOUNS: &[&str] = &[
     "плеер",
     "число",
     "время",
+    "клавишу",
+    "клавиатуру",
+    "мышь",
+    "курсор",
+    "текст",
 ];
 
 /// Абстрактные понятия: с ними действие невозможно физически. Именно из-за
@@ -567,21 +585,20 @@ pub fn calendar_question(text: &str) -> bool {
 /// страховка. Даже если срез интента не угадан, сделать работу будет чем.
 const CORE_TOOLS: &str = "\
   shell {\"cmd\":\"ls ~/Downloads\"} — терминал: всё, для чего нет своего инструмента
-  open_app {\"name\":\"Google Chrome\"} — запустить приложение (имя как в системе)
-  quit_app {\"name\":\"Telegram\"} — полностью закрыть приложение (не окно)
-  open_url {\"url\":\"wikipedia.org\"} — открыть сайт
-  open_path {\"path\":\"~/Downloads\"} — открыть папку или файл
+  open_app {\"name\":\"Chrome\"} — запустить приложение; quit_app {\"name\":\"Telegram\"} — закрыть приложение
+  open_url {\"url\":\"wikipedia.org\",\"browser\":\"Safari\"} — открыть сайт; open_path {\"path\":\"~/Downloads\"} — папку/файл
   file_read {\"path\":\"src/main.rs\",\"offset\":1,\"limit\":80} — прочитать файл строками
-  file_write {\"path\":\"note.txt\",\"content\":\"текст\"} — создать или перезаписать файл
-  file_append {\"path\":\"note.txt\",\"content\":\"ещё строка\"} — дописать в конец
-  file_edit {\"path\":\"src/main.rs\",\"old\":\"было\",\"new\":\"стало\"} — заменить фрагмент; текст для old бери из file_read
-  file_list {\"path\":\".\"} — что лежит в папке
-  file_search {\"query\":\"текст\",\"path\":\".\"} — найти строки во всех файлах
-  file_glob {\"pattern\":\"*.rs\",\"path\":\".\"} — найти файлы по маске имени
+  file_write {\"path\":\"note.txt\",\"content\":\"текст\"} — создать; file_append {\"path\":\"note.txt\",\"content\":\"строка\"} — дописать
+  file_edit {\"path\":\"src/main.rs\",\"old\":\"было\",\"new\":\"стало\"} — заменить фрагмент; old бери из file_read
+  file_list {\"path\":\".\"} / file_search {\"query\":\"текст\",\"path\":\".\"} / file_glob {\"pattern\":\"*.rs\",\"path\":\".\"} — файлы
   web_search {\"query\":\"курс доллара\"} — найти в интернете
-  system_info — версия системы, процессор, память
-  notify {\"title\":\"..\",\"body\":\"..\"} — уведомление
-  clipboard_read / clipboard_write {\"text\":\"..\"} — буфер обмена";
+  system_info — система; notify {\"title\":\"..\",\"body\":\"..\"} — уведомление; clipboard_write {\"text\":\"..\"} — буфер
+  desktop_input {\"action\":\"type_text\",\"text\":\"Привет\"} — клавиатура/мышь: type_text | press_key | hotkey | click | move | scroll
+  ui_read — прочитать экран: приложение, окна, кнопки, поля, меню
+  ui_click {\"role\":\"button\",\"name\":\"Продолжить\",\"app\":\"Имя\"} — нажать элемент по имени (роли: button, checkbox, radio button, pop up button, link)
+  ui_type {\"name\":\"Поиск\",\"text\":\"запрос\",\"submit\":true} — вписать текст в поле по имени
+  ui_menu {\"app\":\"TextEdit\",\"path\":[\"Файл\",\"Сохранить\"]} — пункт меню
+  wait {\"seconds\":2} — пауза между шагами";
 
 /// Срезы инструментов: в промпт попадают только те, что нужны по интенту.
 /// Полный список из 32 инструментов стоил 940 токенов и был для модели 0.8B
@@ -615,8 +632,22 @@ const TOOL_SLICES: &[(&str, &[&str], &str)] = &[
             "анимаци",
             "реактор",
             "застав",
+            "клавиатур",
+            "клавиш",
+            "сочетание клавиш",
+            "горячие клавиши",
+            "введи текст",
+            "напечатай",
+            "набери",
+            "вставь",
+            "выдели",
+            "мышь",
+            "мышкой",
+            "курсор",
+            "прокрути",
+            "прокрутка",
         ],
-        "  window {\"action\":\"minimize\",\"app\":\"имя\"} — окна: minimize=свернуть, maximize=развернуть, fullscreen=экран, close, focus, list. Без app — Джарвис\n  open_utils {\"tab\":\"timer\"} — открыть окно утилит; tab: timer | stopwatch | calendar (без tab — таймер)\n  close_utils — закрыть окно утилит\n  play_reactor_intro — показать сборку реактора ещё раз (анимация интерфейса)\n  set_volume {\"percent\":50} / set_brightness {\"percent\":70}\n  screenshot / lock_screen / sleep",
+        "  window {\"action\":\"minimize\",\"app\":\"имя\"} — окна: minimize=свернуть, maximize=развернуть, fullscreen=экран, close, focus, list. Без app — Джарвис\n  open_utils {\"tab\":\"timer\"} — открыть окно утилит; tab: timer | stopwatch | calendar (без tab — таймер)\n  close_utils — закрыть окно утилит\n  play_reactor_intro — показать сборку реактора ещё раз (анимация интерфейса)\n  set_volume {\"percent\":50} / set_brightness {\"percent\":70}\n  desktop_input {\"action\":\"type_text\",\"text\":\"текст\"} — ввод текста\n  desktop_input {\"action\":\"press_key\",\"key\":\"ENTER\"} — клавиша\n  desktop_input {\"action\":\"hotkey\",\"keys\":[\"CTRL\",\"S\"]} — сочетание\n  desktop_input {\"action\":\"scroll\",\"direction\":\"down\",\"amount\":3} — прокрутка\n  screenshot / lock_screen / sleep",
     ),
     (
         "таймеры",
@@ -677,6 +708,36 @@ const TOOL_SLICES: &[(&str, &[&str], &str)] = &[
         &["задач", "задачник", "to-do", "туду", "чеклист"],
         "  task_add {\"text\":\"..\"} / task_list / task_run {\"id\":N} / task_done {\"id\":N} / task_remove {\"id\":N} / task_open — задачник",
     ),
+    (
+        "экран: элементы и действия",
+        &[
+            "что на экране",
+            "что открыто",
+            "что видишь",
+            "посмотри на экран",
+            "найди на экране",
+            "прочитай с экрана",
+            "проверь экран",
+            "что написано на экране",
+            "сделай на экране",
+            "на экране",
+            "кнопк",
+            "флажок",
+            "чекбокс",
+            "галочку",
+            "поле",
+            "заполни",
+            "впиши",
+            "элемент",
+            "меню",
+            "нажми",
+            "нажать",
+            "клик",
+            "кликни",
+            "клацни",
+        ],
+        "  ui_read / ui_click / ui_type / ui_menu — сперва прочитай экран, затем кликай, вписывай и выбирай меню ПО ИМЕНИ элемента (см. ядро)\n  desktop_input {\"action\":\"click\",\"x\":500,\"y\":300} — клик мышью ТОЛЬКО по точным координатам от пользователя; координаты наугад запрещены\n  desktop_input {\"action\":\"hotkey\",\"keys\":[\"CTRL\",\"S\"]} — сочетание клавиш",
+    ),
 ];
 
 /// Собирает список инструментов под конкретную просьбу: ядро всегда, плюс
@@ -718,25 +779,19 @@ pub fn action_prompt_for(prompt: &str) -> String {
 
     format!(
         r#"Ты — исполнитель команд на компьютере пользователя ({os}). Сегодня {today}.
-Рабочая папка: {cwd}. Относительные пути — от неё; `cd` в shell её меняет.
-Действие — ровно один блок, без слов вокруг: <tool>{{"name":"ИМЯ","args":{{...}}}}</tool>
-Имя — только из списка. Обычный вопрос — короткий текстовый ответ без блока.
+Рабочая папка: {cwd}; относительные пути — от неё.
+Действие — ровно один блок без слов вокруг: <tool>{{"name":"ИМЯ","args":{{...}}}}</tool>
+Имя — только из списка; обычный вопрос — короткий текстовый ответ без блока.
 
 ИНСТРУМЕНТЫ:
 {tools}{commands_block}
 ПРАВИЛА:
-1. Не выдумывай инструменты, домены, пути. Домена не знаешь — web_search, затем open_url по адресу ИЗ ВЫДАЧИ (корень сайта); пусто — ответь текстом.
-2. «открой X»: программа (сафари, премьер, зед, excel) → open_app; сервис/магазин/сайт («секшоп»≈сдэк) → run_command по КОМАНДАМ, иначе web_search → open_url.
-3. «закрой X» — quit_app (приложение целиком); «закрой окно X» — window с action close (только окно). Не подменяй одно другим.
-4. Правка файла: сперва file_read/file_search, затем file_edit точным текстом; чужой файл целиком не перезаписывай.
-5. НЕУДАЧА инструмента — скажи и назови причину; об успехе без успеха не сообщай. Провал open_app не заменяй открытием сайта, файла или другого приложения.
-6. Опасное (rm -rf, sudo, mkfs) не выполняй.
-7. Многошаговое — инструменты по очереди, шаг за шагом.
-8. Комментарий к результату — коротко, в мужском роде.
-9. Просьба, которую не покрывает ни один инструмент из списка (звонки, email, умный дом, покупки, банковские операции, чужие аккаунты, фонарик, свет, чайник), — БЕЗ tool-блока, текстом: «этого я не умею». Не подставляй похожий инструмент ради ответа: system_info вместо фонарика — ошибка, а не решение.
-10. send_message — только когда назван реальный получатель из контактов и понятно, что отправлять. Оценить «отправь имейл знаменитости» без контакта — отказ текстом.
-11. run_command — ТОЛЬКО имя из блока «КОМАНДЫ ПОЛЬЗОВАТЕЛЯ», без выдуманных аргументов. Задачи — task_add. «скачай и установи», покупки, переводы денег — не умеешь: текстом.
-12. web_search без query допустим: подставится фраза пользователя."#,
+1. Режим — сам: болтовня/знания — текст; свежие данные — web_search; сделать на компьютере — инструмент, не жди разрешения.
+2. «открой X»: программа → open_app; сайт/сервис → run_command из каталога, иначе web_search → open_url по адресу ИЗ ВЫДАЧИ, домен не выдумывай.
+3. Экран: сперва ui_read, затем действуй ПО ИМЕНИ из ui_read (ui_click/ui_type/ui_menu); наугад не кликай и не печатай. После ui_click приходит снимок экрана — проверь итог честно.
+4. «закрой X» — quit_app; «закрой окно» — window close. Файлы: сперва file_read/file_search, затем file_edit; чужой файл целиком не перезаписывай.
+5. Неудача — назови причину, пробуй другой путь (ui_read покажет имена; shell/applescript умеют почти всё); об успехе без успеха не говори. После open_app — wait 1–3 с. Без подтверждения не выполняй покупки, отправку наружу, удаление, платежи.
+6. run_command — только имя из каталога. send_message — только названный получатель. Комментарий — коротко, в мужском роде."#,
         today = crate::text::today_russian(),
         cwd = crate::tools::cwd(),
     )
@@ -1021,6 +1076,15 @@ fn plan_open(
     tokens: &[String],
     lookup: &impl Fn(&str) -> Option<String>,
 ) -> Option<crate::tools::ToolCall> {
+    // «открой aviasales.ru в сафари»: «в сафари» — не часть цели, а браузер.
+    let (without_browser, browser) = crate::tool_guard::strip_browser_phrase(&tokens.join(" "));
+    let stripped: Vec<String>;
+    let tokens: &[String] = if browser.is_some() {
+        stripped = without_browser.split_whitespace().map(String::from).collect();
+        &stripped
+    } else {
+        tokens
+    };
     let target = plan_target(&tokens[1..]);
     if target.is_empty() {
         return None;
@@ -1050,10 +1114,15 @@ fn plan_open(
     });
 
     if let Some(url) = plan_explicit_url(&target) {
-        return Some(crate::tools::ToolCall::OpenUrl { url });
+        return Some(crate::tools::ToolCall::OpenUrl { url, browser: browser.clone() });
     }
     if let Some(url) = plan_domain(&target) {
-        return Some(crate::tools::ToolCall::OpenUrl { url });
+        return Some(crate::tools::ToolCall::OpenUrl { url, browser: browser.clone() });
+    }
+    // Браузер назван, а адреса нет: приложение/папку не угадываем, решает
+    // разрешение сайта (кэш, выдача поиска) в цикле действий.
+    if browser.is_some() {
+        return None;
     }
     // «Открой загрузки/документы» — это папка, даже без слова «папка».
     if let Some(path) = plan_folder_path(&target) {
@@ -1357,6 +1426,10 @@ mod tests {
         for must in ["window", "minimize", "set_volume", "screenshot"] {
             assert!(window.contains(must), "в промпте нет «{must}»");
         }
+        let desktop = action_prompt_for("введи текст и нажми Ctrl+S в редакторе");
+        for must in ["desktop_input", "type_text", "hotkey", "wait"] {
+            assert!(desktop.contains(must), "в промпте управления ПК нет «{must}»");
+        }
         let timer = action_prompt_for("поставь таймер на 10 минут");
         for must in ["set_timer", "set_alarm"] {
             assert!(timer.contains(must), "в промпте нет «{must}»");
@@ -1414,7 +1487,7 @@ mod tests {
 
     fn open_url(prompt: &str, want: &str) {
         match plan(prompt) {
-            Some(crate::tools::ToolCall::OpenUrl { url }) => assert_eq!(url, want, "{prompt}"),
+            Some(crate::tools::ToolCall::OpenUrl { url, .. }) => assert_eq!(url, want, "{prompt}"),
             other => panic!("для «{prompt}» ждали open_url {want}, получили {other:?}"),
         }
     }
@@ -1470,6 +1543,19 @@ mod tests {
             "Открой https://Example.COM/Path",
             "https://Example.COM/Path",
         );
+    }
+
+    #[test]
+    fn planner_passes_the_named_browser_to_open_url() {
+        match plan("открой aviasales.ru в сафари") {
+            Some(crate::tools::ToolCall::OpenUrl { url, browser }) => {
+                assert_eq!(url, "aviasales.ru");
+                assert_eq!(browser.as_deref(), Some("Safari"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Без адреса и с названным браузером приложение не угадывается.
+        assert!(plan("открой сайт авиасейлс в сафари").is_none());
     }
 
     #[test]

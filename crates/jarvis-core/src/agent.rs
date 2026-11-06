@@ -37,6 +37,9 @@ pub enum Postcondition {
     /// Постусловие невозможно: статус остаётся неподтверждённым, и ответ
     /// обязан это отражать (open_url — «браузер запущен», а не «сайт открыт»).
     None,
+    /// Отчёт замкнутого GUI-цикла (ui_task): подтверждение — Termination::Done
+    /// по свежему скриншоту; проверяется в самой реализации цикла.
+    AgentReport,
 }
 
 /// Спецификация инструмента: метаданные реестра.
@@ -60,12 +63,19 @@ mod platforms {
 
 /// Канонические имена инструментов — единственный список, по которому
 /// парсится и валидируется вызов модели (см. `tools::parse`).
+///
+/// Реестр полный: модель может и открывать приложения/ссылки, и управлять
+/// окнами. Детерминированный планировщик (`router::plan_system_command`)
+/// перехватывает типовые фразы «открой/закрой…» до модели — это быстрый
+/// путь, а не запрет для модели.
 pub const KNOWN_NAMES: &[&str] = &[
     "shell",
     "open_app",
     "quit_app",
     "open_url",
     "open_path",
+    "window",
+    "desktop_input",
     "set_timer",
     "set_alarm",
     "timer_stop",
@@ -97,12 +107,16 @@ pub const KNOWN_NAMES: &[&str] = &[
     "task_run",
     "task_open",
     "web_search",
-    "window",
+    "wait",
     "run_command",
     "send_message",
     "add_note",
     "create_event",
     "music_control",
+    "ui_read",
+    "ui_click",
+    "ui_type",
+    "ui_menu",
 ];
 
 const FIVE_SECONDS: Duration = Duration::from_secs(5);
@@ -178,6 +192,29 @@ pub fn spec_for(name: &str) -> Option<ToolSpec> {
             Postcondition::None,
             platforms::ALL,
         ),
+        "ui_read" => (
+            // Чтение Accessibility-дерева: только смотрите, ничего не меняете.
+            RiskLevel::Low,
+            Duration::from_secs(20),
+            Postcondition::None,
+            platforms::MACOS_ONLY,
+        ),
+        "ui_click" | "ui_menu" => (
+            // Клик/меню меняют состояние приложения: средний риск, результат
+            // подтверждается перечитыванием экрана внутри исполнителя.
+            RiskLevel::Medium,
+            Duration::from_secs(30),
+            Postcondition::None,
+            platforms::MACOS_ONLY,
+        ),
+        "ui_type" => (
+            // Ввод текста в чужое поле: средний риск, верификация — readback
+            // значения поля (в исполнителе, честный fail при расхождении).
+            RiskLevel::Medium,
+            Duration::from_secs(30),
+            Postcondition::None,
+            platforms::MACOS_ONLY,
+        ),
         "file_read" | "file_list" | "file_search" | "file_glob" => (
             RiskLevel::Low,
             FIVE_SECONDS,
@@ -212,6 +249,18 @@ pub fn spec_for(name: &str) -> Option<ToolSpec> {
             RiskLevel::Medium,
             FIVE_SECONDS,
             Postcondition::StateReadback,
+            platforms::ALL,
+        ),
+        "desktop_input" => (
+            RiskLevel::Medium,
+            THIRTY_SECONDS,
+            Postcondition::None,
+            platforms::ALL,
+        ),
+        "wait" => (
+            RiskLevel::Low,
+            THIRTY_SECONDS,
+            Postcondition::None,
             platforms::ALL,
         ),
         "run_command" => (

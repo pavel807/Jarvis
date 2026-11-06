@@ -17,7 +17,7 @@
 //!   здесь и покрыта тестами, которые идут на любой ОС.
 
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 #[cfg(target_os = "macos")]
 use macos as imp;
 
@@ -43,6 +43,7 @@ use unsupported as imp;
 pub use imp::*;
 
 pub mod shell;
+pub mod desktop;
 
 // =========================================================================
 // Словарь русских названий приложений

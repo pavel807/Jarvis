@@ -11,6 +11,7 @@
 //! недоступен (нет сети для каталога, модель не скачалась) — автоматический
 //! откат на candle.
 
+pub mod api_backend;
 pub mod candle_backend;
 pub mod config;
 pub mod model;
@@ -121,6 +122,8 @@ enum Backend {
     Candle(Box<candle_backend::CandleEngine>),
     #[cfg(target_os = "macos")]
     Uzu(Box<uzu_backend::UzuEngine>),
+    /// Облачная модель через OpenAI-совместимый API (Яндекс GPT и другие).
+    Api(Box<api_backend::ApiEngine>),
 }
 
 impl LlmEngine {
@@ -128,6 +131,24 @@ impl LlmEngine {
     /// на macOS; если он недоступен — откат на candle, чтобы ассистент
     /// не оставался без мозга.
     pub fn load(models_dir: &std::path::Path, events: &EventTx) -> Result<Self> {
+        if config::backend() == "api" {
+            match api_backend::ApiEngine::load(events) {
+                Ok(engine) => {
+                    return Ok(Self {
+                        backend: Backend::Api(Box::new(engine)),
+                    });
+                }
+                Err(e) => {
+                    // Облако выбрано явно — откат на локальную модель был бы
+                    // сюрпризом (и трафиком): честная ошибка, ключ вводится в
+                    // настройках.
+                    let _ = events.send(JarvisEvent::Error {
+                        message: format!("Облачная модель не запустилась: {e:#}"),
+                    });
+                    return Err(e);
+                }
+            }
+        }
         if config::backend() == "uzu" {
             #[cfg(target_os = "macos")]
             match uzu_backend::UzuEngine::load(models_dir, events) {
@@ -248,6 +269,16 @@ impl LlmEngine {
             ),
             #[cfg(target_os = "macos")]
             Backend::Uzu(engine) => engine.generate_streaming_with_params(
+                system,
+                history,
+                user,
+                params_override,
+                cancel,
+                prefill,
+                on_sentence,
+                on_progress,
+            ),
+            Backend::Api(engine) => engine.generate_streaming_with_params(
                 system,
                 history,
                 user,
@@ -384,13 +415,16 @@ pub fn ask(
     if plan.is_none()
         && system == CHAT_SYSTEM_PROMPT
         && router::classify(&prompt) == router::Intent::Action
-        && let Some(url) = crate::site_cache::lookup(&prompt)
+        && let Some(url) = crate::site_cache::lookup(&crate::tool_guard::strip_browser_phrase(&prompt).0)
     {
         println!("⚡ Кэш сайта: {prompt} → {url}");
         // Через общий путь исполнения: события ActionStarted/ActionResult,
         // та же речь и тот же формат, что у open_url из модели.
         let outcome = tools::execute(
-            tools::ToolCall::OpenUrl { url },
+            tools::ToolCall::OpenUrl {
+                url,
+                browser: crate::tool_guard::browser_in_text(&prompt),
+            },
             &audio_tx,
             &events,
         );
@@ -807,7 +841,7 @@ pub fn ask(
 }
 
 /// Сколько раз за одну фразу агент может вызвать инструмент.
-pub const MAX_TOOL_STEPS: usize = 6;
+pub const MAX_TOOL_STEPS: usize = 12;
 
 /// С какой уверенности роутера форсировать tool-блок префиллом.
 ///
@@ -1084,6 +1118,9 @@ fn needs_next_step(call: &tools::ToolCall, outcome: &tools::ToolOutcome) -> bool
         // Результат оконной команды финален: после честного «свернул»/«нет
         // окон» модель получала слово и начинала выдумывать причины ошибки.
         tools::ToolCall::Window { .. } => false,
+        // Ввод/ожидание — звенья сценария интерфейса: модель должна продолжить
+        // цепочку и сама решить, остались ли действия.
+        tools::ToolCall::DesktopInput { .. } | tools::ToolCall::Wait { .. } => true,
         tools::ToolCall::WebSearch { .. } => outcome.ok,
         tools::ToolCall::RunCommand { .. } => {
             !outcome.ok || outcome.detail.starts_with("Результаты поиска")
@@ -1099,6 +1136,18 @@ fn needs_next_step(call: &tools::ToolCall, outcome: &tools::ToolOutcome) -> bool
         // круг модели тут только добавлял «Задача завершена» после команды.
         // Неудача — наоборот: пусть модель объяснит причину словами.
         tools::ToolCall::MusicControl { .. } => !outcome.ok,
+        // Экранная автоматизация: ui_read — информация для следующего шага,
+        // как file_read; клик/ввод/меню — звенья сценария, модель сама
+        // решает, доведена ли задача (итог клика приходит со снимком экрана).
+        tools::ToolCall::UiRead { .. }
+        | tools::ToolCall::UiClick { .. }
+        | tools::ToolCall::UiType { .. }
+        | tools::ToolCall::UiMenu { .. } => true,
+        // Запуск/закрытие приложения и открытие ссылки — звенья цепочки
+        // («открой сафари сайт авиасейлс» = open_app + open_url).
+        // Раньше цикл обрывался после первого шага, и задача не доводилась.
+        tools::ToolCall::OpenApp { .. } | tools::ToolCall::QuitApp { .. } => true,
+        tools::ToolCall::OpenUrl { .. } | tools::ToolCall::OpenPath { .. } => true,
         _ => !outcome.ok,
     }
 }
@@ -1114,6 +1163,9 @@ fn run_action(
     cancel: &Arc<AtomicBool>,
     history: &Arc<std::sync::Mutex<Vec<ChatTurn>>>,
 ) {
+    // Новый запрос пользователя — новая задача: флаг отмены автоматизации от
+    // прошлого «стоп» снят, экран снова можно трогать.
+    crate::auto::clear_cancel();
     let mut loop_history: Vec<ChatTurn> = Vec::new();
     let mut user_msg = prompt.to_string();
     // Промпт шага не постоянен: после веб-поиска переключаемся на веб-промпт
@@ -1133,10 +1185,14 @@ fn run_action(
         confidence,
         force_tool,
     });
+    // «Открой сайт X в сафари»: слово браузера не должно попадать ни в поиск,
+    // ни в ключ кэша сайтов, а сам браузер передаётся в open_url.
+    let (site_prompt_owned, browser_hint) = crate::tool_guard::strip_browser_phrase(prompt);
+    let site_prompt: &str = site_prompt_owned.as_str();
     let site_request = looks_like_site_request(prompt);
     let fast_site = site_request && has_site_word(&prompt.to_lowercase());
     let mut prefetch = if site_request {
-        let query = crate::site_cache::search_query(prompt);
+        let query = crate::site_cache::search_query(site_prompt);
         if query.is_empty() {
             None
         } else {
@@ -1147,6 +1203,33 @@ fn run_action(
     } else {
         None
     };
+
+    // Uzu не умеет prefill, поэтому SITE_OPEN_PREFILL там не срабатывает и
+    // модель сама выбирает инструмент («открой сайт X в сафари» превращалось
+    // в open_app + ui_task). Адрес для «открой сайт …» не требует LLM: берём
+    // его из выдачи поиска, которая уже запущена, и открываем сразу.
+    if fast_site && config::backend() == "uzu" {
+        let hits = take_search(&mut prefetch, site_prompt);
+        if !hits.is_empty() {
+            let (candidate, confirmed) = verify_site_url(site_prompt, "", &hits);
+            let final_url = resolve_site_url(&candidate, confirmed, &hits);
+            println!("🎯 Сайт без LLM (бэкенд без prefill): {final_url}");
+            let outcome = tools::execute(
+                tools::ToolCall::OpenUrl {
+                    url: final_url.clone(),
+                    browser: browser_hint.clone(),
+                },
+                audio_tx,
+                events,
+            );
+            if outcome.ok && confirmed {
+                crate::site_cache::remember(site_prompt, &final_url);
+            }
+            speak_cancelable(audio_tx, events, &outcome.speech, cancel);
+            commit_action_history(history, prompt, &outcome.speech);
+            return;
+        }
+    }
 
     for step in 1..=MAX_TOOL_STEPS {
         let generated = {
@@ -1254,17 +1337,18 @@ fn run_action(
                 let mut cache_url: Option<String> = None;
                 let mut cache_confirmed = false;
                 let call = match call {
-                    tools::ToolCall::OpenUrl { url } if !searched => {
-                        match explicit_domain(prompt) {
+                    tools::ToolCall::OpenUrl { url, browser } if !searched => {
+                        let browser = browser.or_else(|| browser_hint.clone());
+                        match explicit_domain(site_prompt) {
                             Some(domain) => {
                                 let exact = format!("https://{domain}/");
                                 cache_url = Some(exact.clone());
                                 cache_confirmed = true; // домен назван явно
-                                tools::ToolCall::OpenUrl { url: exact }
+                                tools::ToolCall::OpenUrl { url: exact, browser }
                             }
                             None => {
-                                let hits = take_search(&mut prefetch, prompt);
-                                let (candidate, confirmed) = verify_site_url(prompt, &url, &hits);
+                                let hits = take_search(&mut prefetch, site_prompt);
+                                let (candidate, confirmed) = verify_site_url(site_prompt, &url, &hits);
                                 // Модель выдумывает адреса («дипсика» → Dipstick
                                 // на вики): если выдача её не подтвердила,
                                 // открываем верхний результат поиска — поисковик
@@ -1278,12 +1362,18 @@ fn run_action(
                                 // домен из фразы.
                                 cache_url = confirmed.then(|| final_url.clone());
                                 cache_confirmed = confirmed;
-                                tools::ToolCall::OpenUrl { url: final_url }
+                                tools::ToolCall::OpenUrl { url: final_url, browser }
                             }
                         }
                     }
                     other => {
-                        if let tools::ToolCall::OpenUrl { url } = &other {
+                        let other = match other {
+                            tools::ToolCall::OpenUrl { url, browser: None } if browser_hint.is_some() => {
+                                tools::ToolCall::OpenUrl { url, browser: browser_hint.clone() }
+                            }
+                            o => o,
+                        };
+                        if let tools::ToolCall::OpenUrl { url, .. } = &other {
                             // Повторное открытие сайта в том же цикле — модель
                             // уже назвала конкретный адрес: считаем явным.
                             cache_url = Some(url.clone());
@@ -1327,7 +1417,7 @@ fn run_action(
 
                 let outcome = tools::execute(call.clone(), audio_tx, events);
                 if let (Some(url), true) = (cache_url, cache_confirmed) && outcome.ok {
-                    crate::site_cache::remember(prompt, &url);
+                    crate::site_cache::remember(site_prompt, &url);
                 }
                 let last_step = step == MAX_TOOL_STEPS;
                 if last_step || !needs_next_step(&call, &outcome) {
@@ -1373,6 +1463,17 @@ fn run_action(
                             " Приложение не найдено. НЕ открывай вместо него другое приложение, \
                              сайт или файл и не выдумывай имена. Скажи пользователю, что это \
                              приложение не найдено."
+                        } else if matches!(
+                            &call,
+                            tools::ToolCall::UiClick { .. }
+                                | tools::ToolCall::UiType { .. }
+                                | tools::ToolCall::UiMenu { .. }
+                        ) && !outcome.ok
+                        {
+                            " Действие на экране не удалось. Сперва ui_read — узнай реальные \
+                             имена элементов, затем попробуй другое имя/роль или другой путь \
+                             (applescript, desktop_input с точными координатами). \
+                             Скажи пользователю причину."
                         } else {
                             ""
                         };

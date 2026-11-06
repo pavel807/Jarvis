@@ -1,0 +1,34 @@
+Файлы, восстановленные из repomix-output(5).xml:
+
+components/AppIcon.svelte
+components/ArcReactor.svelte
+components/CommandInput.svelte
+components/Header.svelte
+components/Markdown.svelte
+components/MicControl.svelte
+components/Modal.svelte
+components/SwitchRow.svelte
+components/SystemStatus.svelte
+components/Waveform.svelte
+lib/reactor/geometry.ts
+lib/reactor/intro.ts
+lib/reactor/materials.ts
+lib/reactor/scene.ts
+lib/markdown.ts
+pages/Commands.svelte
+pages/Help.svelte
+pages/Home.svelte
+pages/Memory.svelte
+pages/SettingsPage.svelte
+pages/SystemPage.svelte
+pages/Voice.svelte
+pages/WakeWord.svelte
+App.svelte
+assistant.ts
+main.ts
+store.svelte.ts
+style.css
+UtilsWindow.svelte
+voices.ts
+
+Всего: 30 файлов.

@@ -19,8 +19,32 @@ static TOKENIZER: OnceLock<Option<Tokenizer>> = OnceLock::new();
 fn tokenizer() -> Option<&'static Tokenizer> {
     TOKENIZER
         .get_or_init(|| {
-            let dir = crate::paths::models_dir().join(crate::llm::config::model_name());
-            load_from(&dir)
+            let models = crate::paths::models_dir();
+            let name = crate::llm::config::model_name();
+            // uzu-модели скачиваются в models/uzu/<имя>/, candle — в models/<имя>/.
+            let exact = if models.join("uzu").join(&name).is_dir() {
+                models.join("uzu").join(&name)
+            } else {
+                models.join(&name)
+            };
+            if let Some(tok) = load_from(&exact) {
+                return Some(tok);
+            }
+            // Точная модель не скачана (например, в тестах применён дефолт
+            // статика, а не settings.toml). Для счёта бюджета подходит
+            // токенизатор любой скачанной модели той же семьи — беру первый
+            // найденный в models/uzu/*/.
+            let uzu = models.join("uzu");
+            if let Ok(entries) = std::fs::read_dir(&uzu) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir()
+                        && let Some(tok) = load_from(&entry.path())
+                    {
+                        return Some(tok);
+                    }
+                }
+            }
+            None
         })
         .as_ref()
 }

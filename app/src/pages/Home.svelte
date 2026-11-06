@@ -9,9 +9,10 @@
   import AppIcon from "../components/AppIcon.svelte";
 
   /**
-   * Главная Mark V: реактор — центр композиции, вокруг — телеметрия,
-   * последняя передача и голосовое управление. Полная история диалога
-   * живёт в разделе «Память», здесь — только последний обмен.
+   * Главная Mark V: реактор — центр композиции и единственный яркий элемент.
+   * Состояние системы читается с реактора и полосы статуса, состояние
+   * разговора — у микрофона; дублирующих телеметрических строк нет.
+   * Полная история диалога живёт в разделе «Память», здесь — последний обмен.
    */
 
   const assistant = $derived(getAssistant());
@@ -36,32 +37,9 @@
 
   const busy = $derived(store.chat.busy);
 
-  /** Телеметрия реактора: только реальные значения. */
-  const coreMode = $derived(
-    assistant.tone === "error"
-      ? "FAULT"
-      : store.status.paused
-        ? "STANDBY"
-        : assistant.tone === "live"
-          ? "LISTEN"
-          : busy
-            ? "COMPUTE"
-            : store.speaking
-              ? "TRANSMIT"
-              : "IDLE",
-  );
-
   const modelLabel = $derived(
-    settings.llm_backend === "uzu" ? "UZU · METAL" : "CANDLE",
+    settings.llm_backend === "uzu" ? "UZU · Metal" : "candle",
   );
-
-  const activityLabel = $derived.by(() => {
-    if (!store.lastActivity) return "—";
-    const minutes = Math.round((Date.now() - store.lastActivity) / 60000);
-    if (minutes < 1) return "СЕЙЧАС";
-    if (minutes < 60) return `${minutes} МИН`;
-    return `${Math.round(minutes / 60)} Ч`;
-  });
 
   const hasExchange = $derived(Boolean(lastUser || lastReply));
 </script>
@@ -69,21 +47,6 @@
 <div class="home">
   <div class="reactor-stage">
     <ArcReactor />
-  </div>
-
-  <div class="reactor-info">
-    <div class="reactor-info__cell">
-      <span class="tech-label">Core</span>
-      <span class="reactor-info__value" class:is-energy={!store.status.paused}>{assistant.short}</span>
-    </div>
-    <div class="reactor-info__cell">
-      <span class="tech-label">Mode</span>
-      <span class="reactor-info__value">{coreMode}</span>
-    </div>
-    <div class="reactor-info__cell">
-      <span class="tech-label">Activity</span>
-      <span class="reactor-info__value">{activityLabel}</span>
-    </div>
   </div>
 
   <!-- Последняя передача: что услышано и что отвечено -->
@@ -152,7 +115,7 @@
   <CommandInput />
 
   <p class="home-foot tech-label">
-    {modelLabel} · ЛОКАЛЬНО · {settings.wakeword_model ? "WAKE WORD АКТИВЕН" : "WAKE WORD OFF"}
+    {modelLabel} · локально · {settings.wakeword_model ? "wake word активен" : "wake word выключен"}
   </p>
 </div>
 
@@ -181,6 +144,6 @@
 
   .home-foot {
     text-align: center;
-    margin: 2px 0 10px;
+    margin: 0 0 8px;
   }
 </style>

@@ -65,7 +65,6 @@
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
 
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-energy: cubic-bezier(0.34, 1.4, 0.44, 1);
 }
 
 * {
@@ -125,13 +124,12 @@ body {
   border-radius: var(--r-sm);
 }
 
-/* Техническая метка: моноширинный капс с трекингом */
+/* Техническая метка: моноширинная, строчная, спокойная */
 .tech-label {
   font-family: var(--mono);
   font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
+  font-weight: 500;
+  letter-spacing: 0.02em;
   color: var(--text-3);
 }
 
@@ -147,22 +145,10 @@ body {
   /* Свой контекст наслаивания: холст реактора с z-index: -1 остаётся поверх
      фона приложения, но под полупрозрачными панелями интерфейса. */
   isolation: isolate;
+  /* Нейтральное затемнение к низу — глубина без цветных пятен. */
   background:
-    radial-gradient(120% 42% at 50% -6%, rgba(22, 141, 204, 0.12) 0%, rgba(22, 141, 204, 0) 62%),
     radial-gradient(140% 60% at 50% 118%, rgba(7, 11, 16, 0) 40%, #04070b 100%),
     var(--bg);
-}
-
-/* Едва заметная техническая сетка атмосферы */
-.app::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background:
-    linear-gradient(rgba(75, 203, 255, 0.028) 1px, transparent 1px) 0 0 / 100% 44px,
-    linear-gradient(90deg, rgba(75, 203, 255, 0.028) 1px, transparent 1px) 0 0 / 44px 100%;
-  mask-image: radial-gradient(90% 70% at 50% 32%, #000 30%, transparent 100%);
 }
 
 /* ---------- Шапка ---------- */
@@ -174,7 +160,7 @@ body {
   gap: 12px;
   padding: 12px 16px 10px;
   border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(16, 25, 35, 0.6), rgba(16, 25, 35, 0));
+  background: rgba(16, 25, 35, 0.35);
 }
 
 .header__id {
@@ -195,9 +181,9 @@ body {
 
 .header__corp {
   font-family: var(--mono);
-  font-size: 8.5px;
-  font-weight: 600;
-  letter-spacing: 0.3em;
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.22em;
   color: var(--text-3);
   white-space: nowrap;
 }
@@ -217,9 +203,9 @@ body {
   border: 1px solid var(--border);
   background: var(--surface);
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.05em;
   color: var(--text-3);
   white-space: nowrap;
 }
@@ -239,8 +225,6 @@ body {
 
 .header__link.is-on .dot {
   background: var(--cyan);
-  box-shadow: 0 0 6px var(--cyan-glow);
-  animation: pulse-dot 2.4s ease-in-out infinite;
 }
 
 /* ---------- Полоса системного статуса ---------- */
@@ -248,7 +232,7 @@ body {
 .sysstatus {
   flex-shrink: 0;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 1px;
   margin: 10px 14px 0;
   border: 1px solid var(--border);
@@ -276,29 +260,23 @@ body {
 
 .syscell__name {
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 9.5px;
   font-weight: 600;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.05em;
   color: var(--text-3);
 }
 
 .syscell__value {
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.02em;
   color: var(--text-2);
   transition: color 0.25s;
 }
 
-.syscell.is-ok .syscell__value {
-  color: var(--ok);
-}
-
-.syscell.is-energy .syscell__value {
-  color: var(--cyan);
-}
-
+/* Норма — спокойные значения, цветом горят только проблемы
+   и живая точка-LED. Так читается настоящая приборная панель. */
 .syscell.is-warn .syscell__value {
   color: var(--warn);
 }
@@ -322,12 +300,10 @@ body {
 
 .is-energy .syscell__led {
   background: var(--cyan);
-  box-shadow: 0 0 6px var(--cyan-glow);
 }
 
 .is-warn .syscell__led {
   background: var(--warn);
-  animation: pulse-dot 1.2s ease-in-out infinite;
 }
 
 .is-err .syscell__led {
@@ -385,10 +361,9 @@ body {
 
 .section-title {
   font-family: var(--mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
   color: var(--text-3);
   margin: 18px 2px 8px;
   display: flex;
@@ -554,12 +529,10 @@ button.row-item:hover {
   color: var(--on-accent);
   background: var(--cyan);
   border-color: rgba(185, 240, 255, 0.25);
-  box-shadow: 0 0 0 1px rgba(75, 203, 255, 0.18), 0 4px 18px -6px var(--cyan-glow);
 }
 
 .btn--primary:hover:not(:disabled) {
   background: #63d4ff;
-  box-shadow: 0 0 0 1px rgba(75, 203, 255, 0.3), 0 6px 22px -6px var(--cyan-glow);
 }
 
 .btn--secondary {
@@ -672,6 +645,8 @@ button.row-item:hover {
 .textarea,
 .select {
   width: 100%;
+  appearance: none;
+  -webkit-appearance: none;
   background: var(--bg-2);
   border: 1px solid var(--border-strong);
   border-radius: var(--r-md);
@@ -715,7 +690,7 @@ button.row-item:hover {
   min-width: 140px;
 }
 
-.search-box .icon {
+.search-box__icon {
   position: absolute;
   left: 10px;
   top: 50%;
@@ -740,7 +715,7 @@ input[type="range"] {
 input[type="range"]::-webkit-slider-runnable-track {
   height: 3px;
   border-radius: 2px;
-  background: linear-gradient(90deg, var(--cyan-deep), rgba(255, 255, 255, 0.1) 70%);
+  background: var(--surface-3);
 }
 
 input[type="range"]::-webkit-slider-thumb {
@@ -751,7 +726,7 @@ input[type="range"]::-webkit-slider-thumb {
   border-radius: 50%;
   background: var(--energy);
   border: 1px solid rgba(75, 203, 255, 0.5);
-  box-shadow: 0 0 8px var(--cyan-glow), 0 1px 3px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
   transition: transform 0.12s;
 }
 
@@ -784,19 +759,17 @@ input[type="range"]:active::-webkit-slider-thumb {
   height: 16px;
   border-radius: 50%;
   background: var(--text-3);
-  transition: transform 0.18s var(--ease-energy), background 0.18s;
+  transition: transform 0.18s var(--ease-out), background 0.18s;
 }
 
 .switch.is-on {
-  background: var(--cyan-soft);
+  background: rgba(75, 203, 255, 0.28);
   border-color: var(--cyan-ring);
-  box-shadow: inset 0 0 8px rgba(75, 203, 255, 0.15);
 }
 
 .switch.is-on::after {
   transform: translateX(15px);
-  background: var(--cyan);
-  box-shadow: 0 0 7px var(--cyan-glow);
+  background: var(--energy);
 }
 
 .switch:disabled {
@@ -968,7 +941,6 @@ input[type="range"]:active::-webkit-slider-thumb {
 
 .status-item__dot.is-warn {
   background: var(--warn);
-  animation: pulse-dot 1.2s ease-in-out infinite;
 }
 
 .status-item__dot.is-err {
@@ -1034,8 +1006,7 @@ input[type="range"]:active::-webkit-slider-thumb {
 .progress__fill {
   height: 100%;
   border-radius: 2px;
-  background: linear-gradient(90deg, var(--cyan-deep), var(--cyan));
-  box-shadow: 0 0 8px -2px var(--cyan-glow);
+  background: var(--cyan);
   transition: width 0.3s ease;
 }
 
@@ -1093,7 +1064,7 @@ input[type="range"]:active::-webkit-slider-thumb {
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
   border-radius: 16px;
-  box-shadow: var(--shadow-pop), 0 0 40px -18px var(--cyan-glow);
+  box-shadow: var(--shadow-pop);
   animation: modal-in 0.2s var(--ease-out);
 }
 
@@ -1234,7 +1205,6 @@ input[type="range"]:active::-webkit-slider-thumb {
 }
 
 /* На главной во время сборки остаётся один реактор. */
-.app[data-boot="true"] .reactor-info,
 .app[data-boot="true"] .transmission,
 .app[data-boot="true"] .voice-zone,
 .app[data-boot="true"] .cmd-input,
@@ -1259,7 +1229,6 @@ input[type="range"]:active::-webkit-slider-thumb {
 .app[data-boot="false"] .header,
 .app[data-boot="false"] .sysstatus,
 .app[data-boot="false"] .nav,
-.app[data-boot="false"] .reactor-info,
 .app[data-boot="false"] .transmission,
 .app[data-boot="false"] .voice-zone,
 .app[data-boot="false"] .cmd-input,
@@ -1275,24 +1244,20 @@ input[type="range"]:active::-webkit-slider-thumb {
   transition-delay: 0.07s;
 }
 
-.app[data-boot="false"] .reactor-info {
-  transition-delay: 0.1s;
-}
-
 .app[data-boot="false"] .transmission {
-  transition-delay: 0.16s;
+  transition-delay: 0.12s;
 }
 
 .app[data-boot="false"] .voice-zone {
-  transition-delay: 0.22s;
+  transition-delay: 0.18s;
 }
 
 .app[data-boot="false"] .cmd-input {
-  transition-delay: 0.28s;
+  transition-delay: 0.24s;
 }
 
 .app[data-boot="false"] .home-foot {
-  transition-delay: 0.32s;
+  transition-delay: 0.3s;
 }
 
 .app[data-boot="false"] .nav {
@@ -1316,7 +1281,7 @@ input[type="range"]:active::-webkit-slider-thumb {
   font-family: var(--mono);
   font-size: 9px;
   font-weight: 600;
-  letter-spacing: 0.28em;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--cyan);
   animation: boot-label 1.6s ease-in-out infinite;
@@ -1361,7 +1326,6 @@ input[type="range"]:active::-webkit-slider-thumb {
   .app[data-boot="false"] .header,
   .app[data-boot="false"] .sysstatus,
   .app[data-boot="false"] .nav,
-  .app[data-boot="false"] .reactor-info,
   .app[data-boot="false"] .transmission,
   .app[data-boot="false"] .voice-zone,
   .app[data-boot="false"] .cmd-input,
@@ -1399,7 +1363,7 @@ input[type="range"]:active::-webkit-slider-thumb {
 .reactor-stage {
   position: relative;
   flex: 1 1 auto;
-  min-height: clamp(236px, 36vh, 404px);
+  min-height: clamp(236px, 38vh, 460px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1448,47 +1412,13 @@ input[type="range"]:active::-webkit-slider-thumb {
   border-right: 1px solid var(--border-strong);
 }
 
-/* Информационная строка реактора */
-.reactor-info {
-  flex-shrink: 0;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--border);
-  overflow: hidden;
-  margin-top: 6px;
-}
-
-.reactor-info__cell {
-  background: rgba(16, 25, 35, 0.75);
-  padding: 7px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-
-.reactor-info__value {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.reactor-info__value.is-energy {
-  color: var(--cyan);
-}
+/* Состояние разговора читается у микрофона, состояние системы — с полосы
+   статуса и с самого реактора; отдельной телеметрической строки под ним нет. */
 
 /* Последняя передача: что услышали и что ответили */
 .transmission {
   flex-shrink: 0;
-  margin-top: 10px;
+  margin-top: 12px;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   background: rgba(11, 17, 25, 0.7);
@@ -1511,9 +1441,9 @@ input[type="range"]:active::-webkit-slider-thumb {
   flex-shrink: 0;
   width: 44px;
   font-family: var(--mono);
-  font-size: 8.5px;
+  font-size: 9.5px;
   font-weight: 600;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.05em;
   color: var(--text-3);
 }
 
@@ -1577,41 +1507,40 @@ input[type="range"]:active::-webkit-slider-thumb {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 12px 2px 10px;
+  padding: 12px 2px;
 }
 
-/* Кнопка микрофона: круглая, с энергетным кольцом */
+/* Клавиша микрофона: физический тумблер панели. Слушает — клавиша нажата
+   и горит ровным цианом, пауза — отжата тёмная. Никаких пульсирующих колец:
+   живой уровень звука показывает осциллограмма рядом. */
 .mic-btn {
-  position: relative;
-  width: 58px;
-  height: 58px;
+  width: 52px;
+  height: 52px;
   flex-shrink: 0;
-  border-radius: 50%;
+  border-radius: 12px;
   border: 1px solid var(--border-strong);
-  background:
-    radial-gradient(circle at 50% 32%, rgba(75, 203, 255, 0.1), rgba(75, 203, 255, 0) 62%),
-    var(--surface-2);
+  background: var(--surface-2);
   color: var(--text-2);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: border-color 0.2s, color 0.2s, box-shadow 0.2s, transform 0.12s var(--ease-out);
+  transition: background 0.18s, border-color 0.18s, color 0.18s,
+    transform 0.12s var(--ease-out);
 }
 
 .mic-btn:hover:not(:disabled) {
-  color: var(--cyan);
-  border-color: var(--cyan-ring);
-  box-shadow: 0 0 18px -6px var(--cyan-glow);
+  color: var(--text);
+  border-color: rgba(75, 203, 255, 0.45);
 }
 
 .mic-btn:active:not(:disabled) {
-  transform: scale(0.94);
+  transform: scale(0.95);
 }
 
 .mic-btn:focus-visible {
   outline: 2px solid var(--cyan);
-  outline-offset: 3px;
+  outline-offset: 2px;
 }
 
 .mic-btn:disabled {
@@ -1619,44 +1548,26 @@ input[type="range"]:active::-webkit-slider-thumb {
   cursor: default;
 }
 
-/* Микрофон слушает: живое кольцо энергии */
+/* Слушает: залипшая клавиша, ровный циан без свечения */
 .mic-btn.is-listening {
-  color: var(--cyan);
-  border-color: var(--cyan-ring);
-  box-shadow:
-    0 0 0 1px var(--cyan-soft),
-    0 0 22px -6px var(--cyan-glow),
-    inset 0 0 14px rgba(75, 203, 255, 0.12);
+  background: var(--cyan);
+  border-color: var(--cyan);
+  color: var(--on-accent);
 }
 
-.mic-btn.is-listening::before {
-  content: "";
-  position: absolute;
-  inset: -5px;
-  border-radius: 50%;
-  border: 1px solid rgba(75, 203, 255, 0.35);
-  animation: mic-ping 1.8s var(--ease-out) infinite;
+.mic-btn.is-listening:hover:not(:disabled) {
+  background: #63d4ff;
+  border-color: #63d4ff;
+  color: var(--on-accent);
 }
 
-@keyframes mic-ping {
-  0% {
-    transform: scale(0.92);
-    opacity: 0.9;
-  }
-  70%,
-  100% {
-    transform: scale(1.22);
-    opacity: 0;
-  }
-}
-
-/* Микрофон на паузе: приглушён */
+/* Пауза: клавиша отжата */
 .mic-btn.is-off {
   color: var(--text-3);
   background: var(--surface);
 }
 
-/* Ошибка доступа: красный контур */
+/* Нет доступа к микрофону: красный контур */
 .mic-btn.is-error {
   color: var(--danger);
   border-color: rgba(240, 107, 112, 0.5);
@@ -1672,11 +1583,8 @@ input[type="range"]:active::-webkit-slider-thumb {
 }
 
 .voice-status {
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--text-2);
   transition: color 0.25s;
   white-space: nowrap;
@@ -1713,46 +1621,14 @@ input[type="range"]:active::-webkit-slider-thumb {
   border-radius: 2px;
   background: var(--cyan);
   height: calc(3px + var(--h) * 20px);
-  box-shadow: 0 0 6px -2px var(--cyan-glow);
   transition: height 0.09s linear;
 }
 
+/* Ожидание: спокойные статичные полоски — колебание без звука врёт. */
 .wave.is-idle span {
   background: var(--text-3);
-  box-shadow: none;
   height: 3px;
-  animation: wave-idle 2.6s ease-in-out infinite;
-}
-
-.wave.is-idle span:nth-child(2) {
-  animation-delay: 0.25s;
-}
-.wave.is-idle span:nth-child(3) {
-  animation-delay: 0.5s;
-}
-.wave.is-idle span:nth-child(4) {
-  animation-delay: 0.75s;
-}
-.wave.is-idle span:nth-child(5) {
-  animation-delay: 1s;
-}
-.wave.is-idle span:nth-child(6) {
-  animation-delay: 1.25s;
-}
-.wave.is-idle span:nth-child(7) {
-  animation-delay: 1.5s;
-}
-
-@keyframes wave-idle {
-  0%,
-  100% {
-    height: 3px;
-    opacity: 0.5;
-  }
-  50% {
-    height: 8px;
-    opacity: 0.9;
-  }
+  opacity: 0.55;
 }
 
 /* ---------- Командный ввод ---------- */
@@ -1767,13 +1643,13 @@ input[type="range"]:active::-webkit-slider-thumb {
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: 12px;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
   transition: border-color 0.16s, box-shadow 0.16s;
 }
 
 .cmd-input:focus-within {
   border-color: var(--cyan-ring);
-  box-shadow: 0 0 0 3px var(--cyan-soft), 0 0 20px -10px var(--cyan-glow);
+  box-shadow: 0 0 0 3px var(--cyan-soft);
 }
 
 .cmd-input__field {
@@ -1814,21 +1690,20 @@ input[type="range"]:active::-webkit-slider-thumb {
   gap: 2px;
   padding: 6px 10px calc(8px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(11, 17, 25, 0.4), rgba(11, 17, 25, 0.92));
+  background: rgba(11, 17, 25, 0.82);
   position: relative;
   z-index: 20;
 }
 
-/* Энергетическая линия над активной вкладкой */
+/* Короткая линия над активной вкладкой */
 .nav::before {
   content: "";
   position: absolute;
   top: -1px;
   left: 0;
-  height: 1px;
+  height: 2px;
   width: 25%;
-  background: linear-gradient(90deg, transparent, var(--cyan), transparent);
-  box-shadow: 0 0 10px var(--cyan-glow);
+  background: var(--cyan);
   transition: transform 0.3s var(--ease-out);
 }
 
@@ -1851,10 +1726,10 @@ input[type="range"]:active::-webkit-slider-thumb {
   border: none;
   background: none;
   color: var(--text-3);
-  font-family: var(--mono);
-  font-size: 8.5px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
   cursor: pointer;
   border-radius: var(--r-sm);
   transition: color 0.16s, transform 0.1s var(--ease-out);
@@ -1872,18 +1747,6 @@ input[type="range"]:active::-webkit-slider-thumb {
 
 .nav-btn.is-active {
   color: var(--cyan);
-}
-
-.nav-btn.is-active .nav-btn__icon {
-  filter: drop-shadow(0 0 6px var(--cyan-glow));
-}
-
-.nav-btn__icon {
-  transition: transform 0.2s var(--ease-energy);
-}
-
-.nav-btn.is-active .nav-btn__icon {
-  transform: translateY(-1px);
 }
 
 /* ============================================================
@@ -2020,9 +1883,9 @@ input[type="range"]:active::-webkit-slider-thumb {
   align-items: center;
   gap: 7px;
   font-family: var(--mono);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.12em;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
   color: var(--text-3);
 }
 
@@ -2096,7 +1959,6 @@ input[type="range"]:active::-webkit-slider-thumb {
 .task-row__check.is-done {
   background: var(--cyan);
   border-color: var(--cyan);
-  box-shadow: 0 0 8px -2px var(--cyan-glow);
 }
 
 .task-row__text {
@@ -2124,12 +1986,31 @@ input[type="range"]:active::-webkit-slider-thumb {
    Команды
    ============================================================ */
 
+/* Панель инструментов: поиск во всю ширину, под ним — выровненные фильтры. */
 .toolbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
   margin-bottom: 12px;
+}
+
+.toolbar .search-box {
+  grid-column: 1 / -1;
+}
+
+/* Селекты сжимаются равноправно: min-width:0 не даёт длинным опциям
+   распирать колонку за край окна. */
+.toolbar > .select {
+  min-width: 0;
+  width: 100%;
+  padding-left: 10px;
+  padding-right: 26px;
+  font-size: 12.5px;
+}
+
+.toolbar .toolbar__spacer {
+  display: none;
 }
 
 .toolbar__spacer {
@@ -2231,8 +2112,9 @@ input[type="range"]:active::-webkit-slider-thumb {
 
 .cmd-row__sub {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
   margin-top: 1px;
   min-width: 0;
 }
@@ -2243,7 +2125,7 @@ input[type="range"]:active::-webkit-slider-thumb {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  flex-shrink: 1;
+  max-width: 100%;
 }
 
 .cmd-row__triggers {
@@ -2253,8 +2135,7 @@ input[type="range"]:active::-webkit-slider-thumb {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  flex-shrink: 0;
-  max-width: 45%;
+  max-width: 100%;
 }
 
 .cmd-row__actions {
@@ -2349,7 +2230,6 @@ input[type="range"]:active::-webkit-slider-thumb {
 .voice-row__mark.is-current {
   background: var(--cyan);
   border-color: var(--cyan);
-  box-shadow: 0 0 7px -1px var(--cyan-glow);
 }
 
 .voice-row__mark.is-candidate {
@@ -2430,10 +2310,10 @@ input[type="range"]:active::-webkit-slider-thumb {
   border-radius: 999px;
   background: var(--surface);
   color: var(--text-2);
-  font-family: var(--mono);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
   cursor: pointer;
   transition: background 0.14s, color 0.14s, border-color 0.14s;
   white-space: nowrap;
@@ -2616,7 +2496,7 @@ input[type="range"]:active::-webkit-slider-thumb {
   font-size: 11px;
   font-weight: 600;
   color: var(--text-2);
-  letter-spacing: 0.1em;
+  letter-spacing: 0.02em;
 }
 
 .utils__close {
@@ -2734,7 +2614,6 @@ input[type="range"]:active::-webkit-slider-thumb {
   display: block;
   height: 100%;
   background: var(--cyan);
-  box-shadow: 0 0 8px -2px var(--cyan-glow);
   transition: width 0.25s linear;
 }
 

@@ -2,8 +2,10 @@
   import { store } from "../store.svelte";
 
   /**
-   * Системный статус: четыре реальных индикатора, без выдуманных значений.
-   * Данные приходят из status-опроса движка и событий.
+   * Системный статус: три реальных индикатора — ядро, синтез речи, микрофон.
+   * Связь с движком показывает пилон в шапке, поэтому отдельной ячейки нет:
+   * при незапущенном движке ячейки честно показывают BOOT/WAIT.
+   * Значения спокойные, цветом говорят только точки и проблемные состояния.
    */
 
   interface Cell {
@@ -37,11 +39,7 @@
         ? { name: "VOICE", value: "ONLINE", tone: "ok" }
         : { name: "VOICE", value: "LOAD", tone: "warn" };
 
-    const link: Cell = running
-      ? { name: "ENGINE", value: "ONLINE", tone: "ok" }
-      : { name: "ENGINE", value: "OFFLINE", tone: "err" };
-
-    return [core, voice, mic, link];
+    return [core, voice, mic];
   });
 </script>
 

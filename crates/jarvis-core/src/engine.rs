@@ -7,7 +7,7 @@ use crate::llm::{self, ChatTurn, SharedLlm};
 use crate::paths;
 use crate::router;
 use crate::settings::Settings;
-use crate::speaker::{SpeechProbeResult, SpeakerQuery, SpeakerReply};
+use crate::speaker::{SpeechProbeResult, SpeakerQuery, SpeakerReply, Verdict};
 use crate::stt::Stt;
 use crate::text::{clean_wakewords_and_prompt, extract_repeat_text, is_valid};
 use crate::tts::AudioMessage;
@@ -298,22 +298,28 @@ impl VadTracker {
     }
 }
 
-/// Ждёт вердикт фильтра говорящего, пропуская ответы VAD от прошлых фраз.
-/// `Err(())` — воркер не ответил за отведённое время.
-fn wait_for_verdict(
-    rx: &Receiver<SpeakerReply>,
-    timeout: Duration,
-) -> std::result::Result<Option<bool>, ()> {
+/// Ждёт вердикт фильтра говорящего с ожидаемым `id`, пропуская ответы VAD
+/// и устаревшие проверки (фоновые проверки перебивания). Таймаут — тоже
+/// [`Verdict::Unverified`]: при включённом фильтре фраза не проходит без
+/// проверки (fail-closed).
+fn wait_for_verdict(rx: &Receiver<SpeakerReply>, expected_id: u64, timeout: Duration) -> Verdict {
     let deadline = Instant::now() + timeout;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Err(());
+            return Verdict::Unverified("фильтр не ответил вовремя");
         }
         match rx.recv_timeout(left) {
-            Ok(SpeakerReply::Verified(verdict)) => return Ok(verdict),
+            Ok(SpeakerReply::Verified { id, verdict }) => {
+                if id == expected_id {
+                    return verdict;
+                }
+                // Ответ чужого запроса (например, фоновой проверки перебивания
+                // прошлой реплики): не наш вердикт, ждём свой.
+                continue;
+            }
             Ok(SpeakerReply::Speech(_)) => continue,
-            Err(_) => return Err(()),
+            Err(_) => return Verdict::Unverified("фильтр не ответил вовремя"),
         }
     }
 }
@@ -388,10 +394,39 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     // Фильтр говорящего включён для текущей фразы: сегмент ушёл на
     // верификацию голоса, и в Processing нужно забрать вердикт.
     let mut speaker_check_sent = false;
+    // Метка текущей проверки фразы: ответы фоновых проверок перебивания
+    // с другими id не принимаются за вердикт фразы.
+    let mut speaker_check_id: u64 = 0;
+    let mut verify_id: u64 = 1;
+    // Подсказка «образцов голоса нет» звучит один раз за сессию, а не на
+    // каждой фразе.
+    let mut speaker_hint_spoken = false;
     // Оценка фонового шума комнаты: по ней поднимаем порог речи, чтобы
     // вентилятор/улица не запускали распознавание.
     let mut noise_floor = 0.0f32;
     let mut was_speaking = false;
+    // Перебивание: микрофон слушает и во время ответа Джарвиса.
+    let barge_enabled = {
+        let s = h.settings.read().unwrap_or_else(|e| e.into_inner());
+        s.barge_in
+    };
+    let mut barge = BargeTracker::new(barge_enabled);
+    // Перебивание сработало: после конца речи Джарвиса буфер фразы
+    // пользователя (уже посеянный из кольца) не выбрасывать.
+    let mut barge_triggered = false;
+    // Сколько сэмплов в начале фразы — пре-ролл перебивания: для проверки
+    // голоса он вырезается (там эхо ответа Джарвиса), для STT остаётся.
+    let mut barge_preroll_samples = 0usize;
+    // Проверка владельца во время ответа: один запрос в полёте, свежий
+    // вердикт «владелец» открывает окно триггера перебивания.
+    let mut barge_probe_id: Option<u64> = None;
+    let mut barge_last_probe: Option<Instant> = None;
+    let mut barge_owner_until: Option<Instant> = None;
+    // Профиль отсутствует: перебивание по чистой энергии (как раньше).
+    let mut barge_free_gate = false;
+    // Последний исход диалога был Followup: после конца ответа окно
+    // уточнения начинается заново (раньше оно истекало во время речи).
+    let mut last_outcome_followup = false;
     let mut rng = rand::thread_rng();
     // VAD speakrs: пока пользователь говорит, фраза не уходит в STT.
     let mut vad = VadTracker::new();
@@ -483,41 +518,67 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                         }
                     };
 
-                    println!("📝 Распознано: {:?}", text);
+                    // «Распознано» печатаем после вердикта фильтра: иначе в
+                    // консоли чужая фраза выглядела принятой, хотя она отброшена.
 
                     // Вердикт фильтра говорящего: чужая речь не идёт ни в
                     // LLM, ни в команды — движок просто ждёт дальше.
                     if speaker_check_sent {
-                        let owner = match wait_for_verdict(
-                            &h.speaker_rx,
-                            Duration::from_millis(2000),
-                        ) {
-                            Ok(v) => v,
-                            Err(()) => {
-                                eprintln!("🎙️ Фильтр говорящего не ответил вовремя — фраза пропущена фильтром");
-                                None
-                            }
-                        };
+                        let verdict =
+                            wait_for_verdict(&h.speaker_rx, speaker_check_id, Duration::from_millis(2000));
                         speaker_check_sent = false;
-                        if owner == Some(false) {
-                            println!("🎙️ Посторонний голос — фраза не принята");
-                            let _ = h.events.send(JarvisEvent::Log {
-                                message: "Посторонний голос на фоне — фраза пропущена".into(),
-                            });
-                            command_buffer.clear();
-                            has_speech_started = false;
-                            silence_samples = 0;
-                            voiced_samples = 0;
-                            vad.reset_phrase();
-                            // Followup закрываем: чужая фраза не продолжение
-                            // диалога с владельцем.
-                            state = AppState::WaitingForWakeWord;
-                            followup_deadline = None;
-                            wi16.clear();
-                            audio_history.clear();
-                            continue;
+                        match verdict {
+                            Verdict::Owner => {}
+                            Verdict::Stranger => {
+                                println!("🎙️ Посторонний голос — фраза не принята");
+                                let _ = h.events.send(JarvisEvent::Log {
+                                    message: "Посторонний голос на фоне — фраза пропущена".into(),
+                                });
+                                reset_phrase_state(&mut command_buffer, &mut has_speech_started, &mut silence_samples, &mut voiced_samples, &mut vad);
+                                // Followup закрываем: чужая фраза не продолжение
+                                // диалога с владельцем.
+                                state = AppState::WaitingForWakeWord;
+                                followup_deadline = None;
+                                wi16.clear();
+                                audio_history.clear();
+                                continue;
+                            }
+                            Verdict::Unverified(reason) => {
+                                // Fail-closed: профиль есть, проверить не вышло —
+                                // фраза не проходит, но владелец получает честную
+                                // просьбу повторить вместо молчаливого игнора.
+                                eprintln!("🎙️ Голос не верифицирован ({reason}) — вежливый отказ");
+                                let _ = h.events.send(JarvisEvent::Log {
+                                    message: format!("Голос не верифицирован: {reason} — фраза не принята"),
+                                });
+                                let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(
+                                    "Не смог проверить голос. Повтори ещё раз, пожалуйста.".into(),
+                                ));
+                                reset_phrase_state(&mut command_buffer, &mut has_speech_started, &mut silence_samples, &mut voiced_samples, &mut vad);
+                                state = AppState::WaitingForWakeWord;
+                                followup_deadline = None;
+                                wi16.clear();
+                                audio_history.clear();
+                                continue;
+                            }
+                            Verdict::NoProfile => {
+                                // Фильтр включён, но образцов нет: пропускаем,
+                                // но один раз честно говорим, что он не работает.
+                                if !speaker_hint_spoken {
+                                    speaker_hint_spoken = true;
+                                    println!("🎙️ Фильтр голоса не активен: образцов владельца нет");
+                                    let _ = h.events.send(JarvisEvent::Log {
+                                        message: "Фильтр «только мой голос» не работает: нет записанных образцов".into(),
+                                    });
+                                    let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(
+                                        "Образцы моего голоса не записаны, фильтр «только мой голос» не работает. Запиши их в разделе «Обучение».".into(),
+                                    ));
+                                }
+                            }
                         }
                     }
+
+                    println!("📝 Распознано: {:?}", text);
 
                     let _ = h
                         .events
@@ -549,6 +610,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                         Outcome::Wake => {
                             state = AppState::WaitingForWakeWord;
                             followup_deadline = None;
+                            last_outcome_followup = false;
                             audio_history.clear();
                             wi16.clear();
                             h.llm_history
@@ -561,6 +623,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                         }
                         Outcome::Followup => {
                             state = AppState::WaitingForCommand;
+                            last_outcome_followup = true;
                             // Пустое распознавание (шум) окно не продлевает:
                             // иначе фоновый шум держит ассистента в режиме
                             // слушания бесконечно, съедая цикл за циклом.
@@ -631,22 +694,122 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             audio_history.push_back(s);
         }
 
-        // Пока Джарвис говорит, микрофон не слушаем: иначе хвост его же речи
-        // будет распознан как ответ пользователя.
+        // Пока Джарвис говорит, микрофон как команда не слушаем: иначе хвост
+        // его же речи будет распознан как ответ пользователя. Но за уровнем
+        // следим: пользователь может перебить (barge_in).
         let speaking_now = h.is_speaking.load(Ordering::SeqCst);
         if speaking_now {
             was_speaking = true;
             audio_history.clear();
+            if barge_triggered {
+                // Перебивание уже сработало: чанк копится в кольцо трекера,
+                // а посеянная фраза пользователя не трогается — Джарвис ещё
+                // доигрывает последние миллисекунды до стопа.
+                let floor = speech_floor(settings_snap.silence_rms_threshold, noise_floor);
+                barge.on_playback_chunk(&chunk_16k, now, floor);
+                continue;
+            }
             command_buffer.clear();
             has_speech_started = false;
             vad.reset_phrase();
+
+            // --- Перебивание по голосу владельца (speakrs) ---
+            // Энергетический трекер даёт «кто-то говорит громче эха»;
+            // фоновая проверка speakrs подтверждает, что это ВЛАДЕЛЕЦ, а не
+            // телевизор или видео: эхо Silero-голоса Джарвиса на профиль
+            // владельца не похоже. Нет профиля или фильтр выключен —
+            // перебивание работает по энергии, как раньше.
+            if settings_snap.speaker_filter
+                && !barge_free_gate
+                && barge.warmed_up()
+                && barge_probe_id.is_none()
+                && barge_last_probe
+                    .map_or(true, |t| now.duration_since(t) >= Duration::from_millis(BARGE_VERIFY_INTERVAL_MS))
+                && barge.ring_secs() >= BARGE_VERIFY_WINDOW_SECS
+            {
+                barge_last_probe = Some(now);
+                barge_probe_id = Some(verify_id);
+                verify_id = verify_id.wrapping_add(1);
+                let _ = h.speaker_tx.try_send(SpeakerQuery::Verify {
+                    id: barge_probe_id.unwrap(),
+                    samples: barge.recent_window(BARGE_VERIFY_WINDOW_SECS),
+                    threshold: (settings_snap.speaker_threshold - BARGE_VERIFY_DELTA)
+                        .max(0.4),
+                });
+            }
+
+            // Ответы фоновых проверок: свежий «владелец» открывает окно
+            // триггера; «нет профиля» — постоянный пропуск проверки.
+            while let Ok(reply) = h.speaker_rx.try_recv() {
+                match reply {
+                    SpeakerReply::Verified { id, verdict } => {
+                        if Some(id) == barge_probe_id {
+                            barge_probe_id = None;
+                            match verdict {
+                                Verdict::Owner => {
+                                    barge_owner_until = Some(
+                                        now + Duration::from_millis(BARGE_OWNER_TTL_MS),
+                                    );
+                                }
+                                Verdict::NoProfile => barge_free_gate = true,
+                                _ => {}
+                            }
+                        }
+                        // Чужой id — устаревший ответ, пропускаем.
+                    }
+                    SpeakerReply::Speech(_) => {}
+                }
+            }
+
+            let floor = speech_floor(settings_snap.silence_rms_threshold, noise_floor);
+            let owner_confirmed = barge_free_gate
+                || barge_owner_until.is_some_and(|until| now <= until);
+            if owner_confirmed && barge.on_playback_chunk(&chunk_16k, now, floor) {
+                barge_triggered = true;
+                println!("🎤 Перебивание: голос владельца — глушу речь");
+                let _ = h.events.send(JarvisEvent::Log {
+                    message: "Перебивание: голос владельца во время ответа".into(),
+                });
+                // Мгновенная тишина + отмена остатка ответа — тот же путь,
+                // что у голосовой команды «замолчи».
+                h.stop_audio_flag.store(true, Ordering::SeqCst);
+                h.llm_cancel.store(true, Ordering::SeqCst);
+                let _ = h.audio_tx.send(AudioMessage::Stop);
+                // Сказанное до триггера — начало фразы пользователя.
+                command_buffer = barge.take_preroll();
+                barge_preroll_samples = command_buffer.len();
+                has_speech_started = true;
+                voiced_samples = command_buffer.len();
+                silence_samples = 0;
+                vad.reset_phrase();
+                state = AppState::WaitingForCommand;
+                followup_deadline = Some(
+                    Instant::now() + Duration::from_secs(settings_snap.followup_window_secs),
+                );
+            }
             continue;
         }
 
         if was_speaking {
-            // Озвучка только что закончилась: выбрасываем хвост из буфера микрофона
-            // и коротко молчим, чтобы пользователь не начал говорить в пустоту.
+            // Озвучка только что закончилась. Обычный случай: выбрасываем хвост
+            // из буфера микрофона и коротко молчим, чтобы пользователь не начал
+            // говорить в пустоту. После перебивания: фраза пользователя уже
+            // посеяна — сохраняем её и продолжаем захват без стража.
             was_speaking = false;
+            let keep_phrase = barge_triggered;
+            barge_triggered = false;
+            barge.reset_playback();
+            // Фоновые проверки перебивания завершены вместе с ответом.
+            barge_probe_id = None;
+            barge_last_probe = None;
+            barge_owner_until = None;
+            barge_free_gate = false;
+            if keep_phrase {
+                while mic_rx.try_recv().is_ok() {}
+                // Хвост эха уже вырезан триггером: пре-ролл фразы важнее
+                // стража, спать нельзя — потеряем кусок живой речи.
+                continue;
+            }
             has_speech_started = false;
             silence_samples = 0;
             voiced_samples = 0;
@@ -654,6 +817,13 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             vad.reset_phrase();
             while mic_rx.try_recv().is_ok() {}
             audio_history.clear();
+            // Ответ закончился: окно уточнения начинается заново, если
+            // предыдущая реплика была вопросом владельца (а не шумом).
+            if last_outcome_followup && settings_snap.followup_window_secs > 0 {
+                followup_deadline = Some(
+                    Instant::now() + Duration::from_secs(settings_snap.followup_window_secs),
+                );
+            }
             std::thread::sleep(Duration::from_millis(POST_SPEAK_GUARD_MS));
             audio_history.clear();
             continue;
@@ -713,6 +883,13 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                             name: d.name.clone(),
                             score: d.score,
                         });
+
+                        // Обращение НЕ верифицируем по голосу: проверка короткого
+                        // «Джарвис» по профилю из диктанта отшивала владельца
+                        // (репорт пользователя 2026-11-06). Контракт такой: отклик
+                        // получает всякий, кого признал детектор wake word
+                        // (обучен на образцах владельца), а строгая проверка —
+                        // на фразе ПОСЛЕ обращения; чужая команда там отбрасывается.
 
                         let global_cfg = get_global_config(&h.commands);
                         let ack = paths::resolve_data_path(&global_cfg.reply_ack);
@@ -796,7 +973,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                             }
                             SpeakerReply::Speech(None) => vad.note_failure(),
                             // Вердикт фильтра от прошлой фразы: текущая его не ждёт.
-                            SpeakerReply::Verified(_) => {}
+                            SpeakerReply::Verified { .. } => {}
                         }
                     }
 
@@ -875,10 +1052,23 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 
                         // Фильтр говорящего: сегмент уходит на проверку голоса
                         // параллельно с STT — вердикт забирается в Processing.
+                        // На проверку идёт фраза БЕЗ пре-ролла перебивания
+                        // (там эхо ответа Джарвиса портит сходство).
                         speaker_check_sent = settings_snap.speaker_filter;
                         if speaker_check_sent {
+                            let clean = verify_slice(
+                                &padded,
+                                pad,
+                                barge_preroll_samples,
+                                (crate::speaker::MIN_SEGMENT_SECS * wake::SAMPLE_RATE as f32)
+                                    as usize,
+                            )
+                            .to_vec();
+                            speaker_check_id = verify_id;
+                            verify_id = verify_id.wrapping_add(1);
                             let query = SpeakerQuery::Verify {
-                                samples: padded.clone(),
+                                id: speaker_check_id,
+                                samples: clean,
                                 threshold: settings_snap.speaker_threshold,
                             };
                             if h.speaker_tx.try_send(query).is_err() {
@@ -892,6 +1082,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                         }
 
                         state = AppState::Processing;
+                        barge_preroll_samples = 0;
                         // Фраза ушла в STT: ответы VAD на неё больше не нужны.
                         vad.reset_phrase();
                         // Сообщаем UI, что фраза закончилась и пошла обработка.
@@ -913,6 +1104,191 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 /// Во сколько раз речь должна быть громче фона, чтобы считаться речью.
 const NOISE_MARGIN: f32 = 1.8;
 
+// --- Перебивание (barge-in) ---
+
+/// Сколько подряд идущих «громких» сэмплов микрофона подтверждают речь
+/// пользователя (сек): короче — щелчок, длиннее — заметная задержка реакции.
+const BARGE_CONFIRM_SECS: f32 = 0.22;
+/// Речь пользователя должна быть во столько раз громче эха голоса Джарвиса
+/// (при играющих колонках), чтобы считаться перебиванием.
+const BARGE_BASELINE_MARGIN: f32 = 1.8;
+/// Разогрев: сколько секунд непрерывной речи Джарвиса слушать, прежде чем
+/// разрешить перебивание. За это время базлайн эха выходит на рабочий
+/// уровень И короткие системные звуки (отклик на «Джарвис» ~0.6 с, таймеры)
+/// не вооружают детектор — иначе ложное перебивание на собственную речь
+/// владельца сразу после отклика вклеивало эхо в начало его команды и
+/// проверка голоса отвергала чистую фразу.
+const BARGE_WARMUP_SECS: f32 = 1.2;
+/// Хвост кольца, который становится началом фразы пользователя, сек.
+const BARGE_PREROLL_SECS: f32 = 0.35;
+/// Глубина кольца микрофона во время речи Джарвиса, сек.
+const BARGE_RING_SECS: f32 = 3.0;
+/// Пауза между перебиваниями, мс.
+const BARGE_COOLDOWN_MS: u64 = 2000;
+
+// --- Подтверждение владельца для перебивания (speakrs) ---
+
+/// Как часто во время ответа проверять окно микрофона на голос владельца, мс.
+const BARGE_VERIFY_INTERVAL_MS: u64 = 350;
+/// Окно микрофона для фоновой проверки, сек: короче — шумный эмбеддинг.
+const BARGE_VERIFY_WINDOW_SECS: f32 = 2.0;
+/// Порог для подтверждения владельца: мягче основного (окно содержит эхо
+/// ответа вперемешку с голосом), но не ниже разумного пола.
+const BARGE_VERIFY_DELTA: f32 = 0.1;
+/// Сколько живёт вердикт «владелец» для триггера, мс.
+const BARGE_OWNER_TTL_MS: u64 = 1000;
+
+/// Детектор перебивания: во время речи Джарвиса следит за микрофоном поверх
+/// эха его собственного голоса и решает, заговорил ли пользователь.
+///
+/// Эхо (речь Джарвиса из колонок) и голос пользователя неразличимы по
+/// природе — только по уровню: пользователь у микрофона громче. Базлайн эха
+/// — EMA по чанкам во время ответа; триггер — устойчивое превышение
+/// `max(базлайн × поле, порог речи)` в течение [`BARGE_CONFIRM_SECS`].
+struct BargeTracker {
+    enabled: bool,
+    /// Кольцо последних секунд микрофона (источник пре-ролла фразы).
+    ring: VecDeque<f32>,
+    ring_capacity: usize,
+    /// EMA уровня эха во время ответа.
+    baseline: f32,
+    /// Сэмплы подряд выше порога.
+    speech_samples: usize,
+    /// Сэмплы с начала текущей речи Джарвиса (для разогрева).
+    playback_samples: usize,
+    cooldown_until: Option<Instant>,
+    /// Перебивание уже сработало в этой реплике.
+    triggered: bool,
+}
+
+impl BargeTracker {
+    fn new(enabled: bool) -> Self {
+        let ring_capacity = (BARGE_RING_SECS * wake::SAMPLE_RATE as f32) as usize;
+        Self {
+            enabled,
+            ring: VecDeque::with_capacity(ring_capacity),
+            ring_capacity,
+            baseline: 0.0,
+            speech_samples: 0,
+            playback_samples: 0,
+            cooldown_until: None,
+            triggered: false,
+        }
+    }
+
+    /// Чанк микрофона во время речи Джарвиса. `true` — перебивание: движок
+    /// глушит звук и берёт [`Self::take_preroll`] как начало фразы.
+    fn on_playback_chunk(&mut self, chunk: &[f32], now: Instant, speech_floor: f32) -> bool {
+        for &s in chunk {
+            if self.ring.len() >= self.ring_capacity {
+                self.ring.pop_front();
+            }
+            self.ring.push_back(s);
+        }
+        if !self.enabled || self.triggered {
+            return false;
+        }
+        if let Some(until) = self.cooldown_until {
+            if now < until {
+                return false;
+            }
+            self.cooldown_until = None;
+        }
+
+        let rms = calculate_rms(chunk);
+        // Разогрев: первые мгновения ответа калибруют базлайн, триггер молчит.
+        self.playback_samples += chunk.len();
+        if (self.playback_samples as f32 / wake::SAMPLE_RATE as f32) < BARGE_WARMUP_SECS {
+            self.baseline = self.baseline * 0.5 + rms * 0.5;
+            return false;
+        }
+        let echo_line = self.baseline * BARGE_BASELINE_MARGIN;
+        let trigger_line = echo_line.max(speech_floor);
+        // Базлайн поднимает только фоновый уровень: всплески (возможно,
+        // пользователь) в калибровку не попадают.
+        if rms <= trigger_line {
+            self.baseline = self.baseline * 0.9 + rms * 0.1;
+            self.speech_samples = self.speech_samples.saturating_sub(chunk.len() / 2);
+            return false;
+        }
+        self.speech_samples += chunk.len();
+        if self.speech_samples as f32 / wake::SAMPLE_RATE as f32 >= BARGE_CONFIRM_SECS {
+            self.triggered = true;
+            self.cooldown_until = Some(now + Duration::from_millis(BARGE_COOLDOWN_MS));
+            return true;
+        }
+        false
+    }
+
+    /// Начало фразы пользователя: хвост кольца перед триггером.
+    fn take_preroll(&self) -> Vec<f32> {
+        let take = ((BARGE_PREROLL_SECS * wake::SAMPLE_RATE as f32) as usize).min(self.ring.len());
+        self.ring
+            .iter()
+            .skip(self.ring.len() - take)
+            .copied()
+            .collect()
+    }
+
+    /// Последние `secs` секунд кольца — окно для фоновой проверки владельца.
+    fn recent_window(&self, secs: f32) -> Vec<f32> {
+        let take = ((secs * wake::SAMPLE_RATE as f32) as usize).min(self.ring.len());
+        self.ring
+            .iter()
+            .skip(self.ring.len() - take)
+            .copied()
+            .collect()
+    }
+
+    /// Глубина кольца в секундах.
+    fn ring_secs(&self) -> f32 {
+        self.ring.len() as f32 / wake::SAMPLE_RATE as f32
+    }
+
+    /// Разогрев пройден: перебивание разрешено решать.
+    fn warmed_up(&self) -> bool {
+        (self.playback_samples as f32 / wake::SAMPLE_RATE as f32) >= BARGE_WARMUP_SECS
+    }
+
+    /// Речь Джарвиса закончилась без перебивания — сброс калибровки.
+    fn reset_playback(&mut self) {
+        self.ring.clear();
+        self.baseline = 0.0;
+        self.speech_samples = 0;
+        self.playback_samples = 0;
+        self.triggered = false;
+    }
+}
+
+/// Сброс состояния захвата фразы (после отклонённой/обработанной реплики).
+fn reset_phrase_state(
+    command_buffer: &mut Vec<f32>,
+    has_speech_started: &mut bool,
+    silence_samples: &mut usize,
+    voiced_samples: &mut usize,
+    vad: &mut VadTracker,
+) {
+    command_buffer.clear();
+    *has_speech_started = false;
+    *silence_samples = 0;
+    *voiced_samples = 0;
+    vad.reset_phrase();
+}
+
+/// Сегмент для проверки голоса: без пре-ролла перебивания. Префикс фразы,
+/// захваченный триггером перебивания, содержит эхо ответа Джарвиса из
+/// колонок — смешанный эмбеддинг не дотягивал до порога, и владелец
+/// получал «Посторонний голос». STT при этом видит всю фразу целиком.
+/// Чистого хвоста меньше минимума — возвращаем всё (решение за фильтром).
+fn verify_slice<'a>(padded: &'a [f32], pad: usize, preroll: usize, min_samples: usize) -> &'a [f32] {
+    let start = pad.saturating_add(preroll);
+    if start < padded.len() && padded.len() - start >= min_samples {
+        &padded[start..]
+    } else {
+        padded
+    }
+}
+
 /// Порог, выше которого чанк считается речью: настройка пользователя, но не
 /// ниже фонового шума комнаты с запасом.
 fn speech_floor(threshold: f32, noise_floor: f32) -> f32 {
@@ -930,6 +1306,43 @@ fn followup_expired_or_none(deadline: Option<Instant>) -> bool {
         Some(dl) => Instant::now() >= dl,
         None => true,
     }
+}
+
+/// Фразы-триггеры детерминированного пути к агенту зрения.
+const SCREEN_QUESTION_PATTERNS: &[&str] = &[
+    "что на экране",
+    "что сейчас на экране",
+    "что ты видишь",
+    "что видишь",
+    "что открыто",
+    "что на мониторе",
+    "что написано на экране",
+    "посмотри на экран",
+    "проверь экран",
+    "опиши экран",
+    "опиши что на экране",
+    "что у меня на экране",
+];
+
+/// «Что ты видишь на экране?» — детерминированный ответ по Accessibility,
+/// без LLM-рулетки. Возвращает `Some(Outcome)`, если фраза распознана.
+fn is_screen_question(text: &str) -> bool {
+    let lowered = crate::text::clean_wakewords_and_prompt(text).to_lowercase();
+    SCREEN_QUESTION_PATTERNS.iter().any(|p| lowered.contains(p))
+}
+
+fn try_screen_question(text: &str, h: &EngineHandles) -> Option<Outcome> {
+    if !is_screen_question(text) {
+        return None;
+    }
+    // Модель зрения удалена: честный отказ вместо выдуманного описания.
+    // Детерминированное описание экрана через Accessibility вернётся вместе
+    // с модулем автоматизации.
+    println!("👀 Вопрос про экран: модель зрения удалена — честный отказ");
+    let reply = "Смотреть экран я пока не умею: модель зрения убрали. Могу выполнять команды вслепую — скажи, что сделать.";
+    let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(reply.into()));
+    let _ = h.events.send(JarvisEvent::Reply { text: reply.into() });
+    Some(Outcome::Followup)
 }
 
 /// Ответ на вопрос «задача N сделана?». Молчание и невнятный ответ оставляют
@@ -1080,6 +1493,14 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
         return Outcome::Followup;
     }
 
+    // «Что ты видишь / что на экране?» — детерминированно агенту зрения.
+    // Перездавать это в LLM нельзя: маленькая модель отвечает текстом про
+    // «текстовое поле» и галлюцинирует — здесь нужен Holo, который видит
+    // пиксели. Описание экрана проговаривается как обычный ответ.
+    if let Some(outcome) = try_screen_question(text, h) {
+        return outcome;
+    }
+
     let (matched_cmd, global_cfg) = {
         let lock = h.commands.read().unwrap_or_else(|e| e.into_inner());
         // Детерминированно выполняем системные команды — стоп речи и
@@ -1105,6 +1526,9 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
         if cmd.action_type == "stop" {
             h.stop_audio_flag.store(true, Ordering::SeqCst);
             h.llm_cancel.store(true, Ordering::SeqCst);
+            // «Стоп» прерывает и автоматизацию экрана: цикл останавливается
+            // между действиями, экран больше не трогается.
+            crate::auto::request_cancel();
             let _ = h.audio_tx.send(AudioMessage::Stop);
 
             let reply_error = global_cfg.reply_error.clone();
@@ -1296,6 +1720,142 @@ mod vad_tests {
     use super::*;
 
     #[test]
+    fn barge_does_not_trigger_on_echo_alone() {
+        // Колонки играют ответ: эхо стабильно, базлайн калибруется по нему —
+        // триггера нет.
+        let mut barge = BargeTracker::new(true);
+        let now = Instant::now();
+        let chunk = vec![0.05f32; 1600]; // 0.1 с эха
+        for i in 0..40 {
+            assert!(
+                !barge.on_playback_chunk(&chunk, now + Duration::from_millis(i * 100), 0.018),
+                "эхо не должно перебивать самого Джарвиса"
+            );
+        }
+        assert!(!barge.triggered);
+    }
+
+    #[test]
+    fn barge_triggers_when_user_is_louder_than_echo() {
+        // Эхо ~0.05, пользователь говорит втрое громче: после разогрева
+        // (1.2 с — отклик/короткие звуки не вооружают) и накопления
+        // BARGE_CONFIRM_SECS — перебивание.
+        let mut barge = BargeTracker::new(true);
+        let now = Instant::now();
+        let echo = vec![0.05f32; 1600];
+        for i in 0..15 {
+            barge.on_playback_chunk(&echo, now + Duration::from_millis(i * 100), 0.018);
+        }
+        let voice = vec![0.15f32; 1600]; // 0.1 с голоса
+        let mut triggered = false;
+        for i in 0..10 {
+            if barge.on_playback_chunk(&voice, now + Duration::from_millis(1500 + i * 100), 0.018) {
+                triggered = true;
+                break;
+            }
+        }
+        assert!(triggered, "громкий пользователь должен перебить эхо 0.05");
+        // Хвост кольца стал пре-роллом фразы.
+        let preroll = barge.take_preroll();
+        assert!(!preroll.is_empty());
+        assert!(preroll.len() <= (BARGE_PREROLL_SECS * wake::SAMPLE_RATE as f32) as usize);
+    }
+
+    #[test]
+    fn barge_does_not_arm_during_short_ack() {
+        // Отклик на «Джарвис» ~0.6 с эха: разогрев 1.2 с не пройден —
+        // даже громкая речь владельца сразу после отклика не триггерит.
+        let mut barge = BargeTracker::new(true);
+        let now = Instant::now();
+        let ack_echo = vec![0.05f32; 1600];
+        for i in 0..6 {
+            assert!(!barge.on_playback_chunk(
+                &ack_echo,
+                now + Duration::from_millis(i * 100),
+                0.018
+            ));
+        }
+        let voice = vec![0.3f32; 1600];
+        for i in 0..6 {
+            assert!(
+                !barge.on_playback_chunk(&voice, now + Duration::from_millis(600 + i * 100), 0.018),
+                "перебивание не должно срабатывать на отклике"
+            );
+        }
+        assert!(!barge.triggered);
+    }
+
+    #[test]
+    fn barge_respects_floor_and_cooldown() {
+        // Ниже порога речи (в наушниках эха нет) триггера нет.
+        let mut barge = BargeTracker::new(true);
+        let now = Instant::now();
+        let quiet = vec![0.01f32; 1600];
+        for i in 0..30 {
+            assert!(!barge.on_playback_chunk(
+                &quiet,
+                now + Duration::from_millis(i * 100),
+                0.018
+            ));
+        }
+        // После срабатывания повторный триггер в cooldown невозможен.
+        barge.cooldown_until = Some(now + Duration::from_secs(5));
+        barge.triggered = false;
+        let loud = vec![0.3f32; 1600];
+        assert!(!barge.on_playback_chunk(&loud, now + Duration::from_millis(100), 0.018));
+    }
+
+    #[test]
+    fn barge_disabled_is_always_silent() {
+        let mut barge = BargeTracker::new(false);
+        let now = Instant::now();
+        let loud = vec![0.3f32; 1600];
+        for i in 0..30 {
+            assert!(!barge.on_playback_chunk(
+                &loud,
+                now + Duration::from_millis(i * 100),
+                0.018
+            ));
+        }
+        assert!(!barge.triggered);
+    }
+
+    #[test]
+    fn verify_slice_cuts_barge_preroll_with_echo() {
+        const RATE: usize = 16_000;
+        let pad = 3200; // 0.2 с
+        let preroll = 5600; // 0.35 с пре-ролла перебивания
+        let speech = vec![1.0f32; RATE * 3]; // 3 с чистой речи после эха
+        let mut padded = vec![0.0f32; pad];
+        padded.extend(vec![2.0f32; preroll]); // «эхо»
+        padded.extend_from_slice(&speech);
+        padded.extend(vec![0.0f32; pad]);
+
+        let clean = verify_slice(&padded, pad, preroll, RATE);
+        // Срез начинается после эха: внутри нет «эха» (2.0), начинается
+        // сразу с чистой речи; хвостовой паддинг допустим — trim_silence
+        // внутри верификации его снимет.
+        assert_eq!(clean.len(), RATE * 3 + pad);
+        assert_eq!(clean[0], 1.0);
+        assert!(!clean.iter().any(|&s| s == 2.0), "эхо попало в срез");
+
+        // Хвоста после пре-ролла меньше минимума — отдаём всю фразу
+        // (решение примет фильтр, а не молчаливый пропуск).
+        let short_speech = vec![1.0f32; RATE / 2];
+        let mut short_padded = vec![0.0f32; pad];
+        short_padded.extend(vec![2.0f32; preroll]);
+        short_padded.extend_from_slice(&short_speech);
+        short_padded.extend(vec![0.0f32; pad]);
+        assert_eq!(
+            verify_slice(&short_padded, pad, preroll, RATE).len(),
+            short_padded.len()
+        );
+
+        // Без перебивания срез = фраза с хвостовым паддингом (без ведущего).
+        assert_eq!(verify_slice(&padded, pad, 0, RATE).len(), padded.len() - pad);
+    }
+
+    #[test]
     fn steady_noise_does_not_trigger_speech() {
         let threshold = 0.018f32;
         let ceiling = threshold * 4.0;
@@ -1398,10 +1958,57 @@ mod vad_tests {
     fn verdict_waits_through_stale_vad_replies() {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(SpeakerReply::Speech(None)).unwrap();
-        tx.send(SpeakerReply::Verified(Some(false))).unwrap();
+        tx.send(SpeakerReply::Verified {
+            id: 7,
+            verdict: Verdict::Stranger,
+        })
+        .unwrap();
         assert_eq!(
-            wait_for_verdict(&rx, Duration::from_millis(100)),
-            Ok(Some(false))
+            wait_for_verdict(&rx, 7, Duration::from_millis(100)),
+            Verdict::Stranger
+        );
+    }
+
+    #[test]
+    fn verdict_skips_stale_barge_replies_by_id() {
+        // Ответ фоновой проверки перебивания (id 3) не принимается за
+        // вердикт фразы (id 9): иначе перебивание прошлого ответа «признавало»
+        // чужую фразу владельцем.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(SpeakerReply::Verified {
+            id: 3,
+            verdict: Verdict::Owner,
+        })
+        .unwrap();
+        tx.send(SpeakerReply::Verified {
+            id: 9,
+            verdict: Verdict::Stranger,
+        })
+        .unwrap();
+        assert_eq!(
+            wait_for_verdict(&rx, 9, Duration::from_millis(100)),
+            Verdict::Stranger
+        );
+        // Ожидаемого id нет — fail-closed, а не чужой устаревший вердикт.
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        tx2.send(SpeakerReply::Verified {
+            id: 3,
+            verdict: Verdict::Owner,
+        })
+        .unwrap();
+        assert_eq!(
+            wait_for_verdict(&rx2, 9, Duration::from_millis(50)),
+            Verdict::Unverified("фильтр не ответил вовремя")
+        );
+    }
+
+    #[test]
+    fn verdict_timeout_is_fail_closed() {
+        let (_tx, rx) = std::sync::mpsc::channel::<SpeakerReply>();
+        // Воркер молчит — фраза не проходит, а не «пропущена фильтром».
+        assert_eq!(
+            wait_for_verdict(&rx, 1, Duration::from_millis(30)),
+            Verdict::Unverified("фильтр не ответил вовремя")
         );
     }
 
@@ -1414,4 +2021,17 @@ mod vad_tests {
         }
         assert!(floor <= ceiling);
     }
+
+    #[test]
+    fn screen_question_patterns_match_real_phrases() {
+        assert!(is_screen_question("что ты видишь на экране?"));
+        assert!(is_screen_question("джарвис что на экране"));
+        assert!(is_screen_question("посмотри на экран"));
+        assert!(is_screen_question("Что открыто у меня сейчас?"));
+        // Не вопросы про экран — не перехватываем.
+        assert!(!is_screen_question("какая погода в москве"));
+        assert!(!is_screen_question("поставь таймер на пять минут"));
+        assert!(!is_screen_question("открой ютуб"));
+    }
 }
+

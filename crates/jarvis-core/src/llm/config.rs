@@ -79,7 +79,7 @@ pub fn backend() -> String {
 /// Задать бэкенд (вызывается из `Settings::apply`).
 pub fn set_backend(name: &str) {
     let value = match name {
-        "uzu" | "candle" => name.to_string(),
+        "uzu" | "candle" | "api" => name.to_string(),
         other => {
             eprintln!(
                 "⚠️ Неизвестный llm_backend «{other}» — использую {default}",
@@ -93,6 +93,72 @@ pub fn set_backend(name: &str) {
         .write()
         .unwrap_or_else(|e| e.into_inner());
     *b = value;
+}
+
+// --- Облачная модель (OpenAI-совместимый API) ---
+
+/// Параметры облачного провайдера: пресет, адрес, ключ, модель, каталог.
+/// Заполняются из settings.toml до старта загрузчика LLM.
+static API_PRESET: std::sync::OnceLock<std::sync::RwLock<String>> = std::sync::OnceLock::new();
+static API_BASE_URL: std::sync::OnceLock<std::sync::RwLock<String>> = std::sync::OnceLock::new();
+static API_KEY: std::sync::OnceLock<std::sync::RwLock<String>> = std::sync::OnceLock::new();
+static API_MODEL: std::sync::OnceLock<std::sync::RwLock<String>> = std::sync::OnceLock::new();
+static API_FOLDER_ID: std::sync::OnceLock<std::sync::RwLock<String>> = std::sync::OnceLock::new();
+
+fn api_lock(
+    slot: &'static std::sync::OnceLock<std::sync::RwLock<String>>,
+    default: &str,
+) -> &'static std::sync::RwLock<String> {
+    slot.get_or_init(|| std::sync::RwLock::new(default.to_string()))
+}
+
+/// Параметры облачного провайдера: пресет ("yandex" | "openai").
+pub fn api_preset() -> String {
+    api_lock(&API_PRESET, "yandex")
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Базовый адрес OpenAI-совместимого API.
+pub fn api_base_url() -> String {
+    api_lock(&API_BASE_URL, crate::llm::api_backend::YANDEX_BASE_URL)
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// API-ключ облачного провайдера.
+pub fn api_key() -> String {
+    api_lock(&API_KEY, "")
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Имя модели у провайдера.
+pub fn api_model() -> String {
+    api_lock(&API_MODEL, crate::llm::api_backend::YANDEX_DEFAULT_MODEL)
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Идентификатор каталога (только Яндекс).
+pub fn api_folder_id() -> String {
+    api_lock(&API_FOLDER_ID, "")
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Задать параметры облачного провайдера (вызывается из `Settings::apply`).
+pub fn set_api_config(preset: &str, base_url: &str, key: &str, model: &str, folder_id: &str) {
+    *api_lock(&API_PRESET, "").write().unwrap_or_else(|e| e.into_inner()) = preset.to_string();
+    *api_lock(&API_BASE_URL, "").write().unwrap_or_else(|e| e.into_inner()) = base_url.to_string();
+    *api_lock(&API_KEY, "").write().unwrap_or_else(|e| e.into_inner()) = key.to_string();
+    *api_lock(&API_MODEL, "").write().unwrap_or_else(|e| e.into_inner()) = model.to_string();
+    *api_lock(&API_FOLDER_ID, "").write().unwrap_or_else(|e| e.into_inner()) = folder_id.to_string();
 }
 
 /// Каталог модели LLM: по умолчанию Qwen3.5-0.8B.

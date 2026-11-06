@@ -61,6 +61,22 @@ export interface Settings {
   speaker_filter: boolean;
   /** Порог косинусного сходства с голосовым профилем владельца. */
   speaker_threshold: number;
+
+  // --- Облачные модели (OpenAI-совместимый API) ---
+  /** Мастер первого запуска пройден (иначе показывается онбординг). */
+  setup_done: boolean;
+  /** Пресет провайдера: "yandex" | "openai". */
+  api_preset: string;
+  /** Базовый адрес API (OpenAI-совместимый). */
+  api_base_url: string;
+  /** API-ключ. */
+  api_key: string;
+  /** Имя модели у провайдера. */
+  api_model: string;
+  /** Идентификатор каталога (только Яндекс). */
+  api_folder_id: string;
+  /** HF-репозиторий FastConformer пользователя (username/repo), пусто — релиз. */
+  asr_hf_repo: string;
 }
 
 export interface Toast {
@@ -124,6 +140,16 @@ export const store = $state({
   wakeScore: 0 as number,
   audioLevel: 0 as number,
   /**
+   * Диктант для профиля голоса: "idle" | "recording" | "checking" и итог
+   * последней проверки (совпадение + расшифровка).
+   */
+  voiceTrain: {
+    state: "idle" as "idle" | "recording" | "checking",
+    lastOk: null as boolean | null,
+    overlap: 0 as number,
+    transcript: "",
+  },
+  /**
    * Откуда пришёл уровень звука: «mic» — говорит пользователь, «tts» — сам
    * Джарвис. Без этого индикатор одинаково реагировал бы на свою же речь.
    */
@@ -169,7 +195,7 @@ export function toast(text: string, kind: Toast["kind"] = "info", ms = 2800) {
 }
 
 /** Вторичные экраны: открываются из разделов и требуют кнопку «назад». */
-export const SUB_PAGES = ["commands", "voice", "wakeword", "help"];
+export const SUB_PAGES = ["commands", "voice", "voicetrain", "wakeword", "help"];
 
 /** Четыре раздела нижней навигации. */
 export const NAV_PAGES = ["home", "memory", "system", "settings"];
@@ -241,9 +267,17 @@ export const settings = $state<Settings>({
   tts_voice: "ru_dmitriy",
   tts_speed: 1.0,
   ack_before_llm: false,
+  barge_in: true,
   topic_memory: true,
   speaker_filter: true,
   speaker_threshold: 0.6,
+  setup_done: false,
+  api_preset: "yandex",
+  api_base_url: "https://llm.api.cloud.yandex.net/v1",
+  api_key: "",
+  api_model: "yandexgpt-lite",
+  api_folder_id: "",
+  asr_hf_repo: "",
 });
 
 export async function loadSettings() {
@@ -376,6 +410,16 @@ export async function initEvents() {
       case "record_saved":
         store.recording = false;
         break;
+      case "voice_check": {
+        const ok = (ev.ok as boolean) ?? false;
+        store.voiceTrain = {
+          state: "idle",
+          lastOk: ok,
+          overlap: (ev.overlap as number) ?? 0,
+          transcript: ((ev.transcript as string) ?? "").slice(0, 300),
+        };
+        break;
+      }
       case "mic_permission":
         store.micPermission = (ev.granted as boolean) ?? false;
         if (store.micPermission) toast("Микрофон подключён", "ok");

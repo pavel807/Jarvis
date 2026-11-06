@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { settings, patchSettings, toast, go, store } from "../store.svelte";
+  import { settings, patchSettings, toast, go, store, type Settings } from "../store.svelte";
   import { voiceName } from "../voices";
   import SwitchRow from "../components/SwitchRow.svelte";
   import AppIcon from "../components/AppIcon.svelte";
@@ -14,14 +14,11 @@
 
   const SECTIONS = [
     { key: "modules", title: "Разделы" },
+    { key: "ai", title: "Модель" },
     { key: "general", title: "Общие" },
-    { key: "stt", title: "Распознавание" },
-    { key: "tts", title: "Синтез речи" },
     { key: "mic", title: "Микрофон" },
-    { key: "ai", title: "AI-модель" },
-    { key: "web", title: "Интернет" },
     { key: "system", title: "Система" },
-  ] as const;
+] as const;
 
   type SectionKey = (typeof SECTIONS)[number]["key"];
 
@@ -51,6 +48,21 @@
   type MicStatus = "authorized" | "denied" | "pending" | "unknown";
   let micStatus = $state<MicStatus>("unknown");
   let micBusy = $state(false);
+  // Сколько образцов голоса владельца записано (для статуса профиля).
+  let voiceSamples = $state<number | null>(null);
+
+  async function refreshVoiceSamples() {
+    try {
+      const samples = await invoke<{ train: [string, number][] }>("ww_samples");
+      // В профиле участвуют записи владельца: образцы «Джарвис» ([jarvis]) и
+      // диктанты ([voice], приходят в общем списке); фоновые (none) не считаются.
+      voiceSamples = samples.train.filter(
+        (entry) => entry[0].includes("[jarvis]") || entry[0].includes("[voice]"),
+      ).length;
+    } catch {
+      voiceSamples = null;
+    }
+  }
 
   const MIC_STATUS_TEXT: Record<MicStatus, string> = {
     authorized: "Разрешён — Джарвис слышит вас",
@@ -99,6 +111,8 @@
     }
   }
 
+  // --- Облачная модель: статус не нужен, поля задаются в разделе «AI-модель» ---
+
   $effect(() => {
     const granted = store.micPermission;
     if (granted === true) micStatus = "authorized";
@@ -139,6 +153,24 @@
     },
   ];
 
+  /** Облачные варианты: отдельная логика выбора (пресет + поля ключа). */
+  const apiChoices = [
+    {
+      preset: "yandex" as const,
+      title: "Яндекс GPT — облако",
+      hint: "Ответы в интернете через Яндекс. Нужен API-ключ Яндекс.Облака и идентификатор каталога.",
+    },
+    {
+      preset: "openai" as const,
+      title: "Своя модель (API) — облако",
+      hint: "Любой OpenAI-совместимый сервис: OpenAI, OpenRouter, LM Studio и другие. Ключ, адрес и модель — ниже.",
+    },
+  ];
+
+  function apiPicked(preset: string): boolean {
+    return settings.llm_backend === "api" && settings.api_preset === preset;
+  }
+
   function llmPicked(choice: (typeof llmChoices)[number]): boolean {
     return settings.llm_backend === choice.backend && settings.llm_model === choice.model;
   }
@@ -149,22 +181,52 @@
     toast("Модель сменится после перезапуска Джарвиса", "ok");
   }
 
-  const maxTokenChoices = [
-    { value: 0, label: "Без лимита" },
-    { value: 128, label: "128 токенов" },
-    { value: 256, label: "256 токенов" },
-    { value: 512, label: "512 токенов" },
-    { value: 1024, label: "1024 токена" },
-  ];
+  // ---------- Облачная модель ----------
 
-  async function pickMaxTokens(value: number) {
-    await patchSettings({ llm_max_tokens: value });
+  /** Облако выбрано? */
+  const apiActive = $derived(settings.llm_backend === "api");
+  const yandexActive = $derived(apiActive && settings.api_preset === "yandex");
+
+  async function pickApi(preset: "yandex" | "openai") {
+    if (apiActive && settings.api_preset === preset) return;
+    const base =
+      preset === "yandex"
+        ? "https://llm.api.cloud.yandex.net/v1"
+        : "https://api.openai.com/v1";
+    const model = preset === "yandex" ? "yandexgpt-lite" : "gpt-4o-mini";
+    await patchSettings({ llm_backend: "api", api_preset: preset, api_base_url: base, api_model: model });
+    toast(
+      settings.api_key
+        ? "Облако включится после перезапуска Джарвиса"
+        : "Впиши API-ключ ниже — он сохранится сам",
+      "ok",
+    );
+  }
+
+  async function saveApiField(patch: Partial<Settings>) {
+    await patchSettings(patch);
+  }
+
+  // Проверка облачного ключа минимальным запросом.
+  let apiChecking = $state(false);
+  async function checkApi() {
+    if (apiChecking) return;
+    apiChecking = true;
+    try {
+      const answer = await invoke<string>("llm_api_test");
+      toast(`Модель отвечает: «${answer}»`, "ok", 4000);
+    } catch (e) {
+      toast(`Не получилось: ${e}`, "err", 6000);
+    } finally {
+      apiChecking = false;
+    }
   }
 
   // ---------- Система ----------
 
   onMount(() => {
     void refreshMicStatus();
+    void refreshVoiceSamples();
     void (async () => {
       try {
         const { isEnabled } = await import("@tauri-apps/plugin-autostart");
@@ -205,7 +267,7 @@
 <div class="page">
   <div class="toolbar">
     <div class="search-box">
-      <span class="icon"><AppIcon name="search" size={14} /></span>
+      <span class="search-box__icon"><AppIcon name="search" size={14} /></span>
       <input
         bind:value={query}
         class="input"
@@ -268,6 +330,18 @@
           <span class="row-item__chevron"><AppIcon name="chevronRight" size={15} /></span>
         </button>
       {/if}
+      {#if hit("диктант", "профиль голоса", "фильтр голоса", "мой голос")}
+        <button class="row-item" onclick={() => go("voicetrain")}>
+          <span class="row-item__icon"><AppIcon name="speaker" size={16} /></span>
+          <span class="row-item__text">
+            <span class="row-item__title">Диктант для профиля голоса</span>
+            <span class="row-item__hint">
+              Прочитай фразу с экрана — Джарвис запомнит, как звучит твой голос
+            </span>
+          </span>
+          <span class="row-item__chevron"><AppIcon name="chevronRight" size={15} /></span>
+        </button>
+      {/if}
       {#if hit("помощь", "проблемы", "журнал", "диагностика")}
         <button class="row-item" onclick={() => go("help")}>
           <span class="row-item__icon"><AppIcon name="help" size={16} /></span>
@@ -301,66 +375,14 @@
           onchange={(value) => void patchSettings({ topic_memory: value })}
         />
       {/if}
-    </div>
-  </section>
-
-  <!-- Распознавание -->
-  <section class="settings-section" data-section="stt" bind:this={sectionEls.stt}>
-    <h2 class="section-title">Распознавание речи</h2>
-    <div class="card">
-      {#if hit("чувствительность", "порог", "wake", "джарвис")}
-        <p class="card__title">Чувствительность к слову «Джарвис»</p>
-        <p class="card__hint">
-          Ниже порог — срабатывает чаще, но и на постороннюю речь тоже.
-          Сейчас: {Math.round(settings.wake_threshold * 100)}%
-        </p>
-        <input
-          type="range"
-          min="0.4"
-          max="0.85"
-          step="0.05"
-          bind:value={settings.wake_threshold}
-          aria-label="Чувствительность к слову Джарвис"
-          onchange={() => void patchSettings({ wake_threshold: settings.wake_threshold })}
+      {#if hit("интернет", "поиск", "погода", "новости")}
+        <SwitchRow
+          checked={settings.web_search_auto}
+          title="Искать свежие данные в интернете"
+          hint="Погода, курсы, новости. Требуется подключение к сети."
+          onchange={(value) => void patchSettings({ web_search_auto: value })}
         />
       {/if}
-          {#if hit("диалог", "продолжение", "followup", "уточнение")}
-            <div class="row-item" style="margin-top: 8px">
-              <span class="row-item__text">
-                <span class="row-item__title">Продолжение диалога</span>
-                <span class="row-item__hint">
-                  После ответа Джарвис слушает уточнение {settings.followup_window_secs} секунд —
-                  можно не повторять «Джарвис»
-                </span>
-              </span>
-              <button
-                class="switch"
-                class:is-on={settings.followup_window_secs > 0}
-                role="switch"
-                aria-checked={settings.followup_window_secs > 0}
-                aria-label="Продолжение диалога"
-                onclick={(event) => {
-                  const value = !(event.currentTarget as HTMLElement).classList.contains("is-on");
-                  void patchSettings({ followup_window_secs: value ? 8 : 0 });
-                }}
-              ></button>
-            </div>
-          {/if}
-          {#if hit("посторонние", "голоса", "фильтр", "мой голос", "speakers", "диаризация")}
-            <SwitchRow
-              checked={settings.speaker_filter}
-              title="Только мой голос"
-              hint="Посторонние голоса на фоне отсекаются до распознавания и не доходят до ответов. Профиль строится из записей в «Обучении» и обновляется сам после новых записей."
-              onchange={(value) => void patchSettings({ speaker_filter: value })}
-            />
-          {/if}
-    </div>
-  </section>
-
-  <!-- Синтез речи -->
-  <section class="settings-section" data-section="tts" bind:this={sectionEls.tts}>
-    <h2 class="section-title">Синтез речи</h2>
-    <div class="card card--flush">
       {#if hit("числа", "сокращения", "нормализация")}
         <SwitchRow
           checked={settings.llm_normalize}
@@ -409,12 +431,39 @@
           <span class="row-item__chevron"><AppIcon name="gear" size={15} /></span>
         </button>
       {/if}
+      {#if hit("посторонние", "голоса", "фильтр", "мой голос", "speakers", "диаризация")}
+        <SwitchRow
+          checked={settings.speaker_filter}
+          title="Только мой голос"
+          hint="Посторонние голоса на фоне отсекаются до распознавания и не доходят до ответов. Профиль строится из записей в «Обучении» и обновляется сам после новых записей."
+          onchange={(value) => void patchSettings({ speaker_filter: value })}
+        />
+        {#if voiceSamples !== null}
+          <button
+            class="row-item"
+            onclick={() => go("voicetrain")}
+            aria-label="Профиль голоса — обучение диктантом"
+          >
+            <span class="row-item__text">
+              <span class="row-item__title">Профиль голоса</span>
+              <span class="row-item__hint">
+                {voiceSamples > 0
+                  ? `Готов: ${voiceSamples} ${voiceSamples === 1 ? "запись" : (voiceSamples < 5 ? "записи" : "записей")}. Обучить ещё`
+                  : "Нет записей — фильтр не работает. Прочитай фразу в обучении"}
+              </span>
+            </span>
+            <span class="badge" class:badge--ok={voiceSamples > 0}>
+              {voiceSamples > 0 ? "OK" : "ПУСТО"}
+            </span>
+          </button>
+        {/if}
+      {/if}
     </div>
   </section>
 
-  <!-- AI-модель -->
+  <!-- Модель -->
   <section class="settings-section" data-section="ai" bind:this={sectionEls.ai}>
-    <h2 class="section-title">AI-модель</h2>
+    <h2 class="section-title">Модель</h2>
     <div class="card card--flush">
       {#each llmChoices as choice (choice.backend + choice.model)}
         {#if hit(choice.title, choice.hint, "модель")}
@@ -431,59 +480,93 @@
           </button>
         {/if}
       {/each}
-      {#if hit("вариативность", "температура", "temperature")}
-        <div class="row-item" style="flex-direction: column; align-items: stretch; gap: 6px">
-          <div style="display: flex; justify-content: space-between; align-items: baseline">
-            <span class="row-item__title">Вариативность ответов</span>
-            <span class="row-item__value">{settings.llm_temperature.toFixed(2)}</span>
-          </div>
-          <input
-            type="range"
-            min="0"
-            max="1.2"
-            step="0.05"
-            bind:value={settings.llm_temperature}
-            aria-label="Температура модели"
-            onchange={() => void patchSettings({ llm_temperature: settings.llm_temperature })}
-          />
-          <span class="row-item__hint">
-            Ниже — точнее и суше, выше — свободнее. 0.6 подходит большинству.
-          </span>
+      {#each apiChoices as choice (choice.preset)}
+        {#if hit(choice.title, choice.hint, "модель", "облако", "api")}
+          <button class="row-item" onclick={() => pickApi(choice.preset)}>
+            <span class="row-item__text">
+              <span class="row-item__title">{choice.title}</span>
+              <span class="row-item__hint">{choice.hint}</span>
+            </span>
+            {#if apiPicked(choice.preset)}
+              <span class="row-item__value">
+                <AppIcon name="check" size={15} />
+              </span>
+            {/if}
+          </button>
+        {/if}
+      {/each}
+      {#if apiActive && yandexActive}
+        <div class="api-fields">
+          <label class="api-field">
+            <span class="api-field__label">API-ключ</span>
+            <input
+              class="input"
+              type="password"
+              value={settings.api_key}
+              placeholder="AQVN… или IAM-токен"
+              onchange={(e) => void saveApiField({ api_key: e.currentTarget.value })}
+            />
+          </label>
+          <label class="api-field">
+            <span class="api-field__label">Каталог (folder id)</span>
+            <input
+              class="input"
+              type="text"
+              value={settings.api_folder_id}
+              placeholder="b1g…"
+              onchange={(e) => void saveApiField({ api_folder_id: e.currentTarget.value })}
+            />
+          </label>
+          <label class="api-field">
+            <span class="api-field__label">Модель</span>
+            <input
+              class="input"
+              type="text"
+              value={settings.api_model}
+              placeholder="yandexgpt-lite"
+              onchange={(e) => void saveApiField({ api_model: e.currentTarget.value })}
+            />
+          </label>
+          <button class="btn btn--secondary btn--sm" disabled={apiChecking} onclick={checkApi}>
+            {apiChecking ? "Проверяю…" : "Проверить ключ"}
+          </button>
         </div>
-      {/if}
-      {#if hit("длина", "лимит", "токены")}
-        <div class="row-item">
-          <span class="row-item__text">
-            <span class="row-item__title">Максимальная длина ответа</span>
-            <span class="row-item__hint">Страховка от слишком долгих монологов</span>
-          </span>
-          <select
-            class="select"
-            style="width: auto"
-            aria-label="Максимальная длина ответа"
-            bind:value={settings.llm_max_tokens}
-            onchange={() => void pickMaxTokens(settings.llm_max_tokens)}
-          >
-            {#each maxTokenChoices as choice (choice.value)}
-              <option value={choice.value}>{choice.label}</option>
-            {/each}
-          </select>
+      {:else if apiActive}
+        <div class="api-fields">
+          <label class="api-field">
+            <span class="api-field__label">API-ключ</span>
+            <input
+              class="input"
+              type="password"
+              value={settings.api_key}
+              placeholder="sk-…"
+              onchange={(e) => void saveApiField({ api_key: e.currentTarget.value })}
+            />
+          </label>
+          <label class="api-field">
+            <span class="api-field__label">Адрес API</span>
+            <input
+              class="input"
+              type="text"
+              value={settings.api_base_url}
+              placeholder="https://api.openai.com/v1"
+              onchange={(e) => void saveApiField({ api_base_url: e.currentTarget.value })}
+            />
+          </label>
+          <label class="api-field">
+            <span class="api-field__label">Модель</span>
+            <input
+              class="input"
+              type="text"
+              value={settings.api_model}
+              placeholder="gpt-4o-mini"
+              onchange={(e) => void saveApiField({ api_model: e.currentTarget.value })}
+            />
+          </label>
+          <button class="btn btn--secondary btn--sm" disabled={apiChecking} onclick={checkApi}>
+            {apiChecking ? "Проверяю…" : "Проверить ключ"}
+          </button>
         </div>
-      {/if}
-    </div>
-  </section>
-
-  <!-- Интернет -->
-  <section class="settings-section" data-section="web" bind:this={sectionEls.web}>
-    <h2 class="section-title">Интернет и поиск</h2>
-    <div class="card card--flush">
-      {#if hit("интернет", "поиск", "погода", "новости")}
-        <SwitchRow
-          checked={settings.web_search_auto}
-          title="Искать свежие данные в интернете"
-          hint="Погода, курсы, новости. Требуется подключение к сети."
-          onchange={(value) => void patchSettings({ web_search_auto: value })}
-        />
       {/if}
     </div>
   </section>
@@ -503,14 +586,45 @@
         {/if}
       </div>
     {/if}
-    {#if hit("файлы", "toml", "данные")}
-      <div class="card">
-        <p class="dim" style="font-size: 12.5px; line-height: 1.55">
-          Команды и тонкая настройка хранятся в
-          <span class="mono">commands.toml</span> и <span class="mono">settings.toml</span>.
-          Их можно править вручную — Джарвис подхватит изменения без перезапуска.
-        </p>
+    {#if hit("fastconformer", "hugging", "hf", "репозиторий", "модель asr", "распознавание")}
+      <div class="card card--flush">
+        <div class="row-item" style="flex-direction: column; align-items: stretch; gap: 6px">
+          <span class="row-item__title">Репозиторий FastConformer на Hugging Face</span>
+          <span class="row-item__hint">
+            Формат username/repo; файлы model.safetensors, config.json, tokenizer.vocab.
+            Пусто — скачивание из стандартного релиза. Изменение применится после
+            удаления папки models/fastconformer.
+          </span>
+          <input
+            class="input"
+            type="text"
+            value={settings.asr_hf_repo}
+            placeholder="username/fastconformer-ru"
+            onchange={(e) => void patchSettings({ asr_hf_repo: e.currentTarget.value })}
+          />
+        </div>
       </div>
     {/if}
   </section>
 </div>
+
+<style>
+  .api-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px 14px;
+    border-top: 1px solid var(--border-soft, rgba(128, 128, 128, 0.15));
+  }
+
+  .api-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .api-field__label {
+    font-size: 12px;
+    opacity: 0.7;
+  }
+</style>

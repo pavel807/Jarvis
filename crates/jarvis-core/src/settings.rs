@@ -62,6 +62,29 @@ pub struct Settings {
     /// от зацикливания и конец контекста модели.
     pub llm_max_tokens: usize,
 
+    // --- Облачная модель (OpenAI-совместимый API) ---
+    /// Мастер первого запуска пройден. false — при старте показывается
+    /// онбординг: загрузка моделей, выбор мозга, диктант для профиля голоса.
+    pub setup_done: bool,
+    /// Пресет провайдера: "yandex" (Api-Key + URI модели) или "openai"
+    /// (Bearer, адрес и модель как введены).
+    pub api_preset: String,
+    /// Базовый адрес OpenAI-совместимого API без хвостового слэша.
+    pub api_base_url: String,
+    /// API-ключ провайдера. Живёт в settings.toml — файл личных данных
+    /// Джарвиса, права на запись ограничиваются 0600.
+    pub api_key: String,
+    /// Имя модели у провайдера: `yandexgpt-lite`, `gpt-4o-mini`, `meta-llama/...`.
+    pub api_model: String,
+    /// Идентификатор каталога Яндекс.Облака (только для пресета "yandex"):
+    /// из него собирается URI модели `gpt://<каталог>/<модель>/latest`.
+    pub api_folder_id: String,
+    /// HF-репозиторий с FastConformer пользователя (`username/repo`): при
+    /// первом запуске модель качается оттуда, а не из GitHub-релиза. Файлы
+    /// в репозитории: model.safetensors, config.json, tokenizer.vocab.
+    /// Пусто — источник по умолчанию (релиз).
+    pub asr_hf_repo: String,
+
     // --- TTS ---
     /// Голос Silero v5: ru_eduard | ru_dmitriy | ru_alexandr | ru_bogdan | ... (29 голосов).
     pub tts_voice: String,
@@ -72,6 +95,10 @@ pub struct Settings {
     /// Звук-подтверждение перед ответом LLM. Выключен по умолчанию:
     /// он стоит в очереди плеера перед речью и отодвигает первый звук ответа.
     pub ack_before_llm: bool,
+    /// Перебивание: голос пользователя во время ответа Джарвиса глушит
+    /// речь и уходит в разбор как обычная фраза. Выключатель только здесь,
+    /// в интерфейсе не дублируется.
+    pub barge_in: bool,
 
     // --- Память ---
     /// Помнить темы между сессиями и возвращаться к ушедшей по просьбе
@@ -110,9 +137,20 @@ impl Default for Settings {
             llm_temperature: 0.6,
             // 0 — без искусственного лимита (длинные ответы не обрываются).
             llm_max_tokens: 0,
+            // Мастер первого запуска: показывается, пока не пройден.
+            setup_done: false,
+            api_preset: "yandex".to_string(),
+            api_base_url: "https://llm.api.cloud.yandex.net/v1".to_string(),
+            api_key: String::new(),
+            api_model: "yandexgpt-lite".to_string(),
+            api_folder_id: String::new(),
+            // Пусто — FastConformer качается из GitHub-релиза; впиши свой
+            // HF-репозиторий (username/repo), когда выложишь конверсию.
+            asr_hf_repo: String::new(),
             tts_voice: "ru_eduard".to_string(),
             tts_speed: 1.0,
             ack_before_llm: false,
+            barge_in: true,
             topic_memory: true,
             // Фильтр включён по умолчанию: если профиль ещё не построен,
             // он просто пропускает всё и ни на что не влияет.
@@ -138,6 +176,18 @@ impl Settings {
         let tmp = path.with_extension("toml.tmp");
         fs::write(&tmp, content)?;
         fs::rename(&tmp, path)?;
+        // В settings.toml живёт API-ключ облачной модели: ограничиваем
+        // доступ личным пользователем (0600). Не критично при ошибке —
+        // файловые системы без UNIX-прав (FAT) не умеют.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = fs::metadata(path) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o600);
+                let _ = fs::set_permissions(path, perms);
+            }
+        }
         Ok(())
     }
 
@@ -148,15 +198,30 @@ impl Settings {
         crate::llm::config::set_backend(&self.llm_backend);
         crate::llm::config::set_model_name(&self.llm_model);
         crate::llm::config::update_generation_params(self.llm_params());
+        crate::llm::config::set_api_config(
+            &self.api_preset,
+            &self.api_base_url,
+            &self.api_key,
+            &self.api_model,
+            &self.api_folder_id,
+        );
     }
 
     /// Применяет настройки, безопасные на живую (hot-reload settings.toml):
-    /// скорость речи и параметры генерации LLM. Голос и бэкенд не трогаем:
-    /// смена голоса требует перезагрузки Silero-движка (её делает UI-команда
-    /// сохранения), бэкенд/модель — перезапуска движка.
+    /// скорость речи, параметры генерации LLM и конфиг облачного провайдера.
+    /// Голос и бэкенд не трогаем: смена голоса требует перезагрузки
+    /// Silero-движка (её делает UI-команда сохранения), бэкенд/модель —
+    /// перезапуска движка.
     pub fn apply_hot(&self) {
         crate::tts::set_current_speed(self.tts_speed);
         crate::llm::config::update_generation_params(self.llm_params());
+        crate::llm::config::set_api_config(
+            &self.api_preset,
+            &self.api_base_url,
+            &self.api_key,
+            &self.api_model,
+            &self.api_folder_id,
+        );
     }
 
     fn llm_params(&self) -> crate::llm::config::GenerationParams {
