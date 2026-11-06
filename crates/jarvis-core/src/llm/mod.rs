@@ -868,7 +868,7 @@ fn action_params() -> config::GenerationParams {
     }
 }
 
-fn speak(audio_tx: &Sender<AudioMessage>, events: &EventTx, text: &str) {
+pub(crate) fn speak(audio_tx: &Sender<AudioMessage>, events: &EventTx, text: &str) {
     let text = if text.trim().is_empty() {
         "Готово".to_string()
     } else {

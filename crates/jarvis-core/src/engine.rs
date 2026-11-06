@@ -1711,6 +1711,36 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
             && !router::calendar_question(&prompt);
         let web_auto = (fresh_info && web_search_auto) || explicit_web;
 
+        if web_auto && crate::weather::is_weather_question(&prompt) {
+            // Погода — данные, а не рассуждение: детерминированный ответ из
+            // API погоды, без поиска (DuckDuckGo отдаёт заглушку, после неё
+            // модель отвечала отсебятиной) и без нейросети.
+            let city = crate::weather::extract_city(&prompt);
+            let default_city = {
+                let st = h.settings.read().unwrap_or_else(|e| e.into_inner());
+                st.weather_city.clone()
+            };
+            println!("🌤 Погода: город «{}»", city.as_deref().unwrap_or(&default_city));
+            let audio_tx = h.audio_tx.clone();
+            let events = h.events.clone();
+            let llm_cancel = Arc::clone(&h.llm_cancel);
+            let req = req_id;
+            std::thread::spawn(move || {
+                let target = city.unwrap_or(default_city);
+                let answer = match crate::weather::fetch(&target) {
+                    Ok(w) => crate::weather::speak_answer(&w),
+                    Err(e) => {
+                        println!("⚠️ Погода: {e:#}");
+                        "Не смог узнать погоду: сервис погоды недоступен.".into()
+                    }
+                };
+                if llm::is_current_request(req) && !llm_cancel.load(Ordering::SeqCst) {
+                    llm::speak(&audio_tx, &events, &answer);
+                }
+            });
+            return Outcome::Followup;
+        }
+
         if web_auto {
             // «Да посмотри в интернете» без предмета — ищем то, о чём
             // только что говорили (память тем не чистится wake word'ом).
@@ -1734,19 +1764,35 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
                         println!("🚫 Поиск устарел — отвечаю молча");
                         return;
                     }
-                    if let Some(web_prompt) = crate::web::build_summary_prompt(&query, &hits) {
-                        llm::ask(
-                            llm,
-                            llm::WEB_SYSTEM_PROMPT,
-                            web_prompt,
-                            history,
-                            audio_tx,
-                            events,
-                            cancel,
-                        );
+                    match crate::web::build_summary_prompt(&query, &hits) {
+                        Some(web_prompt) => {
+                            llm::ask(
+                                llm,
+                                llm::WEB_SYSTEM_PROMPT,
+                                web_prompt,
+                                history,
+                                audio_tx,
+                                events,
+                                cancel,
+                            );
+                        }
+                        None => {
+                            // Пустая выдача (анти-бот заглушка, блокировка) —
+                            // честный отказ вместо выдуманного ответа.
+                            println!("🌐 Выдача пуста — честный отказ");
+                            let _ = events.send(JarvisEvent::Log {
+                                message: "Поиск не дал результатов — честный отказ".into(),
+                            });
+                            llm::speak(&audio_tx, &events, "Не нашёл ответа в интернете.");
+                        }
                     }
                 }
-                Err(e) => eprintln!("⚠️ Веб-поиск не удался: {e}"),
+                Err(e) => {
+                    eprintln!("⚠️ Веб-поиск не удался: {e}");
+                    if llm::is_current_request(req_id) && !cancel.load(Ordering::SeqCst) {
+                        llm::speak(&audio_tx, &events, "Интернет не отвечает, не смог найти.");
+                    }
+                }
             });
 
             return Outcome::Followup;
