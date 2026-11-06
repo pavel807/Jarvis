@@ -10,8 +10,12 @@
 //! 2. **Фильтр говорящего**: профиль владельца строится из образцов wake word
 //!    (train/*[jarvis]*.wav — их записывает обучение «Джарвис»), каждая новая
 //!    фраза перед распознаванием сравнивается с профилем косинусным сходством.
-//!    Чужая речь не доходит ни до FastConformer-транскрипта в LLM-цепочку,
-//!    ни до инструментов.
+//!    Чужой голос не доходит до LLM-цепочки и инструментов.
+//!
+//! Политика верификации — **fail-closed**: если профиль есть, а проверить
+//! фразу не удалось (ошибка, таймаут, короткий сегмент), фраза не проходит.
+//! Пропускается только случай без профиля — и тогда движок честно говорит
+//! пользователю, что фильтр не активен, вместо молчаливого пропуска чужих.
 //!
 //! Контракт потоков: инференс занимает десятки–сотни мс, поэтому гейт живёт
 //! в собственном потоке-воркере, а аудио-цикл движка никогда не блокируется
@@ -31,6 +35,21 @@ use std::sync::Arc;
 const MIN_SEGMENT_SECS: f32 = 0.8;
 /// Частота дискретизации профиля и сегментов.
 const TARGET_RATE: usize = wake::SAMPLE_RATE;
+
+/// Вердикт фильтра говорящего.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Verdict {
+    /// Владелец — фраза проходит.
+    Owner,
+    /// Чужой — фраза отбрасывается.
+    Stranger,
+    /// Профиля нет (образцы не записаны): фильтр не активен. Фраза проходит,
+    /// движок один раз за сессию сообщает пользователю о нерабочем фильтре.
+    NoProfile,
+    /// Проверить не удалось: при включённом фильтре фраза не проходит
+    /// (fail-closed), движок просит повторить.
+    Unverified(&'static str),
+}
 
 /// Запрос к воркеру speakrs.
 pub enum SpeakerQuery {
@@ -57,8 +76,8 @@ pub struct SpeechProbeResult {
 
 /// Ответ воркера speakrs.
 pub enum SpeakerReply {
-    /// Вердикт фильтра говорящего: `Some(true)` — владелец.
-    Verified(Option<bool>),
+    /// Вердикт фильтра говорящего.
+    Verified(Verdict),
     /// Результат VAD; `None` — пайплайн недоступен или произошла ошибка.
     Speech(Option<SpeechProbeResult>),
 }
@@ -132,10 +151,13 @@ impl SpeakerGate {
         for (path, _) in &records {
             let read = read_wav_16k(path);
             let Ok(samples) = read else { continue };
-            if samples.len() < (MIN_SEGMENT_SECS * TARGET_RATE as f32) as usize {
+            // Тишина по краям записи размывает средний эмбеддинг: сравнение
+            // идёт только по звучавшей части.
+            let voiced = trim_silence(&samples, TARGET_RATE);
+            if voiced.len() < (MIN_SEGMENT_SECS * TARGET_RATE as f32) as usize {
                 continue;
             }
-            if let Some(mean) = self.segment_embedding(&samples) {
+            if let Some(mean) = self.segment_embedding(voiced) {
                 vectors.push(mean);
             }
         }
@@ -158,17 +180,26 @@ impl SpeakerGate {
         self.profile_records
     }
 
-    /// Верификация сегмента: Some(true) — голос владельца, Some(false) — чужой,
-    /// None — фильтр не может решить (нет профиля, сегмент слишком короткий).
-    pub fn verify(&mut self, samples: &[f32], threshold: f32) -> Option<bool> {
-        let profile = self.profile.clone()?;
+    /// Верификация сегмента: [`Verdict::Owner`] — голос владельца,
+    /// [`Verdict::Stranger`] — чужой, [`Verdict::Unverified`] — проверить
+    /// не удалось (fail-closed), [`Verdict::NoProfile`] — профиля нет.
+    pub fn verify(&mut self, samples: &[f32], threshold: f32) -> Verdict {
+        let Some(profile) = self.profile.clone() else {
+            return Verdict::NoProfile;
+        };
         if samples.len() < (MIN_SEGMENT_SECS * TARGET_RATE as f32) as usize {
-            return None;
+            return Verdict::Unverified("сегмент короче порога верификации");
         }
-        let mean = self.segment_embedding(samples)?;
-        let normalized = normalize(&mean);
-        let cosine = dot(&profile, &normalized);
-        Some(cosine >= threshold)
+        let voiced = trim_silence(samples, TARGET_RATE);
+        let Some(mean) = self.segment_embedding(voiced) else {
+            return Verdict::Unverified("эмбеддинг сегмента не посчитался");
+        };
+        let cosine = dot(&profile, &normalize(&mean));
+        if cosine >= threshold {
+            Verdict::Owner
+        } else {
+            Verdict::Stranger
+        }
     }
 
     /// VAD через сегментацию speakrs: конец последней речи в окне.
@@ -254,14 +285,20 @@ pub fn spawn_speaker_worker(
     let (out_tx, out_rx) = std::sync::mpsc::channel::<SpeakerReply>();
 
     std::thread::spawn(move || {
-        // gate может отсутствовать (пайплайн не загрузился): тогда всё пропускаем.
+        // gate может отсутствовать (пайплайн не загрузился): верификация
+        // невозможна — fail-closed, фразы не проходят (движок вежливо просит
+        // повторить или отключить фильтр). VAD при этом тоже недоступен.
         let mut gate = gate;
         while let Ok(query) = rx.recv() {
             let answer = match (&mut gate, query) {
-                (None, SpeakerQuery::Rebuild) => SpeakerReply::Verified(None),
-                (None, SpeakerQuery::Verify { .. }) => SpeakerReply::Verified(None),
+                (None, SpeakerQuery::Rebuild) => SpeakerReply::Verified(Verdict::Unverified(
+                    "пайплайн проверки голоса не загрузился",
+                )),
+                (None, SpeakerQuery::Verify { .. }) => SpeakerReply::Verified(Verdict::Unverified(
+                    "пайплайн проверки голоса не загрузился",
+                )),
                 (None, SpeakerQuery::SpeechProbe { .. }) => SpeakerReply::Speech(None),
-                (Some(_), SpeakerQuery::Rebuild) => SpeakerReply::Verified(None),
+                (Some(_), SpeakerQuery::Rebuild) => SpeakerReply::Verified(Verdict::Owner),
                 (Some(g), SpeakerQuery::Verify { samples, threshold }) => {
                     if invalidate.swap(false, Ordering::SeqCst) {
                         let events = dummy_events();
@@ -272,7 +309,12 @@ pub fn spawn_speaker_worker(
                         let events = dummy_events();
                         g.rebuild_profile(&events);
                     }
-                    SpeakerReply::Verified(g.verify(&samples, threshold))
+                    let verdict = if g.has_profile() {
+                        g.verify(&samples, threshold)
+                    } else {
+                        Verdict::NoProfile
+                    };
+                    SpeakerReply::Verified(verdict)
                 }
                 (Some(g), SpeakerQuery::SpeechProbe { id, samples }) => {
                     let total_secs = samples.len() as f32 / TARGET_RATE as f32;
@@ -360,6 +402,56 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
+/// Запас по краям после обрезки тишины, секунд.
+const TRIM_MARGIN_SECS: f32 = 0.12;
+/// Окно RMS-огибающей для чистки тишины, секунд.
+const TRIM_WINDOW_SECS: f32 = 0.03;
+/// Доля от пика огибающей, ниже которой окно считается тишиной.
+const TRIM_PEAK_SHARE: f32 = 0.06;
+
+/// Обрезает тишину по краям записи по RMS-огибающей.
+///
+/// Профиль и верифицируемая фраза приходят с паузами (пре-ролл, нулевые
+/// паддинги, хвостовая тишина): усреднение эмбеддингов по всему сегменту
+/// размывало голос фреймами тишины. Возвращается срез от первого до
+/// последнего «звучащего» окна с запасом [`TRIM_MARGIN_SECS`]. Полностью
+/// тихая запись возвращается как есть — обрезать до нуля нельзя.
+fn trim_silence(samples: &[f32], rate: usize) -> &[f32] {
+    if samples.is_empty() {
+        return samples;
+    }
+    let window = ((TRIM_WINDOW_SECS * rate as f32) as usize).max(1);
+    if samples.len() <= window {
+        return samples;
+    }
+    let mut peak = 0.0f32;
+    let envelope: Vec<f32> = samples
+        .chunks(window)
+        .map(|chunk| {
+            let sum: f32 = chunk.iter().map(|x| x * x).sum();
+            let rms = (sum / chunk.len() as f32).sqrt();
+            peak = peak.max(rms);
+            rms
+        })
+        .collect();
+    // Цифровая тишина/почти тишина: не режем, верификации нечего решать.
+    if peak < 1e-4 {
+        return samples;
+    }
+    let threshold = peak * TRIM_PEAK_SHARE;
+    let Some(first) = envelope.iter().position(|&rms| rms >= threshold) else {
+        return samples;
+    };
+    let last = envelope
+        .iter()
+        .rposition(|&rms| rms >= threshold)
+        .unwrap_or(first);
+    let margin = (TRIM_MARGIN_SECS * rate as f32) as usize;
+    let start = first.saturating_mul(window).saturating_sub(margin);
+    let end = ((last + 1) * window + margin).min(samples.len());
+    &samples[start..end]
+}
+
 /// Каталог образцов владельца — для UI-подсказки.
 pub fn profile_sources() -> Vec<(String, f64)> {
     let (train_dir, _) = crate::wake_train::sample_dirs();
@@ -382,4 +474,62 @@ pub fn profile_available() -> bool {
 
 fn paths_exist(dir: &Path) -> bool {
     dir.is_dir()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RATE: usize = 16_000;
+
+    fn tone(freq: f32, secs: f32) -> Vec<f32> {
+        let n = (secs * RATE as f32) as usize;
+        (0..n)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * freq * i as f32 / RATE as f32).sin())
+            .collect()
+    }
+
+    fn silence(secs: f32) -> Vec<f32> {
+        vec![0.0; (secs * RATE as f32) as usize]
+    }
+
+    #[test]
+    fn trims_leading_and_trailing_silence() {
+        let mut samples = silence(0.5);
+        samples.extend(tone(220.0, 1.0));
+        samples.extend(silence(0.7));
+        let trimmed = trim_silence(&samples, RATE);
+        // Запас 120 мс с обеих сторон: 1.0 с звука → ~1.0–1.3 с среза.
+        let secs = trimmed.len() as f32 / RATE as f32;
+        assert!(
+            (0.95..=1.35).contains(&secs),
+            "ожидался срез около 1 с с запасом, получено {secs:.2} с"
+        );
+        // Границы среза — внутри «звуковой» зоны: тишина ушла.
+        assert!(trimmed.len() < samples.len());
+    }
+
+    #[test]
+    fn all_silence_is_not_trimmed_to_nothing() {
+        let samples = silence(1.0);
+        assert_eq!(trim_silence(&samples, RATE).len(), samples.len());
+    }
+
+    #[test]
+    fn short_and_empty_inputs_pass_through() {
+        assert!(trim_silence(&[], RATE).is_empty());
+        let tiny = vec![0.1f32; 100];
+        assert_eq!(trim_silence(&tiny, RATE).len(), 100);
+    }
+
+    #[test]
+    fn verdict_threshold_separates_owner_and_stranger() {
+        // Порог — простое сравнение косинуса: сонаправленный вектор проходит,
+        // ортогональный — нет.
+        let profile = normalize(&[1.0, 0.0, 0.0]);
+        let owner = normalize(&[0.9, 0.1, 0.0]);
+        let stranger = normalize(&[0.0, 1.0, 0.0]);
+        assert!(dot(&profile, &owner) >= 0.6);
+        assert!(dot(&profile, &stranger) < 0.6);
+    }
 }

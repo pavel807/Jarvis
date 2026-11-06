@@ -212,12 +212,14 @@ fn spawn_engine(
         }
 
         // Фильтр говорящего: пайплайн speakrs (CoreML на macOS) грузится
-        // вместе с движком; при недоступности — воркер всё пропускает.
+        // вместе с движком; профиль строим сразу, а не при первой фразе —
+        // иначе первые фразы после запуска проверялись бы с задержкой.
         let speaker_gate = jarvis_core::speaker::load_gate(&events_tx);
         let (speaker_tx, speaker_rx) = jarvis_core::speaker::spawn_speaker_worker(
             speaker_gate,
             Arc::clone(&shared_engine.speaker_invalidate),
         );
+        let _ = speaker_tx.send(jarvis_core::speaker::SpeakerQuery::Rebuild);
 
         let tts_voice = {
             let s = shared_engine
@@ -834,9 +836,14 @@ fn ensure_under_dir(path: &Path, base: &Path) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-fn ww_delete(path: String) -> Result<(), String> {
+fn ww_delete(path: String, shared: State<'_, Arc<Shared>>) -> Result<(), String> {
     let file = ensure_under_dir(Path::new(&path), &paths::train_dir())?;
-    std::fs::remove_file(&file).map_err(|e| e.to_string())
+    std::fs::remove_file(&file).map_err(|e| e.to_string())?;
+    // Удалённый образец не должен жить в профиле голоса до следующей записи.
+    shared
+        .speaker_invalidate
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
 }
 
 #[tauri::command]

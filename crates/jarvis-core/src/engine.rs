@@ -7,7 +7,7 @@ use crate::llm::{self, ChatTurn, SharedLlm};
 use crate::paths;
 use crate::router;
 use crate::settings::Settings;
-use crate::speaker::{SpeechProbeResult, SpeakerQuery, SpeakerReply};
+use crate::speaker::{SpeechProbeResult, SpeakerQuery, SpeakerReply, Verdict};
 use crate::stt::Stt;
 use crate::text::{clean_wakewords_and_prompt, extract_repeat_text, is_valid};
 use crate::tts::AudioMessage;
@@ -299,21 +299,19 @@ impl VadTracker {
 }
 
 /// Ждёт вердикт фильтра говорящего, пропуская ответы VAD от прошлых фраз.
-/// `Err(())` — воркер не ответил за отведённое время.
-fn wait_for_verdict(
-    rx: &Receiver<SpeakerReply>,
-    timeout: Duration,
-) -> std::result::Result<Option<bool>, ()> {
+/// Таймаут — тоже [`Verdict::Unverified`]: при включённом фильтре фраза
+/// не проходит без проверки (fail-closed).
+fn wait_for_verdict(rx: &Receiver<SpeakerReply>, timeout: Duration) -> Verdict {
     let deadline = Instant::now() + timeout;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Err(());
+            return Verdict::Unverified("фильтр не ответил вовремя");
         }
         match rx.recv_timeout(left) {
-            Ok(SpeakerReply::Verified(verdict)) => return Ok(verdict),
+            Ok(SpeakerReply::Verified(verdict)) => return verdict,
             Ok(SpeakerReply::Speech(_)) => continue,
-            Err(_) => return Err(()),
+            Err(_) => return Verdict::Unverified("фильтр не ответил вовремя"),
         }
     }
 }
@@ -388,6 +386,9 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     // Фильтр говорящего включён для текущей фразы: сегмент ушёл на
     // верификацию голоса, и в Processing нужно забрать вердикт.
     let mut speaker_check_sent = false;
+    // Подсказка «образцов голоса нет» звучит один раз за сессию, а не на
+    // каждой фразе.
+    let mut speaker_hint_spoken = false;
     // Оценка фонового шума комнаты: по ней поднимаем порог речи, чтобы
     // вентилятор/улица не запускали распознавание.
     let mut noise_floor = 0.0f32;
@@ -488,34 +489,56 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                     // Вердикт фильтра говорящего: чужая речь не идёт ни в
                     // LLM, ни в команды — движок просто ждёт дальше.
                     if speaker_check_sent {
-                        let owner = match wait_for_verdict(
-                            &h.speaker_rx,
-                            Duration::from_millis(2000),
-                        ) {
-                            Ok(v) => v,
-                            Err(()) => {
-                                eprintln!("🎙️ Фильтр говорящего не ответил вовремя — фраза пропущена фильтром");
-                                None
-                            }
-                        };
+                        let verdict = wait_for_verdict(&h.speaker_rx, Duration::from_millis(2000));
                         speaker_check_sent = false;
-                        if owner == Some(false) {
-                            println!("🎙️ Посторонний голос — фраза не принята");
-                            let _ = h.events.send(JarvisEvent::Log {
-                                message: "Посторонний голос на фоне — фраза пропущена".into(),
-                            });
-                            command_buffer.clear();
-                            has_speech_started = false;
-                            silence_samples = 0;
-                            voiced_samples = 0;
-                            vad.reset_phrase();
-                            // Followup закрываем: чужая фраза не продолжение
-                            // диалога с владельцем.
-                            state = AppState::WaitingForWakeWord;
-                            followup_deadline = None;
-                            wi16.clear();
-                            audio_history.clear();
-                            continue;
+                        match verdict {
+                            Verdict::Owner => {}
+                            Verdict::Stranger => {
+                                println!("🎙️ Посторонний голос — фраза не принята");
+                                let _ = h.events.send(JarvisEvent::Log {
+                                    message: "Посторонний голос на фоне — фраза пропущена".into(),
+                                });
+                                reset_phrase_state(&mut command_buffer, &mut has_speech_started, &mut silence_samples, &mut voiced_samples, &mut vad);
+                                // Followup закрываем: чужая фраза не продолжение
+                                // диалога с владельцем.
+                                state = AppState::WaitingForWakeWord;
+                                followup_deadline = None;
+                                wi16.clear();
+                                audio_history.clear();
+                                continue;
+                            }
+                            Verdict::Unverified(reason) => {
+                                // Fail-closed: профиль есть, проверить не вышло —
+                                // фраза не проходит, но владелец получает честную
+                                // просьбу повторить вместо молчаливого игнора.
+                                eprintln!("🎙️ Голос не верифицирован ({reason}) — вежливый отказ");
+                                let _ = h.events.send(JarvisEvent::Log {
+                                    message: format!("Голос не верифицирован: {reason} — фраза не принята"),
+                                });
+                                let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(
+                                    "Не смог проверить голос. Повтори ещё раз, пожалуйста.".into(),
+                                ));
+                                reset_phrase_state(&mut command_buffer, &mut has_speech_started, &mut silence_samples, &mut voiced_samples, &mut vad);
+                                state = AppState::WaitingForWakeWord;
+                                followup_deadline = None;
+                                wi16.clear();
+                                audio_history.clear();
+                                continue;
+                            }
+                            Verdict::NoProfile => {
+                                // Фильтр включён, но образцов нет: пропускаем,
+                                // но один раз честно говорим, что он не работает.
+                                if !speaker_hint_spoken {
+                                    speaker_hint_spoken = true;
+                                    println!("🎙️ Фильтр голоса не активен: образцов владельца нет");
+                                    let _ = h.events.send(JarvisEvent::Log {
+                                        message: "Фильтр «только мой голос» не работает: нет записанных образцов".into(),
+                                    });
+                                    let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(
+                                        "Образцы моего голоса не записаны, фильтр «только мой голос» не работает. Запиши их в разделе «Обучение».".into(),
+                                    ));
+                                }
+                            }
                         }
                     }
 
@@ -912,6 +935,21 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 
 /// Во сколько раз речь должна быть громче фона, чтобы считаться речью.
 const NOISE_MARGIN: f32 = 1.8;
+
+/// Сброс состояния захвата фразы (после отклонённой/обработанной реплики).
+fn reset_phrase_state(
+    command_buffer: &mut Vec<f32>,
+    has_speech_started: &mut bool,
+    silence_samples: &mut usize,
+    voiced_samples: &mut usize,
+    vad: &mut VadTracker,
+) {
+    command_buffer.clear();
+    *has_speech_started = false;
+    *silence_samples = 0;
+    *voiced_samples = 0;
+    vad.reset_phrase();
+}
 
 /// Порог, выше которого чанк считается речью: настройка пользователя, но не
 /// ниже фонового шума комнаты с запасом.
@@ -1489,10 +1527,20 @@ mod vad_tests {
     fn verdict_waits_through_stale_vad_replies() {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(SpeakerReply::Speech(None)).unwrap();
-        tx.send(SpeakerReply::Verified(Some(false))).unwrap();
+        tx.send(SpeakerReply::Verified(Verdict::Stranger)).unwrap();
         assert_eq!(
             wait_for_verdict(&rx, Duration::from_millis(100)),
-            Ok(Some(false))
+            Verdict::Stranger
+        );
+    }
+
+    #[test]
+    fn verdict_timeout_is_fail_closed() {
+        let (_tx, rx) = std::sync::mpsc::channel::<SpeakerReply>();
+        // Воркер молчит — фраза не проходит, а не «пропущена фильтром».
+        assert_eq!(
+            wait_for_verdict(&rx, Duration::from_millis(30)),
+            Verdict::Unverified("фильтр не ответил вовремя")
         );
     }
 

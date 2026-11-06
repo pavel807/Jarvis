@@ -177,13 +177,13 @@ fn main() -> Result<()> {
     println!("📥 Загрузка FastConformer (ASR)...");
     let model = Stt::load(&models_dir)?;
 
-    // Фильтр говорящего: как в Tauri-приложении; при недоступности —
-    // воркер пропускает всё.
+    // Фильтр говорящего: как в Tauri-приложении; профиль строим сразу.
     let speaker_gate = jarvis_core::speaker::load_gate(&events_tx);
     let (speaker_tx, speaker_rx) = jarvis_core::speaker::spawn_speaker_worker(
         speaker_gate,
         Arc::new(AtomicBool::new(false)),
     );
+    let _ = speaker_tx.send(jarvis_core::speaker::SpeakerQuery::Rebuild);
 
     println!("🚀 Джарвис готов к работе!");
 

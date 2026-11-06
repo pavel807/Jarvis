@@ -52,6 +52,19 @@
   type MicStatus = "authorized" | "denied" | "pending" | "unknown";
   let micStatus = $state<MicStatus>("unknown");
   let micBusy = $state(false);
+  // Сколько образцов голоса владельца записано (для статуса профиля).
+  let voiceSamples = $state<number | null>(null);
+
+  async function refreshVoiceSamples() {
+    try {
+      const samples = await invoke<{ train: [string, number][] }>("ww_samples");
+      // В профиле участвуют только записи с меткой владельца ([jarvis] в имени);
+      // записи фона (none) в фильтре не используются.
+      voiceSamples = samples.train.filter((entry) => entry[0].includes("[jarvis]")).length;
+    } catch {
+      voiceSamples = null;
+    }
+  }
 
   const MIC_STATUS_TEXT: Record<MicStatus, string> = {
     authorized: "Разрешён — Джарвис слышит вас",
@@ -199,6 +212,7 @@
 
   onMount(() => {
     void refreshMicStatus();
+    void refreshVoiceSamples();
     void (async () => {
       try {
         const { isEnabled } = await import("@tauri-apps/plugin-autostart");
@@ -411,6 +425,25 @@
               hint="Посторонние голоса на фоне отсекаются до распознавания и не доходят до ответов. Профиль строится из записей в «Обучении» и обновляется сам после новых записей."
               onchange={(value) => void patchSettings({ speaker_filter: value })}
             />
+            {#if voiceSamples !== null}
+              <button
+                class="row-item"
+                onclick={() => go("wakeword")}
+                aria-label="Профиль голоса — перейти к обучению"
+              >
+                <span class="row-item__text">
+                  <span class="row-item__title">Профиль голоса</span>
+                  <span class="row-item__hint">
+                    {voiceSamples > 0
+                      ? `Готов: ${voiceSamples} ${voiceSamples === 1 ? "образец" : (voiceSamples < 5 ? "образца" : "образцов")} голоса`
+                      : "Нет образцов — фильтр не работает. Запиши их в «Обучении»"}
+                  </span>
+                </span>
+                <span class="badge" class:badge--ok={voiceSamples > 0}>
+                  {voiceSamples > 0 ? "OK" : "ПУСТО"}
+                </span>
+              </button>
+            {/if}
           {/if}
     </div>
   </section>
