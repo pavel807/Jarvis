@@ -805,40 +805,12 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                             score: d.score,
                         });
 
-                        // Фильтр говорящего проверяет и само обращение: чужой
-                        // голос (видео, ТВ) не получает звук-отклик и не
-                        // открывает окно слушания. Сегмент — последние ~1 с
-                        // микрофона из пре-ролла, там и прозвучало обращение.
-                        if settings_snap.speaker_filter
-                            && audio_history.len()
-                                >= (MIN_WAKE_VERIFY_SECS * wake::SAMPLE_RATE as f32) as usize
-                        {
-                            let utterance: Vec<f32> = audio_history.iter().copied().collect();
-                            let query = SpeakerQuery::Verify {
-                                samples: utterance,
-                                threshold: wake_verify_threshold(
-                                    settings_snap.speaker_threshold,
-                                ),
-                            };
-                            if h.speaker_tx.try_send(query).is_ok() {
-                                let verdict = wait_for_verdict(
-                                    &h.speaker_rx,
-                                    Duration::from_millis(WAKE_VERIFY_WAIT_MS),
-                                );
-                                if matches!(verdict, Verdict::Stranger) {
-                                    println!("🎙️ Wake word от постороннего голоса — отклика нет");
-                                    let _ = h.events.send(JarvisEvent::Log {
-                                        message: "Wake word от постороннего голоса — игнорирую (обращение не проверено как владелец)".into(),
-                                    });
-                                    wi16.clear();
-                                    audio_history.clear();
-                                    continue;
-                                }
-                                // Owner/NoProfile/Unverified — отвечаем как раньше:
-                                // детектор wake word сам обучен на владельце, а
-                                // на ошибки проверки обращение не глухнем.
-                            }
-                        }
+                        // Обращение НЕ верифицируем по голосу: проверка короткого
+                        // «Джарвис» по профилю из диктанта отшивала владельца
+                        // (репорт пользователя 2026-11-06). Контракт такой: отклик
+                        // получает всякий, кого признал детектор wake word
+                        // (обучен на образцах владельца), а строгая проверка —
+                        // на фразе ПОСЛЕ обращения; чужая команда там отбрасывается.
 
                         let global_cfg = get_global_config(&h.commands);
                         let ack = paths::resolve_data_path(&global_cfg.reply_ack);
@@ -1038,23 +1010,6 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 
 /// Во сколько раз речь должна быть громче фона, чтобы считаться речью.
 const NOISE_MARGIN: f32 = 1.8;
-
-// --- Проверка голоса на wake word ---
-
-/// Минимальная длительность обращения для верификации, сек: пре-ролл
-/// микрофона ~1 с, короткий обрывок не проверяем (слишком шумный вектор).
-const MIN_WAKE_VERIFY_SECS: f32 = 0.8;
-/// Сколько ждать вердикт по обращению, мс: владелец не должен ждать отклик
-/// дольше этого даже на сбое — тогда отвечаем как раньше.
-const WAKE_VERIFY_WAIT_MS: u64 = 800;
-/// На сколько снижается порог для короткого обращения: «Джарвис» короче
-/// обычной фразы, косинус на нём шумнее — строгий порог отшил бы владельца.
-const WAKE_VERIFY_DELTA: f32 = 0.05;
-
-/// Порог сходства для обращения «Джарвис»: чуть мягче основного.
-fn wake_verify_threshold(base: f32) -> f32 {
-    (base - WAKE_VERIFY_DELTA).max(0.3)
-}
 
 // --- Перебивание (barge-in) ---
 
@@ -1695,15 +1650,6 @@ mod vad_tests {
             ));
         }
         assert!(!barge.triggered);
-    }
-
-    #[test]
-    fn wake_verify_threshold_is_softer_but_floored() {
-        // Обращение короче фразы — порог мягче на дельту.
-        assert!((wake_verify_threshold(0.6) - 0.55).abs() < 1e-6);
-        // Но не ниже разумного пола: при заниженном пороге в настройках
-        // чужак не должен проходить через wake-проверку.
-        assert!((wake_verify_threshold(0.2) - 0.3).abs() < 1e-6);
     }
 
     #[test]
