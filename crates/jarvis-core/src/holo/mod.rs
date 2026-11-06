@@ -16,6 +16,7 @@ pub mod processor;
 pub mod repository;
 pub mod runtime;
 pub mod service;
+pub mod task;
 pub mod text_engine;
 pub mod vision;
 

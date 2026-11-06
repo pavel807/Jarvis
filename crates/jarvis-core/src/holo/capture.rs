@@ -11,8 +11,41 @@ static NEXT_CAPTURE: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone)]
 pub struct CapturedScreenshot {
     pub path: PathBuf,
+    /// Размер снимка в физических пикселях (на retina — 2× логического).
     pub width: u32,
     pub height: u32,
+    /// Рабочий стол в логических точках (координатная система мыши);
+    /// 0 — определить не удалось (тогда масштаб 1:1).
+    pub logical_width: u32,
+    pub logical_height: u32,
+}
+
+/// Логические границы рабочего стола macOS (точки, не пиксели).
+/// Кэшируется: разрешение не меняется между шагами задачи.
+fn logical_desktop_size() -> Option<(u32, u32)> {
+    static CACHE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        {
+            let output = Command::new("osascript")
+                .args(["-e", "tell application \"Finder\" to get bounds of window of desktop"])
+                .output()
+                .ok()?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            // Формат: "0, 0, 1512, 982" → (left, top, right, bottom).
+            let nums: Vec<u32> = text
+                .split(',')
+                .filter_map(|p| p.trim().parse().ok())
+                .collect();
+            if nums.len() == 4 && nums[2] > nums[0] && nums[3] > nums[1] {
+                Some((nums[2] - nums[0], nums[3] - nums[1]))
+            } else {
+                None
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        None
+    })
 }
 
 /// Captures the primary desktop to a PNG and validates that the file is readable.
@@ -31,7 +64,8 @@ pub fn capture_desktop() -> Result<CapturedScreenshot> {
     if width == 0 || height == 0 {
         bail!("Операционная система вернула скриншот нулевого размера");
     }
-    Ok(CapturedScreenshot { path, width, height })
+    let (logical_width, logical_height) = logical_desktop_size().unwrap_or((0, 0));
+    Ok(CapturedScreenshot { path, width, height, logical_width, logical_height })
 }
 
 fn capture_to(path: &Path) -> Result<()> {

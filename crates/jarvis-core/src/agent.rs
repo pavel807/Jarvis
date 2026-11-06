@@ -63,12 +63,19 @@ mod platforms {
 
 /// Канонические имена инструментов — единственный список, по которому
 /// парсится и валидируется вызов модели (см. `tools::parse`).
+///
+/// Реестр полный: модель может и открывать приложения/ссылки, и управлять
+/// окнами. Детерминированный планировщик (`router::plan_system_command`)
+/// перехватывает типовые фразы «открой/закрой…» до модели — это быстрый
+/// путь, а не запрет для модели.
 pub const KNOWN_NAMES: &[&str] = &[
     "shell",
     "open_app",
     "quit_app",
     "open_url",
     "open_path",
+    "window",
+    "desktop_input",
     "set_timer",
     "set_alarm",
     "timer_stop",
@@ -100,8 +107,6 @@ pub const KNOWN_NAMES: &[&str] = &[
     "task_run",
     "task_open",
     "web_search",
-    "window",
-    "desktop_input",
     "wait",
     "run_command",
     "send_message",

@@ -124,7 +124,7 @@ fn dry_run(call: &ToolCall) -> ToolOutcome {
         )),
         ToolCall::OpenApp { name } => ToolOutcome::ok(format!("Открыл {name}.")),
         ToolCall::QuitApp { name } => ToolOutcome::ok(format!("Закрыл {name}.")),
-        ToolCall::OpenUrl { url } => ToolOutcome::ok(format!("Открываю {url}.")),
+        ToolCall::OpenUrl { url, .. } => ToolOutcome::ok(format!("Открываю {url}.")),
         ToolCall::OpenPath { path } => {
             let expanded = tools::expand_path(path);
             let target = jarvis_core::paths::resolve_data_path(&expanded);

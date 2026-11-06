@@ -30,17 +30,19 @@ fn main() -> anyhow::Result<()> {
 
     println!("\n=== ui_task: агентная задача целиком (таймаут 240 с) ===");
     let started = std::time::Instant::now();
-    let report =
-        jarvis_core::holo::with_service(|h| Ok(h.run_task("Open Safari and go to aviasales.ru")?))?;
+    let result = jarvis_core::holo::with_service(|h| {
+        Ok(h.run_task_full("Open Safari and go to aviasales.ru", None)?)
+    })?;
     println!(
-        "Итог: {:?} за {:.1} с, шагов {}, действий {}",
-        report.termination,
+        "Итог: {} (успех: {}) за {:.1} с, шагов {}, действий {}",
+        result.summary,
+        result.succeeded(),
         started.elapsed().as_secs_f64(),
-        report.steps.len(),
-        report.total_actions,
+        result.steps,
+        result.total_actions,
     );
-    for step in &report.steps {
-        println!("  шаг {}: {}", step.step + 1, step.log.join(" | "));
+    for line in &result.evidence {
+        println!("  {line}");
     }
 
     println!("\n✅ E2E GUI-агента пройден");

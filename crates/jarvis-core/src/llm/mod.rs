@@ -384,13 +384,16 @@ pub fn ask(
     if plan.is_none()
         && system == CHAT_SYSTEM_PROMPT
         && router::classify(&prompt) == router::Intent::Action
-        && let Some(url) = crate::site_cache::lookup(&prompt)
+        && let Some(url) = crate::site_cache::lookup(&crate::tool_guard::strip_browser_phrase(&prompt).0)
     {
         println!("⚡ Кэш сайта: {prompt} → {url}");
         // Через общий путь исполнения: события ActionStarted/ActionResult,
         // та же речь и тот же формат, что у open_url из модели.
         let outcome = tools::execute(
-            tools::ToolCall::OpenUrl { url },
+            tools::ToolCall::OpenUrl {
+                url,
+                browser: crate::tool_guard::browser_in_text(&prompt),
+            },
             &audio_tx,
             &events,
         );
@@ -1146,10 +1149,14 @@ fn run_action(
         confidence,
         force_tool,
     });
+    // «Открой сайт X в сафари»: слово браузера не должно попадать ни в поиск,
+    // ни в ключ кэша сайтов, а сам браузер передаётся в open_url.
+    let (site_prompt_owned, browser_hint) = crate::tool_guard::strip_browser_phrase(prompt);
+    let site_prompt: &str = site_prompt_owned.as_str();
     let site_request = looks_like_site_request(prompt);
     let fast_site = site_request && has_site_word(&prompt.to_lowercase());
     let mut prefetch = if site_request {
-        let query = crate::site_cache::search_query(prompt);
+        let query = crate::site_cache::search_query(site_prompt);
         if query.is_empty() {
             None
         } else {
@@ -1160,6 +1167,33 @@ fn run_action(
     } else {
         None
     };
+
+    // Uzu не умеет prefill, поэтому SITE_OPEN_PREFILL там не срабатывает и
+    // модель сама выбирает инструмент («открой сайт X в сафари» превращалось
+    // в open_app + ui_task). Адрес для «открой сайт …» не требует LLM: берём
+    // его из выдачи поиска, которая уже запущена, и открываем сразу.
+    if fast_site && config::backend() == "uzu" {
+        let hits = take_search(&mut prefetch, site_prompt);
+        if !hits.is_empty() {
+            let (candidate, confirmed) = verify_site_url(site_prompt, "", &hits);
+            let final_url = resolve_site_url(&candidate, confirmed, &hits);
+            println!("🎯 Сайт без LLM (бэкенд без prefill): {final_url}");
+            let outcome = tools::execute(
+                tools::ToolCall::OpenUrl {
+                    url: final_url.clone(),
+                    browser: browser_hint.clone(),
+                },
+                audio_tx,
+                events,
+            );
+            if outcome.ok && confirmed {
+                crate::site_cache::remember(site_prompt, &final_url);
+            }
+            speak_cancelable(audio_tx, events, &outcome.speech, cancel);
+            commit_action_history(history, prompt, &outcome.speech);
+            return;
+        }
+    }
 
     for step in 1..=MAX_TOOL_STEPS {
         let generated = {
@@ -1267,17 +1301,18 @@ fn run_action(
                 let mut cache_url: Option<String> = None;
                 let mut cache_confirmed = false;
                 let call = match call {
-                    tools::ToolCall::OpenUrl { url } if !searched => {
-                        match explicit_domain(prompt) {
+                    tools::ToolCall::OpenUrl { url, browser } if !searched => {
+                        let browser = browser.or_else(|| browser_hint.clone());
+                        match explicit_domain(site_prompt) {
                             Some(domain) => {
                                 let exact = format!("https://{domain}/");
                                 cache_url = Some(exact.clone());
                                 cache_confirmed = true; // домен назван явно
-                                tools::ToolCall::OpenUrl { url: exact }
+                                tools::ToolCall::OpenUrl { url: exact, browser }
                             }
                             None => {
-                                let hits = take_search(&mut prefetch, prompt);
-                                let (candidate, confirmed) = verify_site_url(prompt, &url, &hits);
+                                let hits = take_search(&mut prefetch, site_prompt);
+                                let (candidate, confirmed) = verify_site_url(site_prompt, &url, &hits);
                                 // Модель выдумывает адреса («дипсика» → Dipstick
                                 // на вики): если выдача её не подтвердила,
                                 // открываем верхний результат поиска — поисковик
@@ -1291,12 +1326,18 @@ fn run_action(
                                 // домен из фразы.
                                 cache_url = confirmed.then(|| final_url.clone());
                                 cache_confirmed = confirmed;
-                                tools::ToolCall::OpenUrl { url: final_url }
+                                tools::ToolCall::OpenUrl { url: final_url, browser }
                             }
                         }
                     }
                     other => {
-                        if let tools::ToolCall::OpenUrl { url } = &other {
+                        let other = match other {
+                            tools::ToolCall::OpenUrl { url, browser: None } if browser_hint.is_some() => {
+                                tools::ToolCall::OpenUrl { url, browser: browser_hint.clone() }
+                            }
+                            o => o,
+                        };
+                        if let tools::ToolCall::OpenUrl { url, .. } = &other {
                             // Повторное открытие сайта в том же цикле — модель
                             // уже назвала конкретный адрес: считаем явным.
                             cache_url = Some(url.clone());
@@ -1340,7 +1381,7 @@ fn run_action(
 
                 let outcome = tools::execute(call.clone(), audio_tx, events);
                 if let (Some(url), true) = (cache_url, cache_confirmed) && outcome.ok {
-                    crate::site_cache::remember(prompt, &url);
+                    crate::site_cache::remember(site_prompt, &url);
                 }
                 let last_step = step == MAX_TOOL_STEPS;
                 if last_step || !needs_next_step(&call, &outcome) {
@@ -1386,6 +1427,13 @@ fn run_action(
                             " Приложение не найдено. НЕ открывай вместо него другое приложение, \
                              сайт или файл и не выдумывай имена. Скажи пользователю, что это \
                              приложение не найдено."
+                        } else if matches!(
+                            &call,
+                            tools::ToolCall::UiTask { .. } | tools::ToolCall::ScreenLook { .. }
+                        ) && !outcome.ok
+                        {
+                            " Агент зрения не отработал. НЕ вводи текст и не кликай вслепую \
+                             (desktop_input), не повторяй тот же ui_task. Скажи пользователю причину."
                         } else {
                             ""
                         };

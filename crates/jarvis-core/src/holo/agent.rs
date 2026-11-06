@@ -32,11 +32,14 @@ impl Screen for DesktopScreen {
 
 /// One decision step of the agent: given a fresh screenshot, the task, and the
 /// log of what has already happened, produce the next batch of GUI actions.
+/// `criteria` — проверяемые критерии успеха: модель завершает задачу через
+/// `finish`, только когда свежий скриншот им соответствует.
 pub trait Brain {
     fn decide(
         &mut self,
         screenshot: &CapturedScreenshot,
         task: &str,
+        criteria: &str,
         history: &[String],
     ) -> Result<GuiActionBatch>;
 }
@@ -82,6 +85,9 @@ pub enum Termination {
     Timeout,
     /// An action failed to execute; carries the error text.
     ActionError(String),
+    /// Агент повторял одно и то же действие без изменения экрана —
+    /// защита от бесконечного воспроизведения (пп. 40, 43).
+    Stuck,
 }
 
 /// Full result of [`run_loop`].
@@ -110,15 +116,17 @@ pub fn run_loop(
     config: &AgentConfig,
     cancel: Option<&AtomicBool>,
 ) -> Result<AgentReport> {
-    run_loop_with_observer(brain, screen, task, config, cancel, &|_, _, _| {})
+    run_loop_with_observer(brain, screen, task, "", config, cancel, &|_, _, _| {})
 }
 
 /// Как [`run_loop`], но `observer(step, total_actions, batch)` вызывается
-/// после каждого выполненного пакета — для событий в UI.
+/// после каждого выполненного пакета — для событий в UI. `criteria` —
+/// проверяемые критерии успеха, завершение через `finish` только по ним.
 pub fn run_loop_with_observer(
     brain: &mut dyn Brain,
     screen: &dyn Screen,
     task: &str,
+    criteria: &str,
     config: &AgentConfig,
     cancel: Option<&AtomicBool>,
     observer: &dyn Fn(usize, usize, &GuiActionBatch),
@@ -128,6 +136,11 @@ pub fn run_loop_with_observer(
     let mut history: Vec<String> = Vec::new();
     let mut total_actions = 0usize;
     let mut termination = Termination::MaxSteps;
+    // Анти-повтор (пп. 40, 43): подпись последнего выполненного пакета;
+    // два одинаковых подряд — повтор блокируется с записью в историю,
+    // третий — терминальный Stuck.
+    let mut last_signature: Option<String> = None;
+    let mut repeat_count = 0usize;
 
     for step in 0..config.max_steps {
         if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
@@ -145,7 +158,7 @@ pub fn run_loop_with_observer(
         let shot = screen.capture().context("GUI-агент: не удалось сделать скриншот")?;
 
         // 2. Decide.
-        let batch = match brain.decide(&shot, task, &history) {
+        let batch = match brain.decide(&shot, task, criteria, &history) {
             Ok(b) => b,
             Err(e) => {
                 termination = Termination::ActionError(format!("модель не выдала действий: {e}"));
@@ -157,8 +170,35 @@ pub fn run_loop_with_observer(
         // happen and the completion message is captured.
         let saw_done = batch.actions.iter().any(|a| matches!(a, GuiAction::Done { .. }));
 
+        // Анти-повтор: идентичный пакет подряд не исполняется. Пустая
+        // сигнатура (wait/done-only) в анти-повторе не участвует: ожидание
+        // идемпотентно и безопасно, а лимит шагов его всё равно остановит.
+        let signature = batch_signature(&batch);
+        if !saw_done
+            && !signature.is_empty()
+            && last_signature.as_deref() == Some(signature.as_str())
+        {
+            repeat_count += 1;
+            let note = "Повтор предыдущего действия заблокирован: экран не изменился — выбери другой путь или вызови finish.";
+            history.push(note.to_string());
+            steps.push(StepRecord { step, width: shot.width, height: shot.height, log: vec![note.into()] });
+            if repeat_count >= 2 {
+                termination = Termination::Stuck;
+                break;
+            }
+            continue;
+        }
+        last_signature = Some(signature);
+        repeat_count = 0;
+
         // 3. Act (executor enforces coordinate bounds and its own safety).
-        let log = match execute_batch(&batch, shot.width, shot.height) {
+        let log = match execute_batch(
+                &batch,
+                shot.width,
+                shot.height,
+                Some((shot.logical_width, shot.logical_height)),
+                cancel,
+            ) {
             Ok(lines) => lines,
             Err(e) => {
                 termination = Termination::ActionError(format!("{e}"));
@@ -237,20 +277,26 @@ impl<'a> VlBrain<'a> {
         Ok(out.text)
     }
 
-    /// Один запрос к модели по свежему скриншоту: задача + официальная
-    /// история шагов («Step N: …») для самоисправления.
+    /// Один запрос к модели по свежему скриншоту: задача + критерии успеха +
+    /// официальная история шагов («Step N: …») для самоисправления.
     fn decide_once(
         &mut self,
         screenshot: &CapturedScreenshot,
         task: &str,
+        criteria: &str,
         history: &[String],
     ) -> Result<String> {
         let path = std::path::Path::new(&screenshot.path);
         let image = self.model.processor().process_image(path)?;
+        let user_task = if criteria.trim().is_empty() {
+            task.to_string()
+        } else {
+            format!("{task}\n\nSuccess criteria: {criteria}")
+        };
         let prompt = self.model.processor().prepare_prompt_with_history(
             self.model.tokenizer(),
             image,
-            task,
+            &user_task,
             history,
         )?;
         let cancel = AtomicBool::new(false);
@@ -264,11 +310,12 @@ impl Brain for VlBrain<'_> {
         &mut self,
         screenshot: &CapturedScreenshot,
         task: &str,
+        criteria: &str,
         history: &[String],
     ) -> Result<GuiActionBatch> {
         let mut last_error = String::new();
         for _ in 0..PARSE_ATTEMPTS {
-            let raw = self.decide_once(screenshot, task, history)?;
+            let raw = self.decide_once(screenshot, task, criteria, history)?;
             match parse_model_output(&raw) {
                 Ok(batch) => return Ok(batch),
                 Err(e) => {
@@ -288,6 +335,27 @@ fn clip(s: &str, max_chars: usize) -> String {
     let mut out: String = s.chars().take(max_chars).collect();
     out.push('…');
     out
+}
+
+/// Подпись пакета для анти-повтора: вид действия + координаты/текст.
+fn batch_signature(batch: &GuiActionBatch) -> String {
+    batch
+        .actions
+        .iter()
+        .map(|a| match a {
+            GuiAction::Click { x, y, button, clicks } => {
+                format!("click {x:.0}/{y:.0}/{button:?}/{clicks:?}")
+            }
+            GuiAction::Type { text } => format!("type {text}"),
+            GuiAction::Key { key } => format!("key {key}"),
+            GuiAction::Hotkey { keys } => format!("hotkey {}", keys.join("+")),
+            GuiAction::Scroll { direction, amount } => format!("scroll {direction}/{amount:?}"),
+            GuiAction::Move { x, y } => format!("move {x:.0}/{y:.0}"),
+            GuiAction::Launch { app, url } => format!("launch {app:?}/{url:?}"),
+            GuiAction::Wait { .. } | GuiAction::Done { .. } => String::new(),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 // =========================================================================
@@ -321,7 +389,7 @@ mod tests {
             let path = dir.join(format!("shot-{}.png", self.captures.get()));
             let mut f = std::fs::File::create(&path)?;
             f.write_all(&[0u8; 8])?;
-            Ok(CapturedScreenshot { path, width: self.width, height: self.height })
+            Ok(CapturedScreenshot { path, width: self.width, height: self.height, logical_width: 0, logical_height: 0 })
         }
     }
 
@@ -341,6 +409,7 @@ mod tests {
             &mut self,
             _shot: &CapturedScreenshot,
             _task: &str,
+            _criteria: &str,
             history: &[String],
         ) -> Result<GuiActionBatch> {
             self.seen_history_len.borrow_mut().push(history.len());
@@ -413,7 +482,7 @@ mod tests {
     fn timeout_budget_ends_loop() {
         struct Slow;
         impl Brain for Slow {
-            fn decide(&mut self, _: &CapturedScreenshot, _: &str, _: &[String]) -> Result<GuiActionBatch> {
+            fn decide(&mut self, _: &CapturedScreenshot, _: &str, _: &str, _: &[String]) -> Result<GuiActionBatch> {
                 std::thread::sleep(Duration::from_millis(10));
                 Ok(GuiActionBatch { actions: vec![GuiAction::Wait { milliseconds: Some(1) }] })
             }

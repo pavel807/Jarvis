@@ -23,6 +23,7 @@ pub mod stt;
 pub mod tasks;
 pub mod text;
 pub mod timers;
+pub mod tool_guard;
 pub mod tools;
 pub mod topic;
 pub mod tts;

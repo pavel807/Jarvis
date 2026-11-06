@@ -587,7 +587,7 @@ const CORE_TOOLS: &str = "\
   shell {\"cmd\":\"ls ~/Downloads\"} — терминал: всё, для чего нет своего инструмента
   open_app {\"name\":\"Google Chrome\"} — запустить приложение (имя как в системе)
   quit_app {\"name\":\"Telegram\"} — полностью закрыть приложение (не окно)
-  open_url {\"url\":\"wikipedia.org\"} — открыть сайт
+  open_url {\"url\":\"wikipedia.org\",\"browser\":\"Safari\"} — открыть сайт (browser — только если назван)
   open_path {\"path\":\"~/Downloads\"} — открыть папку или файл
   file_read {\"path\":\"src/main.rs\",\"offset\":1,\"limit\":80} — прочитать файл строками
   file_write {\"path\":\"note.txt\",\"content\":\"текст\"} — создать или перезаписать файл
@@ -752,7 +752,26 @@ fn tool_block_for(prompt: &str) -> String {
     if crate::tools::is_macos() {
         out.push_str("\n  applescript {\"script\":\"..\"} — для прочего в нативных приложениях");
     }
+    // Агент зрения не скачан или не загрузился: не обещаем модели инструмент,
+    // которого нет, иначе она строит план вокруг него и печатает вслепую.
+    if crate::holo::service::availability() == crate::holo::service::HoloAvailability::Unavailable {
+        out = drop_vision_tools(&out);
+    }
     out
+}
+
+/// Убирает из списка инструментов `ui_task` и `screen_look`, оставляя
+/// короткую пометку, что экран сейчас недоступен.
+fn drop_vision_tools(block: &str) -> String {
+    let mut kept: Vec<&str> = block
+        .lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            !(t.starts_with("ui_task") || t.starts_with("screen_look"))
+        })
+        .collect();
+    kept.push("  (экран недоступен: агент зрения не загружен — ui_task/screen_look нет, вслепую не кликай и не печатай, ответь текстом)");
+    kept.join("\n")
 }
 
 /// Компактный системный промпт для режима действий под конкретную просьбу.
@@ -786,7 +805,7 @@ pub fn action_prompt_for(prompt: &str) -> String {
 ПРАВИЛА:
 0. Режим выбирай сам: болтовня/знание — текст без блока; свежие данные — web_search; что-то сделать на компьютере — инструмент; задача требует ВИДЕТЬ экран или несколько шагов в интерфейсе — ui_task. Не жди разрешения: нужный режим — сразу действуй.
 1. Не выдумывай инструменты, домены, пути. Домена не знаешь — web_search, затем open_url по адресу ИЗ ВЫДАЧИ (корень сайта); пусто — ответь текстом.
-2. «открой X»: программа (сафари, премьер, зед, excel) → open_app; сервис/магазин/сайт («секшоп»≈сдэк) → run_command по КОМАНДАМ, иначе web_search → open_url. Открыть И interact (набрать, найти, нажать, заполнить на экране) — один вызов ui_task {{\"task\":\"...\"}} (task ПО-АНГЛИЙСКИ: \"Open Safari and go to aviasales.ru\") — агент сам сделает все шаги и проверит результат.
+2. «открой X»: программа (сафари, премьер, зед, excel) → open_app; сервис/магазин/сайт («секшоп»≈сдэк) → run_command по КОМАНДАМ, иначе web_search → open_url. Открыть И interact (набрать, найти, нажать, заполнить на экране) — один вызов ui_task {{\"task\":\"...\"}} (task ПО-АНГЛИЙСКИ: \"Open Safari and go to <site>\") — агент сам сделает все шаги и проверит результат.
 3. «закрой X» — quit_app (приложение целиком); «закрой окно X» — window с action close (только окно). Не подменяй одно другим.
 4. Правка файла: сперва file_read/file_search, затем file_edit точным текстом; чужой файл целиком не перезаписывай.
 5. НЕУДАЧА инструмента — назови причину и пробуй ДРУГОЙ путь (shell/applescript/ui_task), а не повторяй то же. Об успехе без успеха не сообщай. Провал open_app не заменяй открытием сайта без причины — но если путь есть, иди им.
@@ -1085,6 +1104,15 @@ fn plan_open(
     tokens: &[String],
     lookup: &impl Fn(&str) -> Option<String>,
 ) -> Option<crate::tools::ToolCall> {
+    // «открой aviasales.ru в сафари»: «в сафари» — не часть цели, а браузер.
+    let (without_browser, browser) = crate::tool_guard::strip_browser_phrase(&tokens.join(" "));
+    let stripped: Vec<String>;
+    let tokens: &[String] = if browser.is_some() {
+        stripped = without_browser.split_whitespace().map(String::from).collect();
+        &stripped
+    } else {
+        tokens
+    };
     let target = plan_target(&tokens[1..]);
     if target.is_empty() {
         return None;
@@ -1114,10 +1142,15 @@ fn plan_open(
     });
 
     if let Some(url) = plan_explicit_url(&target) {
-        return Some(crate::tools::ToolCall::OpenUrl { url });
+        return Some(crate::tools::ToolCall::OpenUrl { url, browser: browser.clone() });
     }
     if let Some(url) = plan_domain(&target) {
-        return Some(crate::tools::ToolCall::OpenUrl { url });
+        return Some(crate::tools::ToolCall::OpenUrl { url, browser: browser.clone() });
+    }
+    // Браузер назван, а адреса нет: приложение/папку не угадываем, решает
+    // разрешение сайта (кэш, выдача поиска) в цикле действий.
+    if browser.is_some() {
+        return None;
     }
     // «Открой загрузки/документы» — это папка, даже без слова «папка».
     if let Some(path) = plan_folder_path(&target) {
@@ -1482,7 +1515,7 @@ mod tests {
 
     fn open_url(prompt: &str, want: &str) {
         match plan(prompt) {
-            Some(crate::tools::ToolCall::OpenUrl { url }) => assert_eq!(url, want, "{prompt}"),
+            Some(crate::tools::ToolCall::OpenUrl { url, .. }) => assert_eq!(url, want, "{prompt}"),
             other => panic!("для «{prompt}» ждали open_url {want}, получили {other:?}"),
         }
     }
@@ -1538,6 +1571,19 @@ mod tests {
             "Открой https://Example.COM/Path",
             "https://Example.COM/Path",
         );
+    }
+
+    #[test]
+    fn planner_passes_the_named_browser_to_open_url() {
+        match plan("открой aviasales.ru в сафари") {
+            Some(crate::tools::ToolCall::OpenUrl { url, browser }) => {
+                assert_eq!(url, "aviasales.ru");
+                assert_eq!(browser.as_deref(), Some("Safari"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Без адреса и с названным браузером приложение не угадывается.
+        assert!(plan("открой сайт авиасейлс в сафари").is_none());
     }
 
     #[test]

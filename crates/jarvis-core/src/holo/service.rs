@@ -19,8 +19,10 @@ pub enum ServiceQuery {
     Download { reply: Sender<Result<()>> },
     /// Горячая загрузка модели при старте приложения: воркер сам готовит
     /// веса, интерфейс остаётся живым; вопросы не про экран отвечаются,
-    /// про экран — фразой ожидания, пока `is_loading()`.
+    /// про экран — фраза ожидания, пока `is_loading()`.
     Preload,
+    /// Единственный исполнительный контур GUI-задач.
+    RunTask { task: super::task::GuiTask, config: AgentConfig, reply: Sender<Result<super::task::TaskResult>> },
     /// Чат: текстовый ответ (обычная или спекулятивная генерация).
     Chat {
         messages: Vec<ChatMessage>,
@@ -30,8 +32,6 @@ pub enum ServiceQuery {
         params: SamplingParams,
         reply: Sender<Result<String>>,
     },
-    /// GUI-задача: замкнутый цикл скриншот → действия → проверка.
-    RunTask { task: String, config: AgentConfig, reply: Sender<Result<AgentReport>> },
     /// Что на экране: текстовое описание по вопросу.
     Look { question: String, reply: Sender<Result<String>> },
     /// Выгрузить модель из памяти.
@@ -80,12 +80,23 @@ impl ServiceHandle {
             .map_err(|_| anyhow::anyhow!("канал Holo-3.1 закрыт"))
     }
 
-    /// GUI-задача: замкнутый цикл агента по живому экрану. Конфиг — из
-    /// пользовательских настроек (`update_config`).
-    pub fn run_task(&self, task: &str) -> Result<AgentReport> {
-        let (_settings, config) = config_snapshot();
+    /// GUI-задача: единый контракт — `GuiTask` на входе, `TaskResult` на
+    /// выходе. Конфиг — из пользовательских настроек (`update_config`).
+    pub fn run_task_full(&self, goal: &str, success: Option<&str>) -> Result<super::task::TaskResult> {
+        let (settings, config) = config_snapshot();
         let (tx, rx) = channel();
-        self.request(ServiceQuery::RunTask { task: task.to_string(), config, reply: tx })?;
+        let task_id = next_task_id();
+        let task = super::task::GuiTask {
+            id: task_id,
+            utterance: goal.to_string(),
+            goal: goal.to_string(),
+            success_criteria: success
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "The goal is visibly reached on the current screen.".into()),
+            constraints: super::task::DEFAULT_CONSTRAINTS,
+        };
+        let _ = settings;
+        self.request(ServiceQuery::RunTask { task, config, reply: tx })?;
         rx.recv().map_err(|_| anyhow::anyhow!("воркер Holo-3.1 не ответил"))?
     }
 
@@ -99,6 +110,65 @@ impl ServiceHandle {
 
 /// Пользовательские настройки GUI-агента (settings.toml → apply_hot).
 static AGENT_CONFIG: OnceLock<RwLock<AgentSettings>> = OnceLock::new();
+
+/// Счётчик задач для идентификаторов в событиях и журналах.
+static TASK_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+fn next_task_id() -> u32 {
+    TASK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Честный маппинг Termination → TaskState (пп. 30-31, 63-65): успешная
+/// отправка события ≠ выполненная задача; действия без подтверждённой цели —
+/// PartiallySucceeded, не Succeeded.
+fn task_result(
+    task_id: u32,
+    report: &AgentReport,
+    _criteria: &str,
+) -> super::task::TaskResult {
+    use super::task::{TaskResult, TaskState};
+    let evidence: Vec<String> = report
+        .steps
+        .iter()
+        .rev()
+        .take(3)
+        .flat_map(|s| s.log.iter().cloned())
+        .collect();
+    let did_work = report.total_actions > 0;
+    let (state, summary) = match &report.termination {
+        crate::holo::Termination::Done(message) => {
+            (TaskState::Succeeded, message.clone())
+        }
+        crate::holo::Termination::MaxSteps => (
+            if did_work { TaskState::PartiallySucceeded } else { TaskState::Failed },
+            format!("Лимит шагов ({}) исчерпан, цель не подтверждена", report.steps.len()),
+        ),
+        crate::holo::Termination::Timeout => (
+            TaskState::TimedOut,
+            "Время задачи истекло, цель не подтверждена".into(),
+        ),
+        crate::holo::Termination::Cancelled => {
+            (TaskState::Cancelled, "Остановлено пользователем".into())
+        }
+        crate::holo::Termination::ActionError(e) => (
+            if did_work { TaskState::PartiallySucceeded } else { TaskState::Failed },
+            format!("Ошибка действия: {e}"),
+        ),
+        crate::holo::Termination::Stuck => (
+            TaskState::Failed,
+            "Агент повторял одно и то же действие без изменения экрана — остановлен".into(),
+        ),
+    };
+    TaskResult {
+        task_id,
+        state,
+        summary,
+        evidence,
+        steps: report.steps.len(),
+        total_actions: report.total_actions,
+        elapsed_ms: report.elapsed_ms,
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct AgentSettings {
@@ -158,6 +228,62 @@ fn stage_from_code(code: u8) -> super::RuntimeStage {
 /// вежливую фразу ожидания вместо минутного подвешивания движка.
 pub fn is_loading() -> bool {
     stage_from_code(STAGE.load(Ordering::Relaxed)) == super::RuntimeStage::Loading
+}
+
+/// Доступность агента зрения для LLM-инструментов (`ui_task`, `screen_look`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoloAvailability {
+    /// Воркер не запущен (тесты, примеры): инструменты остаются как были.
+    NotStarted,
+    /// Модель в памяти.
+    Ready,
+    /// Идёт загрузка: запрос стоит подождать.
+    Loading,
+    /// Веса на диске, в память ещё не загружены: первый запрос загрузит их сам.
+    Idle,
+    /// Не скачана или загрузка провалилась: пользоваться нельзя.
+    Unavailable,
+}
+
+pub fn availability() -> HoloAvailability {
+    let started = SERVICE
+        .get()
+        .is_some_and(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).is_some());
+    if !started {
+        return HoloAvailability::NotStarted;
+    }
+    match stage_from_code(STAGE.load(Ordering::Relaxed)) {
+        super::RuntimeStage::Ready => HoloAvailability::Ready,
+        super::RuntimeStage::Loading => HoloAvailability::Loading,
+        super::RuntimeStage::DownloadedNotLoaded => HoloAvailability::Idle,
+        super::RuntimeStage::Failed => HoloAvailability::Unavailable,
+        // Начальное значение стадии — NotDownloaded, пока воркер не взялся за
+        // Preload: смотрим на диск, а не считаем модель отсутствующей.
+        super::RuntimeStage::NotDownloaded => {
+            if repository::model_status().downloaded {
+                HoloAvailability::Idle
+            } else {
+                HoloAvailability::Unavailable
+            }
+        }
+    }
+}
+
+/// Ждёт, пока модель станет доступной для запроса. `false` — таймаут или
+/// модель недоступна вовсе.
+pub fn wait_until_ready(timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match availability() {
+            HoloAvailability::Ready | HoloAvailability::Idle => return true,
+            HoloAvailability::NotStarted | HoloAvailability::Unavailable => return false,
+            HoloAvailability::Loading => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
 }
 
 /// Глобальный хэндл: инструменты (`tools::execute`) не имеют доступа к
@@ -299,11 +425,14 @@ fn worker_loop(rx: Receiver<ServiceQuery>, events: crate::events::EventTx, cance
                 }
                 let _ = events.send(crate::events::JarvisEvent::UiAgentStatus {
                     stage: "running".into(),
-                    detail: task.chars().take(120).collect(),
+                    detail: format!("#{}: {}", task.id, task.goal.chars().take(110).collect::<String>()),
                 });
                 let WorkerState { engine, .. } = &mut state;
                 let events_for_steps = crate::events::EventTx::clone(&events);
-                let result = (|| -> Result<AgentReport> {
+                let task_id = task.id;
+                let goal = task.goal.clone();
+                let criteria = task.success_criteria.clone();
+                let result = (|| -> Result<super::task::TaskResult> {
                     let engine = ensure_engine(engine, &events)?;
                     let params = SamplingParams {
                         // Thinking-блок + tool-call на шаг: 512 обрезал ответы
@@ -316,10 +445,11 @@ fn worker_loop(rx: Receiver<ServiceQuery>, events: crate::events::EventTx, cance
                         ..SamplingParams::default()
                     };
                     let mut brain = VlBrain::new(engine.model_mut(), params);
-                    run_loop_with_observer(
+                    let report = run_loop_with_observer(
                         &mut brain,
                         &DesktopScreen,
-                        &task,
+                        &goal,
+                        &criteria,
                         &config,
                         Some(&cancel),
                         &|step, _actions, batch| {
@@ -334,36 +464,22 @@ fn worker_loop(rx: Receiver<ServiceQuery>, events: crate::events::EventTx, cance
                                 actions: names,
                             });
                         },
-                    )
+                    )?;
+                    Ok(task_result(task_id, &report, &criteria))
                 })();
                 match &result {
-                    Ok(report) => {
-                        let (ok, message) = match &report.termination {
-                            crate::holo::Termination::Done(m) => (true, m.clone()),
-                            crate::holo::Termination::MaxSteps => {
-                                (false, "Лимит шагов исчерпан".into())
-                            }
-                            crate::holo::Termination::Cancelled => {
-                                (false, "Остановлено".into())
-                            }
-                            crate::holo::Termination::Timeout => {
-                                (false, "Таймаут".into())
-                            }
-                            crate::holo::Termination::ActionError(e) => {
-                                (false, format!("Ошибка действия: {e}"))
-                            }
-                        };
+                    Ok(task_result) => {
                         let _ = events.send(crate::events::JarvisEvent::UiAgentDone {
-                            ok,
-                            message,
-                            steps: report.steps.len(),
-                            elapsed_ms: report.elapsed_ms,
+                            ok: task_result.succeeded(),
+                            message: format!("#{}: {}", task_result.task_id, task_result.summary),
+                            steps: task_result.steps,
+                            elapsed_ms: task_result.elapsed_ms,
                         });
                     }
                     Err(e) => {
                         let _ = events.send(crate::events::JarvisEvent::UiAgentDone {
                             ok: false,
-                            message: format!("{e:#}"),
+                            message: format!("#{task_id}: {e:#}"),
                             steps: 0,
                             elapsed_ms: 0,
                         });

@@ -647,7 +647,7 @@ pub fn run_command_from(
 
     match action_type.as_str() {
         "url" if !action_value.is_empty() => {
-            ToolCall::OpenUrl { url: action_value }.execute(audio_tx, events)
+            ToolCall::OpenUrl { url: action_value, browser: None }.execute(audio_tx, events)
         }
         "path" => ToolCall::OpenPath { path: action_value }.execute(audio_tx, events),
         "app" => ToolCall::OpenApp {
