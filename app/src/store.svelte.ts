@@ -258,7 +258,7 @@ export const settings = $state<Settings>({
   speaker_filter: true,
   speaker_threshold: 0.6,
   api_preset: "yandex",
-  api_base_url: "https://llm.api.cloud.yandex.net/openai/v1",
+  api_base_url: "https://llm.api.cloud.yandex.net/v1",
   api_key: "",
   api_model: "yandexgpt-lite",
   api_folder_id: "",

@@ -130,7 +130,7 @@ impl Default for Settings {
             // 0 — без искусственного лимита (длинные ответы не обрываются).
             llm_max_tokens: 0,
             api_preset: "yandex".to_string(),
-            api_base_url: "https://llm.api.cloud.yandex.net/openai/v1".to_string(),
+            api_base_url: "https://llm.api.cloud.yandex.net/v1".to_string(),
             api_key: String::new(),
             api_model: "yandexgpt-lite".to_string(),
             api_folder_id: String::new(),
@@ -165,7 +165,7 @@ impl Settings {
         fs::rename(&tmp, path)?;
         // В settings.toml живёт API-ключ облачной модели: ограничиваем
         // доступ личным пользователем (0600). Не критично при ошибке —
-        // файловlui-системы без UNIX-прав (FAT) не умеют.
+        // файловые системы без UNIX-прав (FAT) не умеют.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -195,12 +195,20 @@ impl Settings {
     }
 
     /// Применяет настройки, безопасные на живую (hot-reload settings.toml):
-    /// скорость речи и параметры генерации LLM. Голос и бэкенд не трогаем:
-    /// смена голоса требует перезагрузки Silero-движка (её делает UI-команда
-    /// сохранения), бэкенд/модель — перезапуска движка.
+    /// скорость речи, параметры генерации LLM и конфиг облачного провайдера.
+    /// Голос и бэкенд не трогаем: смена голоса требует перезагрузки
+    /// Silero-движка (её делает UI-команда сохранения), бэкенд/модель —
+    /// перезапуска движка.
     pub fn apply_hot(&self) {
         crate::tts::set_current_speed(self.tts_speed);
         crate::llm::config::update_generation_params(self.llm_params());
+        crate::llm::config::set_api_config(
+            &self.api_preset,
+            &self.api_base_url,
+            &self.api_key,
+            &self.api_model,
+            &self.api_folder_id,
+        );
     }
 
     fn llm_params(&self) -> crate::llm::config::GenerationParams {

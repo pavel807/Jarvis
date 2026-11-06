@@ -20,7 +20,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 /// Базовый адрес Яндекс GPT (OpenAI-совместимый эндпоинт).
-pub const YANDEX_BASE_URL: &str = "https://llm.api.cloud.yandex.net/openai/v1";
+/// Именно `/v1`, а не `/openai/v1` — тот путь даёт HTTP 404 от шлюза Яндекса.
+pub const YANDEX_BASE_URL: &str = "https://llm.api.cloud.yandex.net/v1";
 /// Модель Яндекса по умолчанию (легче и быстрее старшей).
 pub const YANDEX_DEFAULT_MODEL: &str = "yandexgpt-lite";
 
@@ -53,12 +54,15 @@ impl ApiEngine {
         } else {
             format!("Bearer {api_key}")
         };
-        // Полный URI модели для Яндекса: gpt://<каталог>/<модель>/latest.
+        // Полный URI модели для Яндекса: gpt://<каталог>/<модель>[/<версия>].
+        // Версию дописываем только если пользователь её не указал —
+        // «yandexgpt/rc» не должно превращаться в «…/rc/latest».
         let mut model = super::config::api_model();
         if preset == "yandex" {
             let folder = super::config::api_folder_id();
             if !folder.trim().is_empty() && !model.starts_with("gpt://") {
-                model = format!("gpt://{}/{model}/latest", folder.trim());
+                let version = if model.contains('/') { "" } else { "/latest" };
+                model = format!("gpt://{}/{model}{version}", folder.trim());
             }
         }
         Ok(Self {
@@ -80,6 +84,56 @@ impl ApiEngine {
             body["max_tokens"] = json!(max_tokens);
         }
         body
+    }
+
+    /// Проверка ключа и адреса минимальным запросом (без стрима, пара токенов).
+    /// Возвращает ответ модели или честную ошибку — для кнопки «Проверить».
+    pub fn check_connection(&self) -> Result<String> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = json!({
+            "model": self.model,
+            "messages": [{"role": "user", "content": "Ответь одним словом: готов"}],
+            "max_tokens": 8,
+            "temperature": 0.0,
+        });
+        let agent = llm_agent();
+        let response = agent
+            .post(&url)
+            .header("Authorization", &self.auth_value)
+            .header("Content-Type", "application/json")
+            .send_json(&body)
+            .map_err(|e| anyhow!("не удалось соединиться: {e}"))?;
+        let status = response.status();
+        let text = response
+            .into_body()
+            .read_to_string()
+            .unwrap_or_default();
+        if status != 200 {
+            let msg = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/error/message")
+                        .and_then(|m| m.as_str().map(str::to_string))
+                })
+                .unwrap_or(text);
+            let msg = msg.trim().to_string();
+            if msg.is_empty() {
+                return Err(anyhow!("HTTP {status}"));
+            }
+            return Err(anyhow!("HTTP {status}: {}", msg.chars().take(200).collect::<String>()));
+        }
+        let parsed: Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("странный ответ провайдера: {e}"))?;
+        let answer = parsed
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if answer.is_empty() {
+            return Err(anyhow!("провайдер ответил пустотой — модель не ответила"));
+        }
+        Ok(answer)
     }
 
     /// Сообщения запроса: system + история + пользователь (+ prefill как

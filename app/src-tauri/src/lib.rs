@@ -586,9 +586,18 @@ fn utils_close(app: AppHandle) {
     }
 }
 
+/// Проверка облачной модели минимальным запросом — для кнопки «Проверить».
+/// Конфиг берётся из статиков, которые `Settings::apply` уже обновил
+/// (кнопка живёт после сохранения настроек).
 #[tauri::command]
-fn llm_ask(shared: State<'_, Arc<Shared>>, app: AppHandle, prompt: String) {
-    // Номер обращения: фоновый веб-поиск проверит его перед озвучкой.
+fn llm_api_test() -> Result<String, String> {
+    let (tx, _rx) = channel::<JarvisEvent>();
+    let engine = jarvis_core::llm::api_backend::ApiEngine::load(&tx).map_err(|e| format!("{e:#}"))?;
+    engine.check_connection().map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn llm_ask(shared: State<'_, Arc<Shared>>, app: AppHandle, prompt: String) {    // Номер обращения: фоновый веб-поиск проверит его перед озвучкой.
     let req_id = jarvis_core::llm::new_request();
     // События этого вопроса уходят и в UI, и в общий мост событий движка.
     let (tx, rx) = channel::<JarvisEvent>();
@@ -1098,6 +1107,7 @@ pub fn run() {
             set_cwd,
             get_commands,
             save_commands,
+            llm_api_test,
             get_settings,
             save_settings,
             get_logs,

@@ -189,7 +189,7 @@
     if (apiActive && settings.api_preset === preset) return;
     const base =
       preset === "yandex"
-        ? "https://llm.api.cloud.yandex.net/openai/v1"
+        ? "https://llm.api.cloud.yandex.net/v1"
         : "https://api.openai.com/v1";
     const model = preset === "yandex" ? "yandexgpt-lite" : "gpt-4o-mini";
     await patchSettings({ llm_backend: "api", api_preset: preset, api_base_url: base, api_model: model });
@@ -203,6 +203,21 @@
 
   async function saveApiField(patch: Partial<Settings>) {
     await patchSettings(patch);
+  }
+
+  // Проверка облачного ключа минимальным запросом.
+  let apiChecking = $state(false);
+  async function checkApi() {
+    if (apiChecking) return;
+    apiChecking = true;
+    try {
+      const answer = await invoke<string>("llm_api_test");
+      toast(`Модель отвечает: «${answer}»`, "ok", 4000);
+    } catch (e) {
+      toast(`Не получилось: ${e}`, "err", 6000);
+    } finally {
+      apiChecking = false;
+    }
   }
 
   // ---------- Система ----------
@@ -498,6 +513,9 @@
               onchange={(e) => void saveApiField({ api_model: e.currentTarget.value })}
             />
           </label>
+          <button class="btn btn--secondary btn--sm" disabled={apiChecking} onclick={checkApi}>
+            {apiChecking ? "Проверяю…" : "Проверить ключ"}
+          </button>
         </div>
       {:else if apiActive}
         <div class="api-fields">
@@ -531,6 +549,9 @@
               onchange={(e) => void saveApiField({ api_model: e.currentTarget.value })}
             />
           </label>
+          <button class="btn btn--secondary btn--sm" disabled={apiChecking} onclick={checkApi}>
+            {apiChecking ? "Проверяю…" : "Проверить ключ"}
+          </button>
         </div>
       {/if}
     </div>
