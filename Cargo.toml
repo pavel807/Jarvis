@@ -13,7 +13,7 @@ hf-hub = { version = "1.0.0", features = ["blocking"] }
 hound = "3.5"
 rand = "0.8"
 rustpotter = { git = "https://github.com/pavel807/RustPotter", version = "4.0.1" }
-speakrs = { version = "0.7", features = ["coreml"] }
+speakrs = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 urlencoding = "2.1"
