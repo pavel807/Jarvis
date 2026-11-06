@@ -393,6 +393,18 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     // вентилятор/улица не запускали распознавание.
     let mut noise_floor = 0.0f32;
     let mut was_speaking = false;
+    // Перебивание: микрофон слушает и во время ответа Джарвиса.
+    let barge_enabled = {
+        let s = h.settings.read().unwrap_or_else(|e| e.into_inner());
+        s.barge_in
+    };
+    let mut barge = BargeTracker::new(barge_enabled);
+    // Перебивание сработало: после конца речи Джарвиса буфер фразы
+    // пользователя (уже посеянный из кольца) не выбрасывать.
+    let mut barge_triggered = false;
+    // Последний исход диалога был Followup: после конца ответа окно
+    // уточнения начинается заново (раньше оно истекало во время речи).
+    let mut last_outcome_followup = false;
     let mut rng = rand::thread_rng();
     // VAD speakrs: пока пользователь говорит, фраза не уходит в STT.
     let mut vad = VadTracker::new();
@@ -572,6 +584,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                         Outcome::Wake => {
                             state = AppState::WaitingForWakeWord;
                             followup_deadline = None;
+                            last_outcome_followup = false;
                             audio_history.clear();
                             wi16.clear();
                             h.llm_history
@@ -584,6 +597,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                         }
                         Outcome::Followup => {
                             state = AppState::WaitingForCommand;
+                            last_outcome_followup = true;
                             // Пустое распознавание (шум) окно не продлевает:
                             // иначе фоновый шум держит ассистента в режиме
                             // слушания бесконечно, съедая цикл за циклом.
@@ -654,22 +668,66 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             audio_history.push_back(s);
         }
 
-        // Пока Джарвис говорит, микрофон не слушаем: иначе хвост его же речи
-        // будет распознан как ответ пользователя.
+        // Пока Джарвис говорит, микрофон как команда не слушаем: иначе хвост
+        // его же речи будет распознан как ответ пользователя. Но за уровнем
+        // следим: пользователь может перебить (barge_in).
         let speaking_now = h.is_speaking.load(Ordering::SeqCst);
         if speaking_now {
             was_speaking = true;
             audio_history.clear();
+            if barge_triggered {
+                // Перебивание уже сработало: чанк копится в кольцо трекера,
+                // а посеянная фраза пользователя не трогается — Джарвис ещё
+                // доигрывает последние миллисекунды до стопа.
+                let floor = speech_floor(settings_snap.silence_rms_threshold, noise_floor);
+                barge.on_playback_chunk(&chunk_16k, now, floor);
+                continue;
+            }
             command_buffer.clear();
             has_speech_started = false;
             vad.reset_phrase();
+
+            let floor = speech_floor(settings_snap.silence_rms_threshold, noise_floor);
+            if barge.on_playback_chunk(&chunk_16k, now, floor) {
+                barge_triggered = true;
+                println!("🎤 Перебивание: пользователь заговорил — глушу речь");
+                let _ = h.events.send(JarvisEvent::Log {
+                    message: "Перебивание: голос пользователя во время ответа".into(),
+                });
+                // Мгновенная тишина + отмена остатка ответа — тот же путь,
+                // что у голосовой команды «замолчи».
+                h.stop_audio_flag.store(true, Ordering::SeqCst);
+                h.llm_cancel.store(true, Ordering::SeqCst);
+                let _ = h.audio_tx.send(AudioMessage::Stop);
+                // Сказанное до триггера — начало фразы пользователя.
+                command_buffer = barge.take_preroll();
+                has_speech_started = true;
+                voiced_samples = command_buffer.len();
+                silence_samples = 0;
+                vad.reset_phrase();
+                state = AppState::WaitingForCommand;
+                followup_deadline = Some(
+                    Instant::now() + Duration::from_secs(settings_snap.followup_window_secs),
+                );
+            }
             continue;
         }
 
         if was_speaking {
-            // Озвучка только что закончилась: выбрасываем хвост из буфера микрофона
-            // и коротко молчим, чтобы пользователь не начал говорить в пустоту.
+            // Озвучка только что закончилась. Обычный случай: выбрасываем хвост
+            // из буфера микрофона и коротко молчим, чтобы пользователь не начал
+            // говорить в пустоту. После перебивания: фраза пользователя уже
+            // посеяна — сохраняем её и продолжаем захват без стража.
             was_speaking = false;
+            let keep_phrase = barge_triggered;
+            barge_triggered = false;
+            barge.reset_playback();
+            if keep_phrase {
+                while mic_rx.try_recv().is_ok() {}
+                // Хвост эха уже вырезан триггером: пре-ролл фразы важнее
+                // стража, спать нельзя — потеряем кусок живой речи.
+                continue;
+            }
             has_speech_started = false;
             silence_samples = 0;
             voiced_samples = 0;
@@ -677,6 +735,13 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             vad.reset_phrase();
             while mic_rx.try_recv().is_ok() {}
             audio_history.clear();
+            // Ответ закончился: окно уточнения начинается заново, если
+            // предыдущая реплика была вопросом владельца (а не шумом).
+            if last_outcome_followup && settings_snap.followup_window_secs > 0 {
+                followup_deadline = Some(
+                    Instant::now() + Duration::from_secs(settings_snap.followup_window_secs),
+                );
+            }
             std::thread::sleep(Duration::from_millis(POST_SPEAK_GUARD_MS));
             audio_history.clear();
             continue;
@@ -935,6 +1000,126 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 
 /// Во сколько раз речь должна быть громче фона, чтобы считаться речью.
 const NOISE_MARGIN: f32 = 1.8;
+
+// --- Перебивание (barge-in) ---
+
+/// Сколько подряд идущих «громких» сэмплов микрофона подтверждают речь
+/// пользователя (сек): короче — щелчок, длиннее — заметная задержка реакции.
+const BARGE_CONFIRM_SECS: f32 = 0.22;
+/// Речь пользователя должна быть во столько раз громче эха голоса Джарвиса
+/// (при играющих колонках), чтобы считаться перебиванием.
+const BARGE_BASELINE_MARGIN: f32 = 1.8;
+/// Разогрев: сколько секунд речи Джарвиса слушать, прежде чем разрешить
+/// перебивание — за это время базлайн эха выходит на рабочий уровень.
+const BARGE_WARMUP_SECS: f32 = 0.3;
+/// Хвост кольца, который становится началом фразы пользователя, сек.
+const BARGE_PREROLL_SECS: f32 = 0.35;
+/// Глубина кольца микрофона во время речи Джарвиса, сек.
+const BARGE_RING_SECS: f32 = 3.0;
+/// Пауза между перебиваниями, мс.
+const BARGE_COOLDOWN_MS: u64 = 2000;
+
+/// Детектор перебивания: во время речи Джарвиса следит за микрофоном поверх
+/// эха его собственного голоса и решает, заговорил ли пользователь.
+///
+/// Эхо (речь Джарвиса из колонок) и голос пользователя неразличимы по
+/// природе — только по уровню: пользователь у микрофона громче. Базлайн эха
+/// — EMA по чанкам во время ответа; триггер — устойчивое превышение
+/// `max(базлайн × поле, порог речи)` в течение [`BARGE_CONFIRM_SECS`].
+struct BargeTracker {
+    enabled: bool,
+    /// Кольцо последних секунд микрофона (источник пре-ролла фразы).
+    ring: VecDeque<f32>,
+    ring_capacity: usize,
+    /// EMA уровня эха во время ответа.
+    baseline: f32,
+    /// Сэмплы подряд выше порога.
+    speech_samples: usize,
+    /// Сэмплы с начала текущей речи Джарвиса (для разогрева).
+    playback_samples: usize,
+    cooldown_until: Option<Instant>,
+    /// Перебивание уже сработало в этой реплике.
+    triggered: bool,
+}
+
+impl BargeTracker {
+    fn new(enabled: bool) -> Self {
+        let ring_capacity = (BARGE_RING_SECS * wake::SAMPLE_RATE as f32) as usize;
+        Self {
+            enabled,
+            ring: VecDeque::with_capacity(ring_capacity),
+            ring_capacity,
+            baseline: 0.0,
+            speech_samples: 0,
+            playback_samples: 0,
+            cooldown_until: None,
+            triggered: false,
+        }
+    }
+
+    /// Чанк микрофона во время речи Джарвиса. `true` — перебивание: движок
+    /// глушит звук и берёт [`Self::take_preroll`] как начало фразы.
+    fn on_playback_chunk(&mut self, chunk: &[f32], now: Instant, speech_floor: f32) -> bool {
+        for &s in chunk {
+            if self.ring.len() >= self.ring_capacity {
+                self.ring.pop_front();
+            }
+            self.ring.push_back(s);
+        }
+        if !self.enabled || self.triggered {
+            return false;
+        }
+        if let Some(until) = self.cooldown_until {
+            if now < until {
+                return false;
+            }
+            self.cooldown_until = None;
+        }
+
+        let rms = calculate_rms(chunk);
+        // Разогрев: первые мгновения ответа калибруют базлайн, триггер молчит.
+        self.playback_samples += chunk.len();
+        if (self.playback_samples as f32 / wake::SAMPLE_RATE as f32) < BARGE_WARMUP_SECS {
+            self.baseline = self.baseline * 0.5 + rms * 0.5;
+            return false;
+        }
+        let echo_line = self.baseline * BARGE_BASELINE_MARGIN;
+        let trigger_line = echo_line.max(speech_floor);
+        // Базлайн поднимает только фоновый уровень: всплески (возможно,
+        // пользователь) в калибровку не попадают.
+        if rms <= trigger_line {
+            self.baseline = self.baseline * 0.9 + rms * 0.1;
+            self.speech_samples = self.speech_samples.saturating_sub(chunk.len() / 2);
+            return false;
+        }
+        self.speech_samples += chunk.len();
+        if self.speech_samples as f32 / wake::SAMPLE_RATE as f32 >= BARGE_CONFIRM_SECS {
+            self.triggered = true;
+            self.cooldown_until = Some(now + Duration::from_millis(BARGE_COOLDOWN_MS));
+            return true;
+        }
+        false
+    }
+
+    /// Начало фразы пользователя: хвост кольца перед триггером.
+    fn take_preroll(&self) -> Vec<f32> {
+        let take = ((BARGE_PREROLL_SECS * wake::SAMPLE_RATE as f32) as usize).min(self.ring.len());
+        self.ring
+            .iter()
+            .skip(self.ring.len() - take)
+            .copied()
+            .collect()
+    }
+
+    /// Речь Джарвиса закончилась без перебивания — сброс калибровки.
+    fn reset_playback(&mut self) {
+        self.ring.clear();
+        self.baseline = 0.0;
+        self.speech_samples = 0;
+        self.playback_samples = 0;
+        self.triggered = false;
+    }
+}
 
 /// Сброс состояния захвата фразы (после отклонённой/обработанной реплики).
 fn reset_phrase_state(
@@ -1423,6 +1608,82 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
 #[cfg(test)]
 mod vad_tests {
     use super::*;
+
+    #[test]
+    fn barge_does_not_trigger_on_echo_alone() {
+        // Колонки играют ответ: эхо стабильно, базлайн калибруется по нему —
+        // триггера нет.
+        let mut barge = BargeTracker::new(true);
+        let now = Instant::now();
+        let chunk = vec![0.05f32; 1600]; // 0.1 с эха
+        for i in 0..40 {
+            assert!(
+                !barge.on_playback_chunk(&chunk, now + Duration::from_millis(i * 100), 0.018),
+                "эхо не должно перебивать самого Джарвиса"
+            );
+        }
+        assert!(!barge.triggered);
+    }
+
+    #[test]
+    fn barge_triggers_when_user_is_louder_than_echo() {
+        // Эхо ~0.05, пользователь говорит втрое громче: после разогрева и
+        // накопления BARGE_CONFIRM_SECS — перебивание.
+        let mut barge = BargeTracker::new(true);
+        let now = Instant::now();
+        let echo = vec![0.05f32; 1600];
+        for i in 0..10 {
+            barge.on_playback_chunk(&echo, now + Duration::from_millis(i * 100), 0.018);
+        }
+        let voice = vec![0.15f32; 1600]; // 0.1 с голоса
+        let mut triggered = false;
+        for i in 0..10 {
+            if barge.on_playback_chunk(&voice, now + Duration::from_millis(1000 + i * 100), 0.018) {
+                triggered = true;
+                break;
+            }
+        }
+        assert!(triggered, "громкий пользователь должен перебить эхо 0.05");
+        // Хвост кольца стал пре-роллом фразы.
+        let preroll = barge.take_preroll();
+        assert!(!preroll.is_empty());
+        assert!(preroll.len() <= (BARGE_PREROLL_SECS * wake::SAMPLE_RATE as f32) as usize);
+    }
+
+    #[test]
+    fn barge_respects_floor_and_cooldown() {
+        // Ниже порога речи (в наушниках эха нет) триггера нет.
+        let mut barge = BargeTracker::new(true);
+        let now = Instant::now();
+        let quiet = vec![0.01f32; 1600];
+        for i in 0..30 {
+            assert!(!barge.on_playback_chunk(
+                &quiet,
+                now + Duration::from_millis(i * 100),
+                0.018
+            ));
+        }
+        // После срабатывания повторный триггер в cooldown невозможен.
+        barge.cooldown_until = Some(now + Duration::from_secs(5));
+        barge.triggered = false;
+        let loud = vec![0.3f32; 1600];
+        assert!(!barge.on_playback_chunk(&loud, now + Duration::from_millis(100), 0.018));
+    }
+
+    #[test]
+    fn barge_disabled_is_always_silent() {
+        let mut barge = BargeTracker::new(false);
+        let now = Instant::now();
+        let loud = vec![0.3f32; 1600];
+        for i in 0..30 {
+            assert!(!barge.on_playback_chunk(
+                &loud,
+                now + Duration::from_millis(i * 100),
+                0.018
+            ));
+        }
+        assert!(!barge.triggered);
+    }
 
     #[test]
     fn steady_noise_does_not_trigger_speech() {
