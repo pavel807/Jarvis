@@ -36,6 +36,17 @@ pub const MIN_SEGMENT_SECS: f32 = 0.8;
 /// Частота дискретизации профиля и сегментов.
 const TARGET_RATE: usize = wake::SAMPLE_RATE;
 
+/// Каноническое окно верификации, секунд.
+///
+/// Эмбеддинги speakrs совместимы ТОЛЬКО между запусками одной длины:
+/// две длинные записи одного голоса дают ~0.89, два коротких куска ~0.95,
+/// а короткий кусок против длинной записи того же голоса ~0.03 (диагностика
+/// `examples/speaker_probe.rs`). Поэтому и профиль, и проверяемая фраза
+/// режутся на изолированные окна [`WINDOW_SECS`] — каждый прогон пайплайна
+/// получает ровно одну и ту же длину, и все сравнения в одном домене.
+const WINDOW_SECS: f32 = 3.0;
+const WINDOW_SAMPLES: usize = (WINDOW_SECS * wake::SAMPLE_RATE as f32) as usize;
+
 /// Вердикт фильтра говорящего.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
@@ -161,15 +172,16 @@ impl SpeakerGate {
         }
 
         let mut vectors: Vec<Vec<f32>> = Vec::new();
+        let mut used_records = 0usize;
         for (path, _) in &records {
             let read = read_wav_16k(path);
             let Ok(samples) = read else { continue };
             // Тишина по краям записи размывает средний эмбеддинг: сравнение
             // идёт только по звучавшей части. У длинного диктанта берём
-            // середину: эмбеддинг записи на 3+ минуты нестабилен, а первых
-            // 60 секунд звучавшей речи достаточно для точного среднего.
+            // середину: первые 60 секунд звучавшей речи дают достаточно окон,
+            // а время пересборки остаётся ограниченным.
             let voiced = trim_silence(&samples, TARGET_RATE);
-            let voiced = if voiced.len() > TARGET_RATE * 60 {
+            let voiced: &[f32] = if voiced.len() > TARGET_RATE * 60 {
                 let mid = voiced.len() / 2;
                 let half = TARGET_RATE * 30;
                 &voiced[mid - half..mid + half]
@@ -179,12 +191,23 @@ impl SpeakerGate {
             if voiced.len() < (MIN_SEGMENT_SECS * TARGET_RATE as f32) as usize {
                 continue;
             }
-            if let Some(mean) = self.segment_embedding(voiced) {
-                if mean.iter().all(|v| v.is_finite()) {
-                    vectors.push(mean);
-                } else {
-                    eprintln!("🎙️ Профиль: запись с нечисловым эмбеддингом пропущена");
+            // Каждое окно — изолированный запуск пайплайна одной длины.
+            let mut record_windows = 0usize;
+            for window in windows_of(voiced) {
+                if let Some(mean) = self.segment_embedding(&window) {
+                    if mean.iter().all(|v| v.is_finite()) {
+                        vectors.push(mean);
+                        record_windows += 1;
+                    }
                 }
+            }
+            if record_windows > 0 {
+                used_records += 1;
+            } else {
+                eprintln!(
+                    "🎙️ Профиль: запись без годных окон пропущена: {:?}",
+                    path.file_name()
+                );
             }
         }
 
@@ -205,11 +228,12 @@ impl SpeakerGate {
             return 0;
         }
         self.profile = Some(profile);
-        self.profile_records = vectors.len();
+        self.profile_records = used_records;
         let _ = events.send(JarvisEvent::Log {
             message: format!(
-                "Профиль голоса владельца построен: {} записей",
-                self.profile_records
+                "Профиль голоса владельца построен: {} записей, {} окон",
+                used_records,
+                vectors.len()
             ),
         });
         self.profile_records
@@ -218,6 +242,10 @@ impl SpeakerGate {
     /// Верификация сегмента: [`Verdict::Owner`] — голос владельца,
     /// [`Verdict::Stranger`] — чужой, [`Verdict::Unverified`] — проверить
     /// не удалось (fail-closed), [`Verdict::NoProfile`] — профиля нет.
+    ///
+    /// Фраза режется на канонические окна [`WINDOW_SECS`] — те же, из которых
+    /// собран профиль; вердикт — лучшее сходство окна (короткая фраза даёт
+    /// одно окно, и оно само по себе показательно).
     pub fn verify(&mut self, samples: &[f32], threshold: f32) -> Verdict {
         let Some(profile) = self.profile.clone() else {
             return Verdict::NoProfile;
@@ -226,22 +254,34 @@ impl SpeakerGate {
             return Verdict::Unverified("сегмент короче порога верификации");
         }
         let voiced = trim_silence(samples, TARGET_RATE);
-        let Some(mean) = self.segment_embedding(voiced) else {
-            return Verdict::Unverified("эмбеддинг сегмента не посчитался");
-        };
-        let normalized = normalize(&mean);
-        if !normalized.iter().all(|v| v.is_finite()) {
-            // Не «чужой», а честная невозможность сравнить: NaN-сходство
-            // раньше означало «чужой» для любого голоса.
-            return Verdict::Unverified("эмбеддинг сегмента с нечисловыми значениями");
+        let mut best: Option<f32> = None;
+        let mut usable_windows = 0usize;
+        for window in windows_of(voiced) {
+            let Some(mean) = self.segment_embedding(&window) else {
+                continue;
+            };
+            let normalized = normalize(&mean);
+            if !normalized.iter().all(|v| v.is_finite()) {
+                continue;
+            }
+            usable_windows += 1;
+            let cosine = dot(&profile, &normalized);
+            if best.is_none_or(|b| cosine > b) {
+                best = Some(cosine);
+            }
         }
-        let cosine = dot(&profile, &normalized);
+        let Some(cosine) = best else {
+            // Ни одно окно не дало сравнимого эмбеддинга — не «чужой», а
+            // честная невозможность сравнить.
+            return Verdict::Unverified("ни одно окно не дало эмбеддинга");
+        };
         // Сходство в лог: без числа «Посторонний голос» не отличить битый
         // профиль от чуть-чуть не дотянувшего до порога.
         println!(
-            "🎙️ Сходство голоса: {:.3} (порог {:.2}) — {}",
+            "🎙️ Сходство голоса: {:.3} (порог {:.2}, окон {}) — {}",
             cosine,
             threshold,
+            usable_windows,
             if cosine >= threshold { "владелец" } else { "чужой" }
         );
         if cosine >= threshold {
@@ -468,6 +508,32 @@ fn normalize(v: &[f32]) -> Vec<f32> {
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// Режет звучавшую часть на канонические окна: полные без перекрытия,
+/// хвост включается, если он не короче половины окна; всё добивается
+/// нулями до [`WINDOW_SAMPLES`] — длина каждого прогона пайплайна
+/// одинаковая, иначе эмбеддинги несравнимы.
+fn windows_of(voiced: &[f32]) -> Vec<Vec<f32>> {
+    let min_tail = WINDOW_SAMPLES / 2;
+    if voiced.len() <= WINDOW_SAMPLES {
+        let mut only = voiced.to_vec();
+        only.resize(WINDOW_SAMPLES, 0.0);
+        return vec![only];
+    }
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while start + WINDOW_SAMPLES <= voiced.len() {
+        out.push(voiced[start..start + WINDOW_SAMPLES].to_vec());
+        start += WINDOW_SAMPLES;
+    }
+    let tail = voiced.len() - start;
+    if tail >= min_tail {
+        let mut last = voiced[start..].to_vec();
+        last.resize(WINDOW_SAMPLES, 0.0);
+        out.push(last);
+    }
+    out
 }
 
 /// Запас по краям после обрезки тишины, секунд.
