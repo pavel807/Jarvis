@@ -222,6 +222,22 @@
     }
   }
 
+  // Список моделей провайдера: запрашивается у API, выбор — тапом.
+  let apiModels = $state<string[] | null>(null);
+  let apiModelsLoading = $state(false);
+  async function loadApiModels() {
+    if (apiModelsLoading) return;
+    apiModelsLoading = true;
+    try {
+      apiModels = await invoke<string[]>("llm_api_models");
+    } catch (e) {
+      apiModels = null;
+      toast(`Не получилось: ${e}`, "err", 6000);
+    } finally {
+      apiModelsLoading = false;
+    }
+  }
+
   // ---------- Система ----------
 
   onMount(() => {
@@ -263,6 +279,32 @@
     }
   }
 </script>
+
+{#snippet api_model_picker()}
+  <button class="btn btn--secondary btn--sm" disabled={apiModelsLoading} onclick={loadApiModels}>
+    {apiModelsLoading
+      ? "Запрашиваю список…"
+      : apiModels
+        ? "Обновить список моделей"
+        : "Показать модели из API"}
+  </button>
+  {#if apiModels}
+    <div class="api-models">
+      {#each apiModels as m (m)}
+        <button class="row-item" onclick={() => void saveApiField({ api_model: m })}>
+          <span class="row-item__text">
+            <span class="row-item__title">{m}</span>
+          </span>
+          {#if settings.api_model === m}
+            <span class="row-item__value">
+              <AppIcon name="check" size={15} />
+            </span>
+          {/if}
+        </button>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
 
 <div class="page">
   <div class="toolbar">
@@ -530,6 +572,7 @@
           <button class="btn btn--secondary btn--sm" disabled={apiChecking} onclick={checkApi}>
             {apiChecking ? "Проверяю…" : "Проверить ключ"}
           </button>
+          {@render api_model_picker()}
         </div>
       {:else if apiActive}
         <div class="api-fields">
@@ -566,6 +609,7 @@
           <button class="btn btn--secondary btn--sm" disabled={apiChecking} onclick={checkApi}>
             {apiChecking ? "Проверяю…" : "Проверить ключ"}
           </button>
+          {@render api_model_picker()}
         </div>
       {/if}
     </div>
@@ -626,5 +670,14 @@
   .api-field__label {
     font-size: 12px;
     opacity: 0.7;
+  }
+
+  .api-models {
+    display: flex;
+    flex-direction: column;
+    max-height: 260px;
+    overflow-y: auto;
+    border: 1px solid rgba(128, 128, 128, 0.15);
+    border-radius: 10px;
   }
 </style>

@@ -267,6 +267,62 @@ fn llm_agent() -> &'static ureq::Agent {
     })
 }
 
+/// Список чат-моделей провайдера (GET /models, OpenAI-совместимый формат).
+///
+/// Эмбеддинги (`emb://…`) выбрасываются; полные URI вида
+/// `gpt://<каталог>/<модель>/latest` сокращаются до имени модели — полный
+/// URI собирает движок при запросе (см. `ApiEngine::load`).
+pub fn list_models() -> Result<Vec<String>> {
+    let base_url = super::config::api_base_url().trim_end_matches('/').to_string();
+    let key = super::config::api_key();
+    if key.trim().is_empty() {
+        return Err(anyhow!("API-ключ не задан: укажи его в настройках"));
+    }
+    let preset = super::config::api_preset();
+    let auth_value = if preset == "yandex" {
+        format!("Api-Key {key}")
+    } else {
+        format!("Bearer {key}")
+    };
+    let url = format!("{base_url}/models");
+    let response = llm_agent()
+        .get(&url)
+        .header("Authorization", &auth_value)
+        .call()
+        .map_err(|e| anyhow!("не удалось получить список моделей: {e}"))?;
+    let status = response.status();
+    let text = response.into_body().read_to_string().unwrap_or_default();
+    if status != 200 {
+        return Err(anyhow!("HTTP {status}: {}", text.chars().take(200).collect::<String>()));
+    }
+    let data: Value =
+        serde_json::from_str(&text).context("странный ответ списка моделей")?;
+    let mut names: Vec<String> = data["data"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|m| m["id"].as_str())
+                .filter(|id| !id.starts_with("emb://"))
+                .map(|id| {
+                    // gpt://<каталог>/<модель>[/<версия>] → <модель>.
+                    id.strip_prefix("gpt://")
+                        .and_then(|rest| rest.split_once('/'))
+                        .map(|(_, model)| model.to_string())
+                        .unwrap_or_else(|| id.to_string())
+                })
+                .map(|name| name.trim_end_matches("/latest").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        return Err(anyhow!("провайдер не вернул ни одной модели"));
+    }
+    Ok(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

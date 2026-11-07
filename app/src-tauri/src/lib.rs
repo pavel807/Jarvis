@@ -608,6 +608,13 @@ fn llm_api_test() -> Result<String, String> {
     engine.check_connection().map_err(|e| format!("{e:#}"))
 }
 
+/// Список чат-моделей облачного провайдера (GET /models) — для выбора
+/// в настройках без ручного ввода имени.
+#[tauri::command]
+fn llm_api_models() -> Result<Vec<String>, String> {
+    jarvis_core::llm::api_backend::list_models().map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command]
 fn llm_ask(shared: State<'_, Arc<Shared>>, app: AppHandle, prompt: String) {    // Номер обращения: фоновый веб-поиск проверит его перед озвучкой.
     let req_id = jarvis_core::llm::new_request();
@@ -1264,6 +1271,7 @@ pub fn run() {
             get_commands,
             save_commands,
             llm_api_test,
+            llm_api_models,
             voice_record_start,
             voice_record_stop,
             get_settings,
