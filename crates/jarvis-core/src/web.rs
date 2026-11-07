@@ -346,6 +346,11 @@ pub fn looks_like_fresh_info(text: &str) -> bool {
     if person_question {
         return true;
     }
+    // Определения: «что такое Дональд Трамп» — про реальный мир, короткое
+    // содержание из поиска ценнее открывания браузера.
+    if t.contains("что такое") || t.contains("что за") {
+        return true;
+    }
     // Факт-вопросы «когда» и «в каком году»: 2B по памяти путает даты
     // (Айфон «в октябре 2007»), а поиск отвечает верно.
     if t.contains("когда ") || t.contains("в каком году") {
@@ -456,6 +461,8 @@ mod tests {
     #[test]
     fn fresh_info_detection() {
         assert!(looks_like_fresh_info("Джарвис, какая погода сегодня"));
+        assert!(looks_like_fresh_info("что такое Дональд Трамп"));
+        assert!(looks_like_fresh_info("кто такой Илон Маск"));
         assert!(looks_like_fresh_info("какие новости про металлургию"));
         assert!(!looks_like_fresh_info("расскажи сказку про кота"));
     }

@@ -392,6 +392,9 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     // Выдержка тихой речи ниже жёсткого порога: сколько сэмплов подряд
     // выше мягкого порога — после неё фраза начинается.
     let mut quiet_streak = 0usize;
+    // До какого момента тихий старт запрещён: сразу после конца ответа
+    // микрофон слышит хвост эха, и мягкий порог ловит его как «тихую речь».
+    let mut quiet_start_allowed_at = Instant::now();
     // Сколько сэмплов было именно речью (а не тишиной) в текущей фразе.
     let mut voiced_samples = 0usize;
     // Фильтр говорящего включён для текущей фразы: сегмент ушёл на
@@ -553,15 +556,24 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                             }
                             Verdict::Unverified(reason) => {
                                 // Fail-closed: профиль есть, проверить не вышло —
-                                // фраза не проходит, но владелец получает честную
-                                // просьбу повторить вместо молчаливого игнора.
-                                eprintln!("🎙️ Голос не верифицирован ({reason}) — вежливый отказ");
+                                // фраза не проходит. Но вслух отказ звучит ТОЛЬКО
+                                // если расшифровка похожа на реальную речь: когда
+                                // «фразой» оказался эхо-хвост ответа или шум
+                                // (тишина после команды — репорт пользователя),
+                                // вежливая просьба звучит из ниоткуда и бесят.
+                                let speech_like = is_valid(&text);
+                                eprintln!(
+                                    "🎙️ Голос не верифицирован ({reason}) — {}",
+                                    if speech_like { "вежливый отказ" } else { "тихий сброс (в расшифровке нет речи)" }
+                                );
                                 let _ = h.events.send(JarvisEvent::Log {
                                     message: format!("Голос не верифицирован: {reason} — фраза не принята"),
                                 });
-                                let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(
-                                    "Не смог проверить голос. Повтори ещё раз, пожалуйста.".into(),
-                                ));
+                                if speech_like {
+                                    let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(
+                                        "Не смог проверить голос. Повтори ещё раз, пожалуйста.".into(),
+                                    ));
+                                }
                                 reset_phrase_state(&mut command_buffer, &mut has_speech_started, &mut silence_samples, &mut voiced_samples, &mut vad);
                                 state = AppState::WaitingForWakeWord;
                                 followup_deadline = None;
@@ -812,6 +824,11 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             barge_last_probe = None;
             barge_owner_until = None;
             barge_free_gate = false;
+            // Хвост эха ответа ещё секунду слышен микрофону: тихий старт
+            // поймал бы его как «тихую речь» и породил фразу-мусор. Громкая
+            // речь (жёсткий порог) не запрещена.
+            quiet_start_allowed_at = now + Duration::from_millis(ECHO_GUARD_MS);
+            quiet_streak = 0;
             if keep_phrase {
                 while mic_rx.try_recv().is_ok() {}
                 // Хвост эха уже вырезан триггером: пре-ролл фразы важнее
@@ -966,7 +983,10 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                     // пользователь мог продолжить фразу.
                     vad.tail_secs = None;
                     vad.tail_at = None;
-                } else if !has_speech_started && chunk_rms >= start_floor {
+                } else if !has_speech_started
+                    && chunk_rms >= start_floor
+                    && now >= quiet_start_allowed_at
+                {
                     // Тихая речь: копим выдержку, затем начинаем фразу.
                     quiet_streak += chunk_16k.len();
                     if quiet_streak >= (QUIET_START_SECS * wake::SAMPLE_RATE as f32) as usize {
@@ -1338,6 +1358,8 @@ fn speech_floor(threshold: f32, noise_floor: f32) -> f32 {
 /// Сколько секунд речи выше мягкого порога начинают фразу: меньше — шорохи,
 /// больше — первые слова тихой фразы теряются.
 const QUIET_START_SECS: f32 = 0.35;
+/// Сколько после конца ответа тихий старт запрещён (хвост эха в микрофоне).
+const ECHO_GUARD_MS: u64 = 1200;
 
 /// Мягкий порог старта для тихой речи: заметно выше фона комнаты, но ниже
 /// жёсткого порога. Мусор, пролезший через него, отсекает VAD speakrs
