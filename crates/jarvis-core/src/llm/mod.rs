@@ -117,7 +117,11 @@ pub const API_CHAT_SYSTEM_PROMPT: &str = concat!(
     "Отвечай по существу и уверенно, без рассказов о себе и своих ограничениях. ",
     "Свежие данные (погода, курсы, новости) — через web_search. ",
     "Действие = один блок ",
-    "<tool>{\"name\":\"имя_инструмента\",\"args\":{...}}</tool>; на вопросы tool не нужен."
+    "<tool>{\"name\":\"имя_инструмента\",\"args\":{...}}</tool>; на вопросы tool не нужен. ",
+    "Инструменты: open_app, quit_app, open_url, open_path, web_search, set_timer, ",
+    "set_alarm, set_volume, set_brightness, notify, clipboard_write, music_control, ",
+    "screenshot, desktop_input, applescript, run_command, run_plugin, task_add, task_list, ",
+    "file_read, file_write, file_edit, file_search, file_list. Имя — только из списка."
 );
 /// Системный промпт разговорной ветки под активный бэкенд.
 fn chat_system_prompt() -> &'static str {
@@ -414,11 +418,17 @@ pub fn ask(
     events: EventTx,
     cancel: Arc<AtomicBool>,
 ) {
+    // Разговорная ветка: промпт зависит от бэкенда (api/uzu/candle), поэтому
+    // сравнивать со строковой константой CHAT_SYSTEM_PROMPT нельзя — для
+    // облака вся логика ниже (план «открой X», action-маршрут) отваливалась.
+    let is_chat = system == CHAT_SYSTEM_PROMPT
+        || system == UZU_CHAT_SYSTEM_PROMPT
+        || system == API_CHAT_SYSTEM_PROMPT;
     // Детерминированный план системной команды: «открой Max», «сверни окно
     // голосового помощника», «закрой телеграм». Считаем ДО кэша сайтов,
     // иначе установленное приложение проигрывает запомненному домену.
     // Явные команды пользователя из commands.toml важнее общей эвристики.
-    let plan = if system == CHAT_SYSTEM_PROMPT
+    let plan = if is_chat
         && crate::tools::utils_tab_for_prompt(&prompt).is_none()
         && !crate::commands::matches_user_command(&prompt)
     {
@@ -430,7 +440,7 @@ pub fn ask(
     // Обучаемый кэш: этот сайт уже разрешали раньше — открываем мгновенно,
     // вообще не поднимая модель.
     if plan.is_none()
-        && system == CHAT_SYSTEM_PROMPT
+        && is_chat
         && router::classify(&prompt) == router::Intent::Action
         && let Some(url) = crate::site_cache::lookup(&crate::tool_guard::strip_browser_phrase(&prompt).0)
     {
@@ -482,7 +492,7 @@ pub fn ask(
         // новый таймер: падаем в обычный путь, где остановка обрабатывается.
         let stop_verbs = ["останови", "отмени", "сними", "убери", "выключи", "стоп"];
         let stops_timer = stop_verbs.iter().any(|w| prompt.to_lowercase().contains(w));
-        if system == CHAT_SYSTEM_PROMPT
+        if is_chat
             && !stops_timer
             && prompt.to_lowercase().contains("таймер")
             && let Some(secs) = crate::text::parse_duration(&prompt)
@@ -507,7 +517,7 @@ pub fn ask(
         // «Открой утилиты» / «закрой утилиты» — окно Джарвиса, решаем сами.
         // Без этого фраза уезжала в LLM, а в каталоге у неё был только
         // close_utils — и «открой» выполнялось наоборот.
-        if system == CHAT_SYSTEM_PROMPT
+        if is_chat
             && let Some(closing) = crate::tools::utils_window_request(&prompt)
         {
             let speech = if closing {
@@ -532,7 +542,7 @@ pub fn ask(
 
         // «Проиграй анимацию реактора» — просьба к интерфейсу: сыграть
         // заставку ещё раз. Здесь нечего спрашивать у модели.
-        if system == CHAT_SYSTEM_PROMPT && crate::tools::reactor_intro_request(&prompt) {
+        if is_chat && crate::tools::reactor_intro_request(&prompt) {
             let speech = "Проиграю сборку реактора.";
             let _ = events.send(JarvisEvent::ReactorIntro);
             println!("⚙️ {speech}");
@@ -545,7 +555,7 @@ pub fn ask(
 
         // Быстрый путь утилит: календарь/секундомер/таймер — окно Джарвиса,
         // не системные приложения и не LLM. Стоп-глаголы отменяют таймер.
-        if system == CHAT_SYSTEM_PROMPT
+        if is_chat
             && let Some(tab) = crate::tools::utils_tab_for_prompt(&prompt)
         {
             let t = prompt.to_lowercase();
@@ -590,7 +600,7 @@ pub fn ask(
         }
 
         // «Останови/выключи будильник» — глушим сигнал будильника.
-        if system == CHAT_SYSTEM_PROMPT {
+        if is_chat {
             let t = prompt.to_lowercase();
             let mentions_alarm = t.contains("будильник") || t.contains("alarm");
             let stopping_alarm = [
@@ -638,7 +648,7 @@ pub fn ask(
         // open_app/open_url/run_command (каталог команд) с контекстом фразы.
 
         let verdict = router::classify_detailed(&prompt);
-        let is_action = system == CHAT_SYSTEM_PROMPT && verdict.intent == router::Intent::Action;
+        let is_action = is_chat && verdict.intent == router::Intent::Action;
 
         if is_action {
             let system = router::action_prompt_for(&prompt);
