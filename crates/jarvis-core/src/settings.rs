@@ -84,6 +84,9 @@ pub struct Settings {
     /// в репозитории: model.safetensors, config.json, tokenizer.vocab.
     /// Пусто — источник по умолчанию (релиз).
     pub asr_hf_repo: String,
+    /// Город погоды по умолчанию («какая погода» без города). Названный в
+    /// вопросе город всегда сильнее настройки.
+    pub weather_city: String,
 
     // --- TTS ---
     /// Голос Silero v5: ru_eduard | ru_dmitriy | ru_alexandr | ru_bogdan | ... (29 голосов).
@@ -147,6 +150,7 @@ impl Default for Settings {
             // Пусто — FastConformer качается из GitHub-релиза; впиши свой
             // HF-репозиторий (username/repo), когда выложишь конверсию.
             asr_hf_repo: String::new(),
+            weather_city: "Москва".to_string(),
             tts_voice: "ru_eduard".to_string(),
             tts_speed: 1.0,
             ack_before_llm: false,

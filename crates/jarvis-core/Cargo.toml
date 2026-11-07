@@ -30,7 +30,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # один раз, вместо поиска нужного пункта в Системных настройках.
 [target.'cfg(target_os = "macos")'.dependencies]
 # CoreML для фильтра говорящего включается только на macOS.
-speakrs = { workspace = true, features = ["coreml"] }
+speakrs = { workspace = true, features = ["coreml", "cpu"] }
 # Metal-бэкенд candle — только macOS: на Linux и Windows считаем на CPU.
 # Записи ниже дополняют features базовых зависимостей (см. [dependencies]).
 candle-core = { workspace = true, features = ["metal"] }
