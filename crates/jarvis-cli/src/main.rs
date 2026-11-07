@@ -72,6 +72,7 @@ fn main() -> Result<()> {
                         println!("❗ {summary}")
                     }
                 }
+                JarvisEvent::ConsoleLine { text } => println!("🖥️ {text}"),
                 JarvisEvent::VoiceCheck { ok, overlap, transcript } => {
                     println!(
                         "🎙️ Диктант {}: совпадение {:.0}% — «{}»",

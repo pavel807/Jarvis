@@ -199,6 +199,12 @@ pub enum ToolCall {
         app: Option<String>,
         path: Vec<String>,
     },
+    /// Команда Python-плагина автоматизации.
+    RunPlugin {
+        plugin: String,
+        command: String,
+        args: Option<serde_json::Value>,
+    },
 }
 
 /// Блокируем только реально разрушительные команды. Всё остальное — на
@@ -306,6 +312,8 @@ const ALIASES: &[(&str, &str)] = &[
     ("fill_field", "ui_type"),
     ("ui_menu", "ui_menu"),
     ("menu_item", "ui_menu"),
+    ("run_plugin", "run_plugin"),
+    ("plugin", "run_plugin"),
     // open_url
     ("open_url", "open_url"),
     ("openurl", "open_url"),
@@ -1450,6 +1458,11 @@ fn build(name: &str, args: &Value) -> Result<ToolCall, String> {
             path: arg_string_array_or_split(args, &["path", "menu", "item", "путь", "пункт"])
                 .ok_or("укажи path массивом (например [\"Файл\",\"Сохранить\"]) или строкой")?,
         },
+        "run_plugin" => ToolCall::RunPlugin {
+            plugin: get_str(&["plugin", "id", "плагин"])?,
+            command: get_str(&["command", "cmd", "команда"])?,
+            args: args.get("args").cloned(),
+        },
         other => return Err(format!("инструмент {other} не поддерживается")),
     })
 }
@@ -1672,6 +1685,7 @@ fn tool_name(call: &ToolCall) -> &'static str {
         ToolCall::UiClick { .. } => "ui_click",
         ToolCall::UiType { .. } => "ui_type",
         ToolCall::UiMenu { .. } => "ui_menu",
+        ToolCall::RunPlugin { .. } => "run_plugin",
     }
 }
 
@@ -1773,6 +1787,7 @@ fn tool_summary(call: &ToolCall) -> String {
             text.chars().take(60).collect::<String>()
         ),
         ToolCall::UiMenu { path, .. } => path.join(" → "),
+        ToolCall::RunPlugin { plugin, command, .. } => format!("{plugin}/{command}"),
     }
 }
 
@@ -2273,6 +2288,38 @@ fn execute_inner(
             match crate::auto::menu_path(app.as_deref(), &path_refs) {
                 Ok(what) => ToolOutcome::ok(what),
                 Err(e) => ToolOutcome::fail(format!("Пункт меню не выбран: {e:#}")),
+            }
+        }
+
+        ToolCall::RunPlugin {
+            plugin,
+            command,
+            args,
+        } => {
+            println!("🔧 run_plugin: {plugin}/{command}");
+            log(format!("🧩 run_plugin: {plugin}/{command}"));
+            if !crate::plugins::plugins_enabled_now() {
+                return ToolOutcome::fail_with_detail(
+                    "Плагины выключены",
+                    "Автоматизация плагинами не включена: скажи пользователю включить её в настройках (раздел «Плагины») или в онбординге.",
+                );
+            }
+            let Some(definition) = crate::plugins::scan().into_iter().find(|p| p.id == *plugin) else {
+                return ToolOutcome::fail(format!(
+                    "Плагин «{plugin}» не найден — посмотри доступные в блоке ПЛАГИНЫ"
+                ));
+            };
+            let call_args = args.clone().unwrap_or(serde_json::json!({}));
+            match crate::plugins::run_command(&definition, &command.clone(), &call_args) {
+                Ok(outcome) => {
+                    let detail = if outcome.detail.is_empty() {
+                        outcome.speech.clone()
+                    } else {
+                        format!("{}\n{}", outcome.speech, outcome.detail)
+                    };
+                    ToolOutcome::with_detail(outcome.speech, detail)
+                }
+                Err(e) => ToolOutcome::fail(format!("Плагин «{plugin}/{command}» не сработал: {e:#}")),
             }
         }
 

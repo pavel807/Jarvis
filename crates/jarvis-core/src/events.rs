@@ -111,6 +111,8 @@ pub enum JarvisEvent {
         overlap: f32,
         transcript: String,
     },
+    /// Строка консоли установки (uv/плагины) — для экрана онбординга.
+    ConsoleLine { text: String },
     AudioLevel {
         level: f32,
         source: String,

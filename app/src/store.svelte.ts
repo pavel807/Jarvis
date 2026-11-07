@@ -77,6 +77,8 @@ export interface Settings {
   api_folder_id: string;
   /** HF-репозиторий FastConformer пользователя (username/repo), пусто — релиз. */
   asr_hf_repo: string;
+  /** Автоматизация Python-плагинами включена. */
+  plugins_enabled: boolean;
 }
 
 export interface Toast {
@@ -149,6 +151,11 @@ export const store = $state({
     overlap: 0 as number,
     transcript: "",
   },
+  /**
+   * Консоль установки автоматизации (uv/плагины): строки события
+   * console_line — показывает шаг онбординга и раздел «Плагины».
+   */
+  consoleLines: [] as string[],
   /**
    * Откуда пришёл уровень звука: «mic» — говорит пользователь, «tts» — сам
    * Джарвис. Без этого индикатор одинаково реагировал бы на свою же речь.
@@ -278,6 +285,7 @@ export const settings = $state<Settings>({
   api_model: "yandexgpt-lite",
   api_folder_id: "",
   asr_hf_repo: "",
+  plugins_enabled: false,
 });
 
 export async function loadSettings() {
@@ -410,6 +418,11 @@ export async function initEvents() {
       case "record_saved":
         store.recording = false;
         break;
+      case "console_line": {
+        store.consoleLines.push(((ev.text as string) ?? "").slice(0, 200));
+        if (store.consoleLines.length > 200) store.consoleLines.shift();
+        break;
+      }
       case "voice_check": {
         const ok = (ev.ok as boolean) ?? false;
         store.voiceTrain = {

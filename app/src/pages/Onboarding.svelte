@@ -14,6 +14,26 @@
   let step = $state(0);
   let busy = $state(false);
 
+  // ---------- Шаг «Автоматизация» ----------
+  let installing = $state(false);
+  let automationInstalled = $state(false);
+
+  async function installAutomation() {
+    if (installing) return;
+    installing = true;
+    try {
+      await invoke<string>("uv_install");
+      automationInstalled = true;
+      // Включаем плагины и кладём пример-плагин.
+      await patchSettings({ plugins_enabled: true });
+      toast("Автоматизация установлена", "ok");
+    } catch (e) {
+      toast(`Не получилось: ${e}`, "err", 6000);
+    } finally {
+      installing = false;
+    }
+  }
+
   // ---------- Шаг 1: загрузка ----------
 
   const engineReady = $derived(store.status.engineRunning);
@@ -143,7 +163,7 @@
 <div class="ob-overlay" role="dialog" aria-label="Первый запуск Джарвиса">
   <div class="ob-card">
     <div class="ob-steps" aria-hidden="true">
-      {#each ["Загрузка", "Модель", "Голос"] as label, i (label)}
+      {#each ["Загрузка", "Модель", "Автоматизация", "Голос"] as label, i (label)}
         <span class="ob-step" class:is-active={step === i} class:is-done={step > i}>
           {i + 1}. {label}
         </span>
@@ -269,6 +289,44 @@
       </div>
       <button class="btn btn--primary btn--block" onclick={() => (step = 2)}>Дальше</button>
     {:else if step === 2}
+      <h1 class="ob-title">Автоматизация делами</h1>
+      <p class="ob-sub">
+        Плагины на Python: свои команды для Джарвиса — цитаты, отчёты, что
+        угодно. Установка скачает движок запуска (uv, ~20 МБ) в папку
+        программы и покажет процесс в консоли. Можно пропустить и включить
+        позже в настройках.
+      </p>
+      {#if !automationInstalled}
+        <button class="btn btn--primary btn--block" disabled={installing} onclick={() => void installAutomation()}>
+          {installing ? "Устанавливаю…" : "Установить автоматизацию"}
+        </button>
+      {:else}
+        <div class="card card--flush ob-status">
+          <div class="ob-row">
+            <span class="ob-dot is-ok"></span>
+            Движок запуска (uv)
+            <span class="ob-val">установлен</span>
+          </div>
+          <div class="ob-row">
+            <span class="ob-dot is-ok"></span>
+            Пример плагина «Цитаты»
+            <span class="ob-val">готов</span>
+          </div>
+        </div>
+      {/if}
+      {#if store.consoleLines.length}
+        <div class="ob-console">
+          {#each store.consoleLines as line, i (i)}
+            <div>{line}</div>
+          {/each}
+        </div>
+      {/if}
+      <div class="ob-skip-row">
+        <button class="btn btn--primary btn--block" disabled={installing} onclick={() => (step = 3)}>
+          {automationInstalled ? "Дальше" : "Пропустить"}
+        </button>
+      </div>
+    {:else if step === 3}
       <h1 class="ob-title">Познакомься с моим голосом</h1>
       <p class="ob-sub">
         Прочитай фразу с экрана — Джарвис запомнит, как звучит твой голос, и
@@ -399,6 +457,20 @@
 
   .ob-skip-row {
     margin-top: auto;
+  }
+
+  .ob-console {
+    max-height: 160px;
+    overflow-y: auto;
+    background: rgba(10, 14, 20, 0.85);
+    border: 1px solid rgba(128, 128, 128, 0.2);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.6;
+    opacity: 0.9;
+    user-select: text;
   }
 
   .ob-models {

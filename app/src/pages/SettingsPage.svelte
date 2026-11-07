@@ -17,6 +17,7 @@
     { key: "ai", title: "Модель" },
     { key: "general", title: "Общие" },
     { key: "mic", title: "Микрофон" },
+    { key: "plugins", title: "Плагины" },
     { key: "system", title: "Система" },
 ] as const;
 
@@ -238,11 +239,48 @@
     }
   }
 
+  // ---------- Плагины (автоматизация) ----------
+
+  type PluginInfo = { id: string; title: string; commands: { name: string; description: string }[] };
+  let uvInstalled = $state<boolean | null>(null);
+  let uvPath = $state("");
+  let pluginList = $state<PluginInfo[] | null>(null);
+
+  async function refreshPlugins() {
+    try {
+      const status = await invoke<{ installed: boolean; path: string; plugins: PluginInfo[] }>(
+        "uv_status",
+      );
+      uvInstalled = status.installed;
+      uvPath = status.path;
+      pluginList = status.plugins;
+    } catch {
+      uvInstalled = null;
+    }
+  }
+
+  let uvInstalling = $state(false);
+  async function installUv() {
+    if (uvInstalling) return;
+    uvInstalling = true;
+    try {
+      await invoke<string>("uv_install");
+      await patchSettings({ plugins_enabled: true });
+      await refreshPlugins();
+      toast("Автоматизация установлена", "ok");
+    } catch (e) {
+      toast(`Не получилось: ${e}`, "err", 6000);
+    } finally {
+      uvInstalling = false;
+    }
+  }
+
   // ---------- Система ----------
 
   onMount(() => {
     void refreshMicStatus();
     void refreshVoiceSamples();
+    void refreshPlugins();
     void (async () => {
       try {
         const { isEnabled } = await import("@tauri-apps/plugin-autostart");
@@ -613,6 +651,56 @@
         </div>
       {/if}
     </div>
+  </section>
+
+  <!-- Плагины -->
+  <section class="settings-section" data-section="plugins" bind:this={sectionEls.plugins}>
+    <h2 class="section-title">Плагины</h2>
+    {#if hit("плагины", "автоматизация", "python", "uv", "скрипты")}
+      <div class="card card--flush">
+        <SwitchRow
+          checked={settings.plugins_enabled}
+          title="Автоматизация плагинами"
+          hint="Команды на Python в папке плагинов: Джарвис вызывает их по смыслу. Для запуска нужен движок uv — ставится автоматически."
+          onchange={(value) => void patchSettings({ plugins_enabled: value })}
+        />
+        {#if uvInstalled === false}
+          <button class="row-item" disabled={uvInstalling} onclick={installUv}>
+            <span class="row-item__text">
+              <span class="row-item__title">{uvInstalling ? "Устанавливаю движок…" : "Установить движок запуска (uv)"}</span>
+              <span class="row-item__hint">Скачается с GitHub в папку программы, ~20 МБ</span>
+            </span>
+            <span class="row-item__chevron"><AppIcon name="download" size={15} /></span>
+          </button>
+        {:else if uvInstalled}
+          <div class="row-item">
+            <span class="row-item__text">
+              <span class="row-item__title">Движок запуска (uv)</span>
+              <span class="row-item__hint mono" style="user-select: text">{uvPath}</span>
+            </span>
+            <span class="badge badge--ok">OK</span>
+          </div>
+        {/if}
+        {#if pluginList !== null}
+          {#each pluginList as plugin (plugin.id)}
+            <div class="row-item" style="flex-direction: column; align-items: stretch; gap: 4px">
+              <span class="row-item__title">{plugin.title}</span>
+              {#each plugin.commands as cmd (plugin.id + cmd.name)}
+                <span class="row-item__hint">команда «{cmd.name}» — {cmd.description}</span>
+              {/each}
+            </div>
+          {/each}
+          {#if pluginList.length === 0}
+            <div class="row-item">
+              <span class="row-item__text">
+                <span class="row-item__title">Плагинов пока нет</span>
+                <span class="row-item__hint">Положи .py-файл с манифестом в папку plugins — Джарвис увидит его сам</span>
+              </span>
+            </div>
+          {/if}
+        {/if}
+      </div>
+    {/if}
   </section>
 
   <!-- Система -->

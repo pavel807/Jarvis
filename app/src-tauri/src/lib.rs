@@ -615,6 +615,73 @@ fn llm_api_models() -> Result<Vec<String>, String> {
     jarvis_core::llm::api_backend::list_models().map_err(|e| format!("{e:#}"))
 }
 
+// ---------- Автоматизация (uv + Python-плагины) ----------
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UvStatus {
+    installed: bool,
+    path: String,
+    plugins: Vec<jarvis_core::plugins::Plugin>,
+}
+
+/// Статус автоматизации: установлен ли uv и какие плагины видны.
+#[tauri::command]
+fn uv_status() -> UvStatus {
+    let path = jarvis_core::plugins::uv_path()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    UvStatus {
+        installed: !path.is_empty(),
+        path,
+        plugins: jarvis_core::plugins::scan(),
+    }
+}
+
+/// Установить uv в системную папку программы: скачивание релиза astral-sh/uv,
+/// распаковка, настройка. Прогресс строчками — событие ConsoleLine.
+#[tauri::command]
+fn uv_install(app: AppHandle) -> Result<String, String> {
+    // Один установщик за раз.
+    static INSTALLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if INSTALLING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("Установка уже идёт".into());
+    }
+    let (tx, rx) = channel::<JarvisEvent>();
+    // Мост прогресса в консоль онбординга: Log → ConsoleLine.
+    std::thread::spawn(move || {
+        for ev in rx {
+            if let JarvisEvent::Log { message } = &ev {
+                println!("🖥️ {message}");
+                let _ = app.emit("engine-event", &JarvisEvent::ConsoleLine {
+                    text: message.clone(),
+                });
+            }
+        }
+    });
+    let result = jarvis_core::plugins::install_uv(&mut |pct, text| {
+        let _ = tx.send(JarvisEvent::Log {
+            message: format!("[{pct}%] {text}"),
+        });
+    })
+    .and_then(|p| {
+        // Пример-плагин рядом: контракт виден на живом файле.
+        jarvis_core::plugins::ensure_sample_plugin()
+            .map(|_| p)
+            .map_err(|e| anyhow::anyhow!("{e:#}"))
+    })
+    .map(|p| p.to_string_lossy().into_owned())
+    .map_err(|e| format!("{e:#}"));
+    INSTALLING.store(false, std::sync::atomic::Ordering::SeqCst);
+    result
+}
+
+/// Список плагинов с их командами.
+#[tauri::command]
+fn plugins_list() -> Vec<jarvis_core::plugins::Plugin> {
+    jarvis_core::plugins::scan()
+}
+
 #[tauri::command]
 fn llm_ask(shared: State<'_, Arc<Shared>>, app: AppHandle, prompt: String) {    // Номер обращения: фоновый веб-поиск проверит его перед озвучкой.
     let req_id = jarvis_core::llm::new_request();
@@ -1272,6 +1339,9 @@ pub fn run() {
             save_commands,
             llm_api_test,
             llm_api_models,
+            uv_status,
+            uv_install,
+            plugins_list,
             voice_record_start,
             voice_record_stop,
             get_settings,

@@ -754,6 +754,8 @@ fn tool_block_for(prompt: &str) -> String {
     if crate::tools::is_macos() {
         out.push_str("\n  applescript {\"script\":\"..\"} — для прочего в нативных приложениях");
     }
+    // Python-плагины автоматизации: блок только при включённых плагинах.
+    out.push_str(&crate::plugins::prompt_block());
     out
 }
 

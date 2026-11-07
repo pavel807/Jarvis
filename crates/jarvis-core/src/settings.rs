@@ -87,6 +87,9 @@ pub struct Settings {
     /// Город погоды по умолчанию («какая погода» без города). Названный в
     /// вопросе город всегда сильнее настройки.
     pub weather_city: String,
+    /// Автоматизация Python-плагинами включена: uv установлен (или
+    /// устанавливается), инструмент run_plugin жив. Включается в онбординге.
+    pub plugins_enabled: bool,
 
     // --- TTS ---
     /// Голос Silero v5: ru_eduard | ru_dmitriy | ru_alexandr | ru_bogdan | ... (29 голосов).
@@ -151,6 +154,9 @@ impl Default for Settings {
             // HF-репозиторий (username/repo), когда выложишь конверсию.
             asr_hf_repo: String::new(),
             weather_city: "Москва".to_string(),
+            // Плагины выключены, пока пользователь не включит автоматизацию
+            // в онбординге или настройках.
+            plugins_enabled: false,
             tts_voice: "ru_eduard".to_string(),
             tts_speed: 1.0,
             ack_before_llm: false,

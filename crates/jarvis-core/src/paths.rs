@@ -127,6 +127,11 @@ pub fn resources_dir() -> PathBuf {
     base_dir().join("resources")
 }
 
+/// Каталог Python-плагинов автоматизации: системная папка программы.
+pub fn plugins_dir() -> PathBuf {
+    app_data_dir().join("plugins")
+}
+
 pub fn train_dir() -> PathBuf {
     base_dir().join("train")
 }

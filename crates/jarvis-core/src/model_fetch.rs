@@ -228,6 +228,12 @@ fn ensure_archive(asset: &str, progress: &mut dyn FnMut(u8)) -> Result<()> {
 
 /// Качает `url` в `dest`, дёргая `progress(pct)` по мере роста файла.
 /// `expected` — ожидаемый размер в байтах (0, если неизвестен).
+pub(crate) fn download_public(url: &str, dest: &Path, expected: u64, progress: &mut dyn FnMut(u8)) -> Result<()> {
+    download(url, dest, expected, progress)
+}
+
+/// Качает `url` в `dest`, дёргая `progress(pct)` по мере роста файла.
+/// `expected` — ожидаемый размер в байтах (0, если неизвестен).
 fn download(url: &str, dest: &Path, expected: u64, progress: &mut dyn FnMut(u8)) -> Result<()> {
     let mut child = std::process::Command::new(curl_bin())
         .args(["-fL", "--retry", "3", "--connect-timeout", "20", "-o"])

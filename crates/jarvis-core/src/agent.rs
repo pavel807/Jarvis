@@ -117,6 +117,7 @@ pub const KNOWN_NAMES: &[&str] = &[
     "ui_click",
     "ui_type",
     "ui_menu",
+    "run_plugin",
 ];
 
 const FIVE_SECONDS: Duration = Duration::from_secs(5);
@@ -214,6 +215,15 @@ pub fn spec_for(name: &str) -> Option<ToolSpec> {
             Duration::from_secs(30),
             Postcondition::None,
             platforms::MACOS_ONLY,
+        ),
+        "run_plugin" => (
+            // Плагин пользователя: произвольный код, но выбран сам
+            // пользователь и код лежит в его папке; первый запуск может
+            // ставить зависимости — длинный таймаут.
+            RiskLevel::Medium,
+            Duration::from_secs(120),
+            Postcondition::None,
+            platforms::ALL,
         ),
         "file_read" | "file_list" | "file_search" | "file_glob" => (
             RiskLevel::Low,
