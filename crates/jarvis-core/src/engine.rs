@@ -1,6 +1,6 @@
 //! Конечный автомат ассистента: wake word → команда → LLM.
 
-use crate::audio::{calculate_rms, resample_audio, spawn_stream};
+use crate::audio::{calculate_rms, resample_audio_into, spawn_stream};
 use crate::commands::{CommandsConfig, execute_command, get_global_config};
 use crate::events::{EventTx, JarvisEvent};
 use crate::llm::{self, ChatTurn, SharedLlm};
@@ -387,6 +387,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     let mut command_buffer = Vec::new();
     let mut followup_deadline: Option<Instant> = None;
 
+    let mut resample_scratch: Vec<f32> = Vec::with_capacity(8192);
     let mut has_speech_started = false;
     let mut silence_samples = 0;
     // Выдержка тихой речи ниже жёсткого порога: сколько сэмплов подряд
@@ -674,8 +675,12 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             Err(_) => continue,
         };
 
-        let chunk_16k = if native_sr != wake::SAMPLE_RATE {
-            resample_audio(&chunk, native_sr, wake::SAMPLE_RATE)
+        // Ресемпл в многоразовый буфер: на каждый чанк микрофона раньше
+        // аллоцировался новый Vec (~20-25 аллокаций в секунду впустую).
+        let chunk_16k: Vec<f32> = if native_sr != wake::SAMPLE_RATE {
+            resample_scratch.clear();
+            resample_audio_into(&mut resample_scratch, &chunk, native_sr, wake::SAMPLE_RATE);
+            resample_scratch.clone()
         } else {
             chunk
         };
@@ -707,12 +712,11 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
         // без истории фраза начиналась бы с середины слова.
         let history_capacity = wake::SAMPLE_RATE * HISTORY_BUFFER_SECS;
         let preroll_samples = (wake::SAMPLE_RATE as f32 * PREROLL_SECS) as usize;
-        for &s in &chunk_16k {
-            if audio_history.len() >= history_capacity {
-                audio_history.pop_front();
-            }
-            audio_history.push_back(s);
+        if audio_history.len() + chunk_16k.len() > history_capacity {
+            let overflow = audio_history.len() + chunk_16k.len() - history_capacity;
+            audio_history.drain(..overflow);
         }
+        audio_history.extend(&chunk_16k);
 
         // Пока Джарвис говорит, микрофон как команда не слушаем: иначе хвост
         // его же речи будет распознан как ответ пользователя. Но за уровнем

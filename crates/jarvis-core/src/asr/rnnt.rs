@@ -101,9 +101,13 @@ pub fn greedy(
     let mut state = predictor.initial_state()?;
     let mut prev = blank_id;
 
+    // Батч-размерность снимается ОДИН раз до цикла: иначе каждый кадр
+    // платил за i() + unsqueeze() — две аллокации вместо одной на кадр
+    // (кадров на фразу — сотни).
+    let enc_frames = enc_out.squeeze(0)?;
     for t in 0..t_valid {
-        // Кадр энкодера [512] → [1, 512]: индексация даёт contiguous-срез.
-        let frame = enc_out.i((0, t, ..))?.unsqueeze(0)?;
+        // Кадр энкодера [512] → [1, 512]: contiguous-срез одного кадра.
+        let frame = enc_frames.i(t)?.unsqueeze(0)?;
         let mut emitted = 0usize;
         loop {
             // Встраиваем текущий контекст из текущего состояния.

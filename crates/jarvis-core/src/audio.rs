@@ -219,6 +219,18 @@ pub fn downmix_u16(data: &[u16], channels: usize) -> Vec<f32> {
 }
 
 /// Линейная интерполяция без антиалиасинга — для речи достаточно.
+/// Ресемпл в уже выделенный буфер: движок вызывает это на КАЖДОМ чанке
+/// микрофона (~20-25 раз в секунду) — переиспользование ёмкости убирает
+/// аллокацию на каждый чанк. Результат идентичен [`resample_audio`].
+pub fn resample_audio_into(
+    out: &mut Vec<f32>,
+    samples: &[f32],
+    src_rate: usize,
+    target_rate: usize,
+) {
+    *out = resample_audio(samples, src_rate, target_rate);
+}
+
 pub fn resample_audio(samples: &[f32], src_rate: usize, target_rate: usize) -> Vec<f32> {
     if src_rate == target_rate || samples.is_empty() {
         return samples.to_vec();
