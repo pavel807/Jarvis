@@ -57,7 +57,16 @@ fn agent_fast() -> &'static ureq::Agent {
 /// Поиск с жёстким лимитом времени: нужен там, где решение «открыть сайт»
 /// или «показать выдачу» должно приниматься быстро.
 pub fn search_fast(query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-    search_with(query, limit, agent_fast())
+    // Быстрый путь — один DDG-прогон коротким агентом, без цепочки: решение
+    // «открыть сайт» принимается быстро или не принимается вовсе.
+    let url = format!("{}?q={}", SEARCH_URL, urlencoding::encode(query));
+    let response = agent_fast().get(&url)
+        .header("User-Agent", USER_AGENT)
+        .header("Accept-Language", "ru-RU,ru;q=0.9,en;q=0.8")
+        .call()
+        .with_context(|| format!("Поиск не удался: {url}"))?;
+    let html = response.into_body().read_to_string()?;
+    Ok(parse_results(&html, limit))
 }
 
 /// Прогревает DNS/TLS до поисковика в фоне, чтобы первый запрос
@@ -127,21 +136,83 @@ pub fn search(query: &str, limit: usize) -> Result<Vec<SearchHit>> {
     if query.trim().is_empty() {
         bail!("Пустой поисковый запрос");
     }
-
     let key = cache_key(query);
     if let Some(hits) = cache_get(&key, limit) {
         println!("⚡ Поиск из кэша: {query:?} ({} результатов)", hits.len());
         return Ok(hits);
     }
-
-    let hits = search_with(query, limit, agent())?;
+    let hits = search_chain(query, limit)?;
     if !hits.is_empty() {
         cache_put(key, &hits);
     }
     Ok(hits)
 }
 
-/// Общая часть поиска: GET + разбор. Кэш — на уровне вызывающих.
+/// Цепочка движков: DDG нестабилен (анти-бот заглушки, таймауты из РФ),
+/// поэтому при пустой/упавшей выдаче пробуем Bing — первый непустой побеждает.
+fn search_chain(query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    let mut last_err: Option<String> = None;
+    for attempt in 0..2 {
+        match search_ddg(query, limit) {
+            Ok(hits) if !hits.is_empty() => return Ok(hits),
+            Ok(_) => last_err = Some("DDG: пустая выдача".into()),
+            Err(e) => last_err = Some(format!("DDG: {e:#}")),
+        }
+        // Между попытками — пауза, DDG иногда отдаёт результат со второй.
+        if attempt == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    }
+    match search_bing(query, limit) {
+        Ok(hits) if !hits.is_empty() => {
+            println!("🔍 DDG не дал результатов — ответил Bing ({} шт.)", hits.len());
+            Ok(hits)
+        }
+        Ok(_) => Err(anyhow::anyhow!(
+            "{}; Bing: пустая выдача",
+            last_err.unwrap_or_default()
+        )),
+        Err(e) => Err(anyhow::anyhow!("{}; Bing: {e:#}", last_err.unwrap_or_default())),
+    }
+}
+
+/// Вопрос-определение: «что такое X», «кто такой/кто такая X».
+pub fn looks_like_definitional(text: &str) -> bool {
+    let t = text.to_lowercase();
+    t.contains("что такое") || t.contains("кто такой") || t.contains("кто такая")
+}
+
+/// Wikipedia как первый источник для вопросов-определений
+/// («что такое X», «кто такой X»): надёжнее поисковиков для энциклопедического.
+pub fn wikipedia_hit(query: &str) -> Option<SearchHit> {
+    let api = format!(
+        "https://ru.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=1&srsearch={}",
+        urlencoding::encode(query)
+    );
+    let response = agent()
+        .get(&api)
+        .header("User-Agent", USER_AGENT)
+        .call()
+        .ok()?;
+    let text = response.into_body().read_to_string().ok()?;
+    let data: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let first = data.pointer("/query/search/0")?;
+    let title = first["title"].as_str()?.to_string();
+    let snippet = strip_tags(first["snippet"].as_str().unwrap_or(""));
+    let url = format!(
+        "https://ru.wikipedia.org/wiki/{}",
+        urlencoding::encode(&title.replace(' ', "_"))
+    );
+    Some(SearchHit { title, url, snippet })
+}
+
+/// Поиск через Bing HTML (запасной движок).
+/// DDG lite: GET + разбор.
+fn search_ddg(query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    search_with(query, limit, agent())
+}
+
+/// Общая часть DDG-поиска: GET + разбор. Кэш — на уровне вызывающих.
 fn search_with(query: &str, limit: usize, agent: &ureq::Agent) -> Result<Vec<SearchHit>> {
     let started = Instant::now();
     let url = format!("{}?q={}", SEARCH_URL, urlencoding::encode(query));
@@ -160,6 +231,133 @@ fn search_with(query: &str, limit: usize, agent: &ureq::Agent) -> Result<Vec<Sea
         hits.len()
     );
     Ok(hits)
+}
+
+fn search_bing(query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    let url = format!(
+        "https://www.bing.com/search?q={}&setlang=ru",
+        urlencoding::encode(query)
+    );
+    let response = agent_bing()
+        .get(&url)
+        .header("User-Agent", BING_UA)
+        .call()
+        .map_err(|e| anyhow::anyhow!("Bing не отвечает: {e}"))?;
+    let html = response.into_body().read_to_string()?;
+    let hits = parse_bing_results(&html, limit);
+    Ok(hits)
+}
+
+const BING_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
+
+fn agent_bing() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_resolve(Some(Duration::from_millis(800)))
+            .timeout_connect(Some(Duration::from_millis(2000)))
+            .timeout_global(Some(Duration::from_secs(5)))
+            .build()
+            .new_agent()
+    })
+}
+
+/// Разбор Bing-выдачи: блоки `<li class="b_algo">`, заголовок в `<h2><a>`,
+/// сниппет в первом `<p>`; реальные адреса зашиты в redirect `u=a1<base64>`.
+fn parse_bing_results(html: &str, limit: usize) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    let mut rest = html;
+    while hits.len() < limit {
+        let Some(block_pos) = rest.find("<li class=\"b_algo\"") else {
+            break;
+        };
+        rest = &rest[block_pos..];
+        let Some(block_end) = rest.find("</li>") else { break };
+        let block = &rest[..block_end];
+        rest = &rest[block_end..];
+
+        // Заголовок: <h2><a ... href="...">Заголовок</a></h2>
+        let (title, raw_href) = match find_h2_link(block) {
+            Some(pair) => pair,
+            None => continue,
+        };
+        let raw_href: &str = &raw_href;
+        // Сниппет: первый <p ...>…</p> после заголовка.
+        let snippet = block
+            .split("<h2")
+            .nth(1)
+            .and_then(|after| after.split("<p").nth(1))
+            .and_then(|p| p.split_once('>'))
+            .and_then(|(_, body)| body.split("</p>").next())
+            .map(strip_tags)
+            .unwrap_or_default();
+        let url = unwrap_bing_url(raw_href).unwrap_or_else(|| raw_href.to_string());
+        if title.is_empty() || url.is_empty() {
+            continue;
+        }
+        hits.push(SearchHit {
+            title: title.trim().to_string(),
+            url,
+            snippet: snippet.trim().to_string(),
+        });
+    }
+    hits
+}
+
+fn find_h2_link(block: &str) -> Option<(String, String)> {
+    let h2 = block.find("<h2")?;
+    let after = &block[h2..];
+    let a_start = after.find("<a")?;
+    let tag_end = after[a_start..].find('>')? + a_start;
+    let tag = &after[a_start..=tag_end];
+    let href = tag
+        .split("href=\"")
+        .nth(1)
+        .and_then(|v| v.split('"').next())
+        .unwrap_or("")
+        .to_string();
+    let body = &after[tag_end + 1..];
+    let title = body.split("</a>").next().map(strip_tags).unwrap_or_default();
+    Some((title, href))
+}
+
+/// Bing-редирект `…/ck/a?…&u=a1<base64url>` → настоящий адрес.
+fn unwrap_bing_url(href: &str) -> Option<String> {
+    let u = href.split("u=a1").nth(1)?;
+    let encoded: String = u
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '=')
+        .collect();
+    if encoded.len() < 8 {
+        return None;
+    }
+    // base64url → base64: -_ заменяем, паддинг дописываем.
+    let mut std_b64 = encoded.replace('-', "+").replace('_', "/");
+    while std_b64.len() % 4 != 0 {
+        std_b64.push('=');
+    }
+    decode_base64(&std_b64).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Минимальный base64-декодер (без внешних крейтов).
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for ch in input.chars() {
+        if ch == '=' {
+            break;
+        }
+        let val = TABLE.iter().position(|t| *t as char == ch)? as u32;
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Ссылка на страницу результатов поиска — открываем её, когда не уверены,
@@ -311,6 +509,11 @@ fn strip_tags(fragment: &str) -> String {
 /// Строит промпт для LLM: результаты поиска как контекст + вопрос.
 /// Ответ должен быть коротким и устным — он пойдёт в озвучку.
 pub fn build_summary_prompt(query: &str, hits: &[SearchHit]) -> Option<String> {
+    // Хотя бы один содержательный сниппет: выдача из одних заголовков без
+    // описаний не даёт модели материала — честный отказ лучше отсебятины.
+    if hits.iter().all(|h| h.snippet.trim().is_empty()) {
+        return None;
+    }
     if hits.is_empty() {
         return None;
     }

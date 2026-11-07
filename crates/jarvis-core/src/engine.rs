@@ -1777,8 +1777,25 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
             let history = Arc::clone(&h.llm_history);
             let cancel = Arc::clone(&h.llm_cancel);
 
-            std::thread::spawn(move || match crate::web::search(&query, 5) {
-                Ok(hits) => {
+            std::thread::spawn(move || {
+                let mut hits = match crate::web::search(&query, 5) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        eprintln!("⚠️ Веб-поиск не удался: {e}");
+                        if llm::is_current_request(req_id) && !cancel.load(Ordering::SeqCst) {
+                            llm::speak(&audio_tx, &events, "Интернет не отвечает, не смог найти.");
+                        }
+                        return;
+                    }
+                };
+                // Определения («что такое X», «кто такой Y») — Wikipedia первым
+                // источником: надёжнее поисковиков для энциклопедического.
+                if crate::web::looks_like_definitional(&prompt)
+                    && let Some(wiki) = crate::web::wikipedia_hit(&query)
+                {
+                    hits.insert(0, wiki);
+                }
+                {
                     // Пока искали, пользователь мог сказать новое слово или
                     // «стоп»: вчерашний курс доллара вслух посреди нового
                     // разговора звучит как бред.
@@ -1807,12 +1824,6 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
                             });
                             llm::speak(&audio_tx, &events, "Не нашёл ответа в интернете.");
                         }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("⚠️ Веб-поиск не удался: {e}");
-                    if llm::is_current_request(req_id) && !cancel.load(Ordering::SeqCst) {
-                        llm::speak(&audio_tx, &events, "Интернет не отвечает, не смог найти.");
                     }
                 }
             });
