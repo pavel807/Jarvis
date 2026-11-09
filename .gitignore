@@ -16,3 +16,4 @@
 *.toml.tmp
 settings.toml
 .jarvis-fixes-backup-*
+vendor/
