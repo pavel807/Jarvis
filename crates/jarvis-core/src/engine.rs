@@ -329,6 +329,16 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     // пользователя не платит за DNS и TLS-рукопожатие.
     crate::web::warm_up();
 
+    // Каналы и планировщик (по логике OpenJarvis): Telegram-бот и задачи
+    // по расписанию живут в фоновых потоках движка и молчат, если не
+    // настроены (токен/[[mcp_servers]] в settings.toml).
+    crate::telegram::spawn(Arc::clone(&h.llm));
+    crate::schedule::spawn(
+        Arc::clone(&h.llm),
+        h.audio_tx.clone(),
+        h.events.clone(),
+    );
+
     let (mic_tx, mic_rx) = sync_channel::<Vec<f32>>(128);
 
     println!("🎤 Запрашиваю доступ к микрофону...");

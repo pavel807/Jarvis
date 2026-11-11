@@ -3692,6 +3692,7 @@ dependencies = [
  "block2",
  "candle-core",
  "candle-nn",
+ "chrono",
  "cpal 0.18.2",
  "flate2",
  "hf-hub 1.0.0",

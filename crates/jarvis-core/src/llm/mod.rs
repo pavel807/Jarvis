@@ -661,9 +661,10 @@ pub fn ask(
                 )
             };
             format!(
-                "{chat}\nСегодняшняя дата: {}.\n{commands_block}\nЕсли просьба совпадает с командой пользователя, \
+                "{chat}\nСегодняшняя дата: {}.\n{commands_block}{}\nЕсли просьба совпадает с командой пользователя, \
                  вызови run_command с её именем; иначе просто ответь.",
-                crate::text::today_russian()
+                crate::text::today_russian(),
+                crate::memory::prompt_block()
             )
         };
 
@@ -839,6 +840,9 @@ pub fn ask(
             buf.drain(..excess);
         }
         crate::topic::remember(&prompt, &text);
+        // Долговременная память: фоновая экстракция фактов из обмена
+        // (логика OpenJarvis) — не тормозит диалог, ошибки молча деградируют.
+        crate::memory::extract_async(Arc::clone(&shared), prompt.clone(), text.clone());
         let _ = events.send(JarvisEvent::LlmDone { text });
     });
 }
