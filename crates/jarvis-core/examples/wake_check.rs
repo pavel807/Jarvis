@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 
 fn main() -> Result<()> {
+    jarvis_core::init_tuning();
     let stt = std::sync::Arc::new(std::sync::Mutex::new(jarvis_core::stt::Stt::load(
         &jarvis_core::paths::models_dir(),
     )?));
@@ -51,7 +52,7 @@ fn main() -> Result<()> {
         }
         let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let label = jarvis_core::tts::label_of_sample(&name);
-        let audio = read_window(&path).with_context(|| name.clone())?;
+        let mut audio = read_window(&path).with_context(|| name.clone())?;
         // Окно 1.2 с: обрезка/паддинг тишиной.
         let window = 16_000 * 12 / 10;
         audio.resize(window, 0.0);

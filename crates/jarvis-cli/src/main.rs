@@ -14,6 +14,8 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, RwLock};
 
 fn main() -> Result<()> {
+    jarvis_core::init_tuning();
+
     println!("🎙️ Запуск Jarvis CLI ...");
 
     // Модели живут в системной папке программы; старые переносятся туда один раз.

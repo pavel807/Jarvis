@@ -251,60 +251,120 @@ pub fn spawn_stream(tx: SyncSender<Vec<f32>>) -> Result<(cpal::Stream, usize)> {
     ensure_mic_permission()?;
 
     let host = cpal::default_host();
-    let dev = host
-        .default_input_device()
-        .context("❌ Не найдено устройство ввода по умолчанию.")?;
 
-    let sup = dev
-        .default_input_config()
-        .context("❌ Не удалось получить конфигурацию микрофона.")?;
+    // Перебираем ВСЕ устройства ввода (default первым): «default» может
+    // указывать на профиль, который сейчас недоступен (наушники переключили
+    // профиль, USB-гарнитура занята), при этом остальные устройства живы.
+    let mut names: Vec<String> = Vec::new();
+    let mut devices: Vec<cpal::Device> = Vec::new();
+    if let Ok(list) = host.input_devices() {
+        for d in list {
+            let name = d
+                .description()
+                .map(|desc| desc.name().to_string())
+                .unwrap_or_else(|_| "?".into());
+            names.push(name.clone());
+            devices.push(d);
+        }
+    }
+    if devices.is_empty() {
+        bail!("❌ В системе не найдено ни одного устройства ввода.");
+    }
+    // Default — первым кандидатом.
+    if let Some(def) = host.default_input_device() {
+        let def_name = def
+            .description()
+            .map(|desc| desc.name().to_string())
+            .unwrap_or_default();
+        let pos = devices.iter().position(|d| {
+            d.description()
+                .map(|desc| desc.name() == def_name)
+                .unwrap_or(false)
+        });
+        if let Some(pos) = pos {
+            let d = devices.remove(pos);
+            devices.insert(0, d);
+        } else {
+            devices.insert(0, def);
+        }
+    }
 
-    let ch = sup.channels() as usize;
-    let sr = sup.sample_rate() as usize;
+    let mut last_error: Option<String> = None;
+    for dev in devices {
+        let name = dev
+            .description()
+            .map(|desc| desc.name().to_string())
+            .unwrap_or_else(|_| "?".into());
+        let sup = match dev.default_input_config() {
+            Ok(sup) => sup,
+            Err(e) => {
+                last_error = Some(format!("{name}: {e}"));
+                continue;
+            }
+        };
+        let ch = sup.channels() as usize;
+        let sr = sup.sample_rate() as usize;
+        let mut cfg: cpal::StreamConfig = sup.into();
+        // Сначала фиксированный буфер, при отказе — дефолтный размер.
+        for buffer in [cpal::BufferSize::Fixed(4096), cpal::BufferSize::Default] {
+            cfg.buffer_size = buffer.clone();
+            let built = match sup.sample_format() {
+                cpal::SampleFormat::F32 => dev.build_input_stream(
+                    cfg.clone(),
+                    {
+                        let tx = tx.clone();
+                        move |d: &[f32], _| {
+                            let _ = tx.send(downmix_f32(d, ch));
+                        }
+                    },
+                    |e| eprintln!("❌ Ошибка входного потока: {e}"),
+                    None,
+                ),
+                cpal::SampleFormat::I16 => dev.build_input_stream(
+                    cfg.clone(),
+                    {
+                        let tx = tx.clone();
+                        move |d: &[i16], _| {
+                            let _ = tx.send(downmix_i16(d, ch));
+                        }
+                    },
+                    |e| eprintln!("❌ Ошибка входного потока: {e}"),
+                    None,
+                ),
+                cpal::SampleFormat::U16 => dev.build_input_stream(
+                    cfg.clone(),
+                    {
+                        let tx = tx.clone();
+                        move |d: &[u16], _| {
+                            let _ = tx.send(downmix_u16(d, ch));
+                        }
+                    },
+                    |e| eprintln!("❌ Ошибка входного потока: {e}"),
+                    None,
+                ),
+                f => bail!("Неподдерживаемый формат микрофона: {f:?}"),
+            };
+            match built {
+                Ok(stream) => {
+                    println!(
+                        "🎙️ Микрофон: «{name}» ({}ch {}Hz {:?}, буфер {:?})",
+                        ch, sr, sup.sample_format(), buffer
+                    );
+                    println!("✅ Аудиопоток микрофона создан");
+                    return Ok((stream, sr));
+                }
+                Err(e) => {
+                    last_error = Some(format!("«{name}»: {e}"));
+                }
+            }
+        }
+    }
 
-    println!(
-        "🎙️ Параметры микрофона: {}ch {}Hz {:?}",
-        ch,
-        sr,
-        sup.sample_format()
-    );
-
-    let mut cfg: cpal::StreamConfig = sup.into();
-    cfg.buffer_size = cpal::BufferSize::Fixed(4096);
-
-    let s = match sup.sample_format() {
-        cpal::SampleFormat::F32 => dev.build_input_stream(
-            cfg,
-            move |d: &[f32], _| {
-                let _ = tx.send(downmix_f32(d, ch));
-            },
-            |e| eprintln!("❌ Ошибка входного потока: {e}"),
-            None,
-        )?,
-
-        cpal::SampleFormat::I16 => dev.build_input_stream(
-            cfg,
-            move |d: &[i16], _| {
-                let _ = tx.send(downmix_i16(d, ch));
-            },
-            |e| eprintln!("❌ Ошибка входного потока: {e}"),
-            None,
-        )?,
-
-        cpal::SampleFormat::U16 => dev.build_input_stream(
-            cfg,
-            move |d: &[u16], _| {
-                let _ = tx.send(downmix_u16(d, ch));
-            },
-            |e| eprintln!("❌ Ошибка входного потока: {e}"),
-            None,
-        )?,
-
-        f => bail!("Неподдерживаемый формат микрофона: {f:?}"),
-    };
-
-    println!("✅ Аудиопоток микрофона создан");
-    Ok((s, sr))
+    bail!(
+        "❌ Ни одно устройство ввода не открылось. Устройства: {}. Последняя причина: {}",
+        names.join(", "),
+        last_error.unwrap_or_else(|| "неизвестно".into())
+    )
 }
 
 /// Блокирующее воспроизведение WAV-файла с проверкой флага остановки.

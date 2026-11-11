@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 
 fn main() -> Result<()> {
+    jarvis_core::init_tuning();
     let wav = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "resources/audio/ok1.wav".into());

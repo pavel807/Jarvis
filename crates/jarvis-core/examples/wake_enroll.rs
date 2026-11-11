@@ -11,6 +11,7 @@ use rustpotter::{EmbeddingConfig, EmbeddingDetector, FrameEmbedder};
 const WINDOW_SAMPLES: usize = 16_000 * 12 / 10; // 1.2 с, как в боевом детекторе
 
 fn main() -> Result<()> {
+    jarvis_core::init_tuning();
     let engine = jarvis_core::tts_silero::SileroEngine::new_no_stress("ru_eduard")?;
 
     let write_window = |dir: &std::path::Path, name: &str, audio: &[f32]| -> Result<Vec<f32>> {
