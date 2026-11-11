@@ -41,23 +41,32 @@ fn main() -> Result<()> {
 
     let train = jarvis_core::wake_train::sample_dirs().0;
 
-    // --- Позитивы: «Джарвис» разными дикторами и темпами ---
+    // --- Позитивы: «Джарвис» всеми дикторами Silero в трёх темпах ---
+    // Чем шире покрытие тембров, тем выше шанс, что живой голос пользователя
+    // ложится на ближайший эталон (счёт — максимум по позитивам).
     let mut positives = Vec::new();
-    let voices: Vec<(&str, f32)> = vec![
-        ("ru_eduard", 0.9),
-        ("ru_dmitriy", 1.0),
-        ("ru_alexandr", 1.0),
-        ("ru_bogdan", 1.1),
-        ("ru_igor", 0.95),
-        ("ru_karina", 1.0),
-        ("ru_vika", 1.0),
-        ("ru_marat", 1.05),
+    let voices: &[&str] = &[
+        "ru_aigul", "ru_albina", "ru_alexandr", "ru_alfia", "ru_bogdan",
+        "ru_dmitriy", "ru_eduard", "ru_ekaterina", "ru_gamat", "ru_igor",
+        "ru_karina", "ru_kejilgan", "ru_kermen", "ru_marat", "ru_miyau",
+        "ru_nurgul", "ru_oksana", "ru_onaoy", "ru_ramilia", "ru_roman",
+        "ru_safarhuja", "ru_saida", "ru_sibday", "ru_vika", "ru_zara",
+        "ru_zhadyra", "ru_zhazira", "ru_zinaida",
     ];
-    for (i, (voice, speed)) in voices.iter().enumerate() {
-        let audio = engine.synthesize_with(voice, "Джарвис", *speed)?;
-        let window = write_window(&train, &format!("[jarvis]_default_{voice}_{i}"), &audio)?;
-        positives.push(window);
+    let tempos = [0.9_f32, 1.0, 1.1];
+    let mut skipped = 0;
+    for voice in voices {
+        for (k, speed) in tempos.iter().enumerate() {
+            let Ok(audio) = engine.synthesize_with(voice, "Джарвис", *speed) else {
+                skipped += 1;
+                continue;
+            };
+            let window =
+                write_window(&train, &format!("[jarvis]_default_{voice}_{k}"), &audio)?;
+            positives.push(window);
+        }
     }
+    println!("🎙️ Позитивов: {} (пропущено голосов: {skipped})", positives.len());
 
     // --- Негативы: похожие по звучанию слова, шум, тишина ---
     let mut negatives = Vec::new();
