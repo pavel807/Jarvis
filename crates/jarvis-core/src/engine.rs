@@ -422,6 +422,17 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
         match wake::create_engine(&stt, &ww_name, threshold) {
             Ok(det) => break det,
             Err(e) => {
+                let text = format!("{e:#}");
+                // Несовместимый/битый кэш эталона (эталон старого формата с
+                // другого ПК) — лечится перекачкой: удаляем и тянем заново.
+                if text.contains("несовместим") || text.contains("ошибка файла эталона") {
+                    let path = crate::paths::models_dir().join(wake::EMBEDDING_REFERENCE);
+                    if path.exists() {
+                        let _ = std::fs::remove_file(&path);
+                        eprintln!("🔄 Эталон устаревшего формата — перекачиваю");
+                        let _ = crate::model_fetch::ensure_wakeword(wake::EMBEDDING_REFERENCE);
+                    }
+                }
                 let hint = "Открой «Wake Word» в приложении и запиши 3–5 сэмплов фразы — движок подхватит модель сам.";
                 if first_wait {
                     first_wait = false;

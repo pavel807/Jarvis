@@ -10,6 +10,37 @@ use rustpotter::{EmbeddingConfig, EmbeddingDetector, FrameEmbedder};
 
 const WINDOW_SAMPLES: usize = 16_000 * 12 / 10; // 1.2 с, как в боевом детекторе
 
+fn read_window(path: &std::path::Path) -> anyhow::Result<Vec<f32>> {
+    let mut reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    let raw: Vec<f32> = reader
+        .samples::<i32>()
+        .map(|s| s.unwrap() as f32 / (1 << (spec.bits_per_sample - 1)) as f32)
+        .collect();
+    let mono: Vec<f32> = if spec.channels == 1 {
+        raw
+    } else {
+        raw.chunks(spec.channels as usize)
+            .map(|c| c.iter().sum::<f32>() / spec.channels as f32)
+            .collect()
+    };
+    let mono = jarvis_core::audio::resample_audio(&mono, spec.sample_rate as usize, 16_000);
+    let window = 16_000 * 12 / 10;
+    match mono.len().cmp(&window) {
+        std::cmp::Ordering::Equal => Ok(mono),
+        std::cmp::Ordering::Greater => {
+            let extra = mono.len() - window;
+            Ok(mono[extra / 2..extra / 2 + window].to_vec())
+        }
+        std::cmp::Ordering::Less => {
+            let mut out = vec![0_f32; window];
+            let start = (window - mono.len()) / 2;
+            out[start..start + mono.len()].copy_from_slice(&mono);
+            Ok(out)
+        }
+    }
+}
+
 fn main() -> Result<()> {
     jarvis_core::init_tuning();
     let engine = jarvis_core::tts_silero::SileroEngine::new_no_stress("ru_eduard")?;
@@ -44,6 +75,15 @@ fn main() -> Result<()> {
     // --- Позитивы: «Джарвис» всеми дикторами Silero в трёх темпах ---
     // Чем шире покрытие тембров, тем выше шанс, что живой голос пользователя
     // ложится на ближайший эталон (счёт — максимум по позитивам).
+    // Детерминизм: генерация воспроизводима при пересборке эталона.
+    let mut rng_state: u64 = 0x4A_41_52_56_49_53; // "JARVIS"
+    let mut noise_sample = || {
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        (rng_state % 20_000) as f32 / 20_000.0 - 0.5
+    };
+
     let mut positives = Vec::new();
     let voices: &[&str] = &[
         "ru_aigul", "ru_albina", "ru_alexandr", "ru_alfia", "ru_bogdan",
@@ -56,8 +96,10 @@ fn main() -> Result<()> {
         "ru_zhadyra", "ru_zhazira", "ru_zinaida",
     ];
     let tempos = [0.95_f32, 1.0, 1.05];
+    const HOLD_OUT: usize = 4; // последних голосов — только верификация
+    let enrolled_voices = voices.len().saturating_sub(HOLD_OUT);
     let mut skipped = 0;
-    for voice in voices {
+    for (vi, voice) in voices.iter().enumerate() {
         for (k, speed) in tempos.iter().enumerate() {
             let Ok(audio) = engine.synthesize_with(voice, "Джарвис", *speed) else {
                 skipped += 1;
@@ -65,10 +107,29 @@ fn main() -> Result<()> {
             };
             let window =
                 write_window(&train, &format!("[jarvis]_default_{voice}_{k}"), &audio)?;
-            positives.push(window);
+            // Hold-out голоса идут в файлы для верификации, но НЕ в эталон:
+            // их счёты — честная оценка на невиданных голосах.
+            if vi < enrolled_voices {
+                positives.push(window.clone());
+                // Шумовая аугментация: бытовой фон ~26 дБ ниже речи —
+                // приближает эталон к живому микрофону с комнатой.
+                let noisy: Vec<f32> = window
+                    .iter()
+                    .map(|s| s + 0.05 * noise_sample())
+                    .collect();
+                let nw = write_window(
+                    &train,
+                    &format!("[jarvis]_default_{voice}_{k}_noise"),
+                    &noisy,
+                )?;
+                positives.push(nw);
+            }
         }
     }
-    println!("🎙️ Позитивов: {} (пропущено голосов: {skipped})", positives.len());
+    println!(
+        "🎙️ Позитивов в эталоне: {} (hold-out голосов: {HOLD_OUT}, пропущено: {skipped})",
+        positives.len()
+    );
 
     // --- Негативы: похожие по звучанию слова, шум, тишина ---
     let mut negatives = Vec::new();
@@ -148,6 +209,54 @@ fn main() -> Result<()> {
         .save_reference(&out)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("сохранение {}", out.display()))?;
+
+    // Калибровка порога по hold-out голосам: само-совпадение записей
+    // регистрации завышает min_pos (они внутри эталона), из-за чего порог
+    // оказывался выше счёта живого голоса. Считаем невиданные голоса
+    // уже сохранённым эталоном — и опускаем порог в середину их зазора.
+    let mut holdout_scores: Vec<f32> = Vec::new();
+    for entry in std::fs::read_dir(&train)?.flatten() {
+        let path = entry.path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        if !name.ends_with(".wav") || !name.contains("[jarvis]") {
+            continue;
+        }
+        // Hold-out — файлы голосов из хвоста списка (не участвовали).
+        let enrolled = voices[..enrolled_voices]
+            .iter()
+            .any(|v| name.contains(v));
+        if enrolled {
+            continue;
+        }
+        if let Some(score) = jarvis_core::wake::score_reference(&stt, &read_window(&path)?) {
+            holdout_scores.push(score);
+        }
+    }
+    if let Some(&worst_holdout) = holdout_scores.iter().min_by(|a, b| a.partial_cmp(b).unwrap()) {
+        let mut reference = rustpotter::EmbeddingReference::load_reference_only(&out)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Порог: ниже худшего невиданного голоса (запас 0.10 — шумовые
+        // аугментации слегка проседают), но не в отрицательную зону.
+        let calibrated = (worst_holdout - 0.10).max(0.0).max(reference.threshold * 0.3);
+        if (calibrated - reference.threshold).abs() > f32::EPSILON {
+            reference.set_threshold(calibrated);
+            println!(
+                "📊 Калибровка по hold-out: {} невиданных голосов, худший счёт {worst_holdout:.3} → порог {calibrated:.3} (был {:.3})",
+                holdout_scores.len(),
+                reference.threshold
+            );
+            // Сохраняем ИЗМЕНЁННУЮ копию: detector.save_reference перезаписал
+            // бы файл своей устаревшей копией (баг перекалибровки).
+            reference
+                .save_to_file(&out)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        } else {
+            println!(
+                "📊 Калибровка не требуется: худший hold-out {worst_holdout:.3} выше порога {:.3}",
+                reference.threshold
+            );
+        }
+    }
     println!("✅ Эталон сохранён: {}", out.display());
     Ok(())
 }
