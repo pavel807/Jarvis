@@ -13,11 +13,76 @@
 //! Отмена: голосовое «стоп» вызывает [`request_cancel`]; каждый инструмент
 //! проверяет флаг между шагами и останавливается, не трогая экран дальше.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
+// Accessibility-автоматизация через System Events — стек macOS; на Linux и
+// Windows код не компилируется (зависит от platform::macos), поэтому здесь
+// он под гейтом, а вызывающий код получает честную причину невозможности.
+#[cfg(target_os = "macos")]
 pub mod ax;
 
+#[cfg(target_os = "macos")]
 pub use ax::{click_element, menu_path, read_screen, set_field_value, ScreenDump};
+
+#[cfg(not(target_os = "macos"))]
+fn ui_unavailable() -> anyhow::Error {
+    anyhow!(
+        "Работа с элементами интерфейса (Accessibility) поддерживается только на macOS"
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ScreenDump {
+    pub app: String,
+    pub report: String,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl ScreenDump {
+    pub fn to_text(&self) -> String {
+        if self.report.trim().is_empty() {
+            format!(
+                "Активное приложение: {}. Элементов не видно (окно может быть пустым или защищённым).",
+                self.app
+            )
+        } else {
+            self.report.trim().to_string()
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn read_screen() -> Result<ScreenDump> {
+    Err(ui_unavailable())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn click_element(
+    _app: Option<&str>,
+    _role: &str,
+    _name: &str,
+    _window: Option<&str>,
+) -> Result<String> {
+    Err(ui_unavailable())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_field_value(
+    _app: Option<&str>,
+    _role: &str,
+    _name: &str,
+    _text: &str,
+    _submit: bool,
+    _window: Option<&str>,
+) -> Result<String> {
+    Err(ui_unavailable())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn menu_path(_app: Option<&str>, _path: &[&str]) -> Result<String> {
+    Err(ui_unavailable())
+}
 
 /// Флаг отмены автоматизации: выставляется голосовым «стоп».
 static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

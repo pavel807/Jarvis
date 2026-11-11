@@ -46,14 +46,6 @@ objc2-foundation = { version = "0.3", features = [
     "NSAppleEventDescriptor",
     "NSThread",
 ] }
-# Uzu (Mirai) — второй LLM-бэкенд на Metal, только Apple Silicon.
-# Ядро — чистый Rust (MIT), модели качаются из каталога Mirai в ~/.cache/mirai.
-# Рев запинен на релиз 0.6.3.
-#
-# capability-grammar ВЫКЛЮЧЕН: он тянет xgrammar-rs с branch=main форка
-# trymirai, и после релиза uzu форк уехал вперёд, сломав сборку grammar-модуля
-# (12 ошибок компиляции). Когда trymirai запинит xgrammar-rs по rev — вернуть
-# фичу и Grammar::JsonSchema в uzu_backend (форсирование tool-вызова).
 uzu = { git = "https://github.com/trymirai/uzu", rev = "d76d468a1898cacc9c4920accf8f5ff099967107", default-features = false, features = [
     "backend-cpu",
     "backend-metal",
@@ -61,6 +53,12 @@ uzu = { git = "https://github.com/trymirai/uzu", rev = "d76d468a1898cacc9c4920ac
 # Прямая зависимость для обёртки uzu_backend: свой multi-thread runtime
 # (Engine uzu требует tokio-контекст) и таймауты на сетевые операции.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+speakrs = { workspace = true, features = ["cpu"] }
+candle-core = { workspace = true}
+candle-nn = { workspace = true}
+
 
 [dev-dependencies]
 tempfile = "3"
