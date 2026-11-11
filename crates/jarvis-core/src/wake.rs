@@ -183,17 +183,6 @@ pub fn create_engine(
     rpw_name: &str,
     threshold: f32,
 ) -> Result<WakeEngine> {
-    let rpw_path = crate::paths::wakeword_model_file(rpw_name);
-    if rpw_path.exists() {
-        let det = create_detector(&rpw_path, threshold)?;
-        println!("🎯 Wake word: DTW-детектор ({rpw_name} — обучен на голосе владельца)");
-        let frame = det.get_samples_per_frame();
-        return Ok(WakeEngine::Dtw {
-            det,
-            frame,
-            buffer: std::collections::VecDeque::new(),
-        });
-    }
     let jref = crate::paths::models_dir().join(EMBEDDING_REFERENCE);
     if jref.exists() {
         let embedder = FastConformerEmbedder::new(Arc::clone(stt));
@@ -210,7 +199,8 @@ pub fn create_engine(
         println!("🎯 Wake word: метрический детектор ({} — дикторонезависимый)", EMBEDDING_REFERENCE);
         return Ok(WakeEngine::Embedding(det));
     }
-    let det = create_detector(&crate::paths::wakeword_model_file(rpw_name), threshold)?;
+    let rpw_path = crate::paths::wakeword_model_file(rpw_name);
+    let det = create_detector(&rpw_path, threshold)?;
     println!("🎯 Wake word: DTW-детектор ({rpw_name} — голос владельца)");
     let frame = det.get_samples_per_frame();
     Ok(WakeEngine::Dtw {

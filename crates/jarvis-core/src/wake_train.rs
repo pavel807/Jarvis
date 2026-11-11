@@ -362,7 +362,7 @@ pub fn build_reference_wakeword(events: &EventTx, cancel: &AtomicBool) -> Result
         "jarvis".to_string(),
         None,
         None,
-        samples,
+        samples.clone(),
         MFCC_SIZE,
     )
     .map_err(|e| anyhow::anyhow!("Не удалось построить модель: {e}"))?;
@@ -377,8 +377,116 @@ pub fn build_reference_wakeword(events: &EventTx, cancel: &AtomicBool) -> Result
         started.elapsed(),
         out
     );
+    // Метрический эталон из тех же записей: устойчив к тону и темпу,
+    // негативы синтезируются. Провал не роняет DTW-модель.
+    if let Err(e) = build_reference_embedding(events, cancel, &samples) {
+        eprintln!("⚠️ Метрический эталон не построен: {e:#}");
+        let _ = events.send(JarvisEvent::Log {
+            message: format!("Метрический эталон не построен: {e:#}"),
+        });
+    }
     let _ = events.send(JarvisEvent::Log {
         message: format!("Модель wake word построена ({:.1?})", started.elapsed()),
+    });
+    Ok(out)
+}
+
+/// Окно 1.2 с под эмбеддинг: фраза в центре, тишина по краям (как в бою).
+pub fn pad_window(audio: &[f32], window: usize) -> Vec<f32> {
+    let mut out = vec![0_f32; window];
+    let start = (window - audio.len().min(window / 2)) / 2;
+    for (i, s) in audio.iter().take(window - start).enumerate() {
+        out[start + i] = *s;
+    }
+    out
+}
+
+/// Негативы для метрической регистрации: похожие по звучанию слова,
+/// бытовой гул и тишина — синтезируются Silero, голоса пользователя не нужны.
+fn synth_negatives(events: &EventTx) -> Result<Vec<Vec<f32>>> {
+    let window = 16_000 * 12 / 10;
+    let engine = crate::tts_silero::SileroEngine::new_no_stress("ru_eduard")
+        .context("Silero для негативов недоступен")?;
+    let mut negatives = Vec::new();
+    for (i, text) in ["сервис", "запись", "нравится", "привет", "музыка"]
+        .into_iter()
+        .enumerate()
+    {
+        let audio = engine.synthesize_with("ru_eduard", text, 1.0)?;
+        let mono = crate::audio::resample_audio(&audio, crate::tts_silero::SAMPLE_RATE as usize, 16_000);
+        negatives.push(pad_window(&mono, window));
+        let _ = i;
+    }
+    negatives.push(vec![0_f32; window]); // тишина
+    negatives.push(
+        (0..window)
+            .map(|i| 0.03 * ((i as f32 * 0.037).sin() + (i as f32 * 0.011).cos()))
+            .collect(),
+    ); // бытовой гул
+    let _ = events;
+    Ok(negatives)
+}
+
+/// Метрический эталон (.jref) из тех же записей фразы: эмбеддинг каждого
+/// позитивного сэмпла хранится отдельно, счёт — максимум по ним, поэтому
+/// фраза под другим тоном ложится на ближайший эталон.
+pub fn build_reference_embedding(
+    events: &EventTx,
+    cancel: &AtomicBool,
+    samples: &[String],
+) -> Result<PathBuf> {
+    if cancel.load(Ordering::SeqCst) {
+        bail!("Отменено");
+    }
+    let window = 16_000 * 12 / 10;
+    // Свой экземпляр ASR: обучение — редкая операция, после неё модель
+    // выгружается вместе с этим потоком.
+    let stt = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::stt::Stt::load(&paths::models_dir())
+            .context("FastConformer не загружен — метрический эталон не собрать")?,
+    ));
+    let embedder = crate::wake::FastConformerEmbedder::new(std::sync::Arc::clone(&stt));
+    let mut detector = rustpotter::EmbeddingDetector::new(embedder, Default::default());
+
+    let mut positives = Vec::new();
+    for path in samples {
+        let mut reader = hound::WavReader::open(path)
+            .with_context(|| format!("не открыть {path:?}"))?;
+        let spec = reader.spec();
+        let raw: Vec<f32> = reader
+            .samples::<i32>()
+            .map(|s| s.unwrap() as f32 / (1 << (spec.bits_per_sample - 1)) as f32)
+            .collect();
+        let mono: Vec<f32> = if spec.channels == 1 {
+            raw
+        } else {
+            raw.chunks(spec.channels as usize)
+                .map(|c| c.iter().sum::<f32>() / spec.channels as f32)
+                .collect()
+        };
+        let mono = crate::audio::resample_audio(&mono, spec.sample_rate as usize, 16_000);
+        positives.push(pad_window(&mono, window));
+    }
+    let negatives = synth_negatives(events)?;
+    let reference = detector
+        .enroll(&positives, &negatives)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let out = paths::models_dir().join(crate::wake::EMBEDDING_REFERENCE);
+    detector
+        .save_reference(&out)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!(
+        "✅ Метрический эталон готов: {:?} (позитивов {}, негативов {}, порог {:.4})",
+        out,
+        reference.positives_count,
+        reference.negatives_count,
+        reference.threshold
+    );
+    let _ = events.send(JarvisEvent::Log {
+        message: format!(
+            "Метрический эталон: порог {:.4} — тон и темп теперь меньше влияют",
+            reference.threshold
+        ),
     });
     Ok(out)
 }
