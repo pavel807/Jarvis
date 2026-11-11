@@ -58,6 +58,9 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 speakrs = { workspace = true, features = ["cpu"] }
+# Эмбеддинги wake word считаются этим же энкодером: на macOS Accelerate
+# уже включён, на Linux при желании добавь features = ["mkl"] (сборка
+# скачивает MKL) — без BLAS окно 1.2 с считается за ~2 с вместо ~0.1 с.
 candle-core = { workspace = true}
 candle-nn = { workspace = true}
 # AT-SPI2 — Linux-эквивалент macOS Accessibility: чтение дерева элементов UI,

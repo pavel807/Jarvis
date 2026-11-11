@@ -56,7 +56,7 @@
   async function pickLlm(backend: string, model: string) {
     if (llmPicked(backend, model)) return;
     await patchSettings({ llm_backend: backend, llm_model: model });
-    toast("Модель включится после перезапуска Джарвиса", "ok");
+    toast("Меняю модель — загрузится на лету", "ok");
   }
 
   // ---------- Модели на диске: локальная candle-модель может быть не скачана ----------

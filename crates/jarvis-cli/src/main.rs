@@ -6,7 +6,7 @@ use jarvis_core::engine::{EngineHandles, run_engine};
 use jarvis_core::events::JarvisEvent;
 use jarvis_core::llm::{SharedLlmState, spawn_llm_loader};
 use jarvis_core::paths;
-use jarvis_core::settings::{Settings, spawn_settings_watcher};
+use jarvis_core::settings::{Settings, spawn_settings_watcher_with};
 use jarvis_core::stt::Stt;
 use jarvis_core::tts::{self, SharedTtsState};
 use std::sync::atomic::AtomicBool;
@@ -26,7 +26,6 @@ fn main() -> Result<()> {
     let settings_path = paths::settings_file();
     let settings = Arc::new(RwLock::new(Settings::load(&settings_path)?));
     settings.read().unwrap_or_else(|e| e.into_inner()).apply();
-    spawn_settings_watcher(settings_path, Arc::clone(&settings));
 
     let config_path = paths::commands_file();
     let initial_commands = CommandsConfig::load(&config_path)?;
@@ -147,6 +146,13 @@ fn main() -> Result<()> {
     });
 
     let shared_llm = Arc::new(SharedLlmState::new());
+
+    // Вотчер настроек: смена llm_backend/llm_model перезагружает LLM на лету.
+    let events_for_watcher = events_tx.clone();
+    let shared_for_watcher = Arc::clone(&shared_llm);
+    spawn_settings_watcher_with(settings_path, Arc::clone(&settings), move |_| {
+        jarvis_core::llm::reload_llm(&shared_for_watcher, &events_for_watcher);
+    });
 
     let shared_tts: Arc<SharedTtsState> = Arc::new(SharedTtsState::new());
     let tts_failed = Arc::new(AtomicBool::new(false));
