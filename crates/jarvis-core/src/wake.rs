@@ -92,17 +92,10 @@ impl rustpotter::FrameEmbedder for FastConformerEmbedder {
     }
 }
 
-/// Единый контракт детектора для главного цикла движка: кусок 16 кГц на
-/// входе — срабатывание на выходе.
-pub enum WakeEngine {
-    /// Классический DTW по .rpw: точен на голосе владельца.
-    Dtw {
-        det: rustpotter::Rustpotter,
-        frame: usize,
-        buffer: std::collections::VecDeque<i16>,
-    },
-    /// Метрический по эмбеддингам (.jref): срабатывает на любой голос.
-    Embedding(rustpotter::EmbeddingDetector<FastConformerEmbedder>),
+/// Детектор вакворда для главного цикла движка: кусок 16 кГц на входе —
+/// срабатывание на выходе. Единственная реализация — метрическая.
+pub struct WakeEngine {
+    det: rustpotter::EmbeddingDetector<FastConformerEmbedder>,
 }
 
 pub struct WakeHit {
@@ -112,100 +105,74 @@ pub struct WakeHit {
 
 impl WakeEngine {
     pub fn process_16k(&mut self, chunk: &[f32]) -> Option<WakeHit> {
-        match self {
-            WakeEngine::Dtw { det, frame, buffer } => {
-                for &s in chunk {
-                    buffer.push_back((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
-                }
-                let mut hit = None;
-                while buffer.len() >= *frame {
-                    let fr: Vec<i16> = buffer.drain(..*frame).collect();
-                    if let Some(d) = det.process_samples(fr) {
-                        hit = Some(WakeHit {
-                            name: d.name.clone(),
-                            score: d.score,
-                        });
-                    }
-                }
-                hit
-            }
-            WakeEngine::Embedding(det) => det.process(chunk).map(|d| WakeHit {
-                name: "jarvis".to_string(),
-                score: d.score,
-            }),
-        }
+        self.det.process(chunk).map(|d| WakeHit {
+            name: "jarvis".to_string(),
+            score: d.score,
+        })
     }
 
     /// Сброс потокового состояния (после срабатывания/паузы).
     pub fn reset(&mut self) {
-        match self {
-            WakeEngine::Dtw { buffer, .. } => buffer.clear(),
-            WakeEngine::Embedding(det) => det.reset(),
-        }
+        self.det.reset();
     }
 
-    /// Счёт последнего окна метрического детектора (тюнение порога в UI).
+    /// Счёт последнего окна (тюнение порога в UI/журнале).
     pub fn last_score(&self) -> Option<f32> {
-        match self {
-            WakeEngine::Dtw { .. } => None,
-            WakeEngine::Embedding(det) => det.last_raw_score(),
-        }
+        self.det.last_raw_score()
     }
 }
 
 /// Эталон метрического детектора — фиксированное имя в папке моделей.
 pub const EMBEDDING_REFERENCE: &str = "jarvis_model.jref";
 
-/// Счёт окна аудио против эталона метрического детектора (диагностика,
-/// пример wake_check): cos(x, позитив) − cos(x, негатив).
-/// None — эталона нет на диске.
+/// Счёт окна аудио против эталона (диагностика, wake_check) — та же
+/// семантика, что у боевого детектора: центрмирование → max по позитивам
+/// минус сходство с негативом. None — эталона нет.
 pub fn score_reference(
     stt: &Arc<Mutex<crate::stt::Stt>>,
     window: &[f32],
 ) -> Option<f32> {
     let path = crate::paths::models_dir().join(EMBEDDING_REFERENCE);
-    if !path.exists() {
-        return None;
-    }
     let reference = rustpotter::EmbeddingReference::load_reference_only(&path).ok()?;
     let mut e = FastConformerEmbedder::new(Arc::clone(stt)).embed(window).ok()?;
     rustpotter::l2_normalize(&mut e);
-    Some(
-        e.iter().zip(&reference.positive).map(|(a, b)| a * b).sum::<f32>()
-            - e.iter().zip(&reference.negative).map(|(a, b)| a * b).sum::<f32>(),
-    )
+    for (x, m) in e.iter_mut().zip(&reference.mean) {
+        *x -= m;
+    }
+    rustpotter::l2_normalize(&mut e);
+    let best = reference
+        .positives
+        .iter()
+        .map(|p| e.iter().zip(p).map(|(a, b)| a * b).sum::<f32>())
+        .fold(f32::NEG_INFINITY, f32::max);
+    Some(best - e.iter().zip(&reference.negative).map(|(a, b)| a * b).sum::<f32>())
 }
 
 /// Создать движок вакворда: метрический, если есть эталон .jref (любой
 /// голос), иначе DTW по .rpw (голос владельца).
 pub fn create_engine(
     stt: &Arc<Mutex<crate::stt::Stt>>,
-    rpw_name: &str,
-    threshold: f32,
+    _rpw_name: &str,
+    _threshold: f32,
 ) -> Result<WakeEngine> {
     let jref = crate::paths::models_dir().join(EMBEDDING_REFERENCE);
-    if jref.exists() {
-        let embedder = FastConformerEmbedder::new(Arc::clone(stt));
-        let mut det = rustpotter::EmbeddingDetector::new(
-            embedder,
-            rustpotter::EmbeddingConfig {
-                threshold,
-                ..Default::default()
-            },
+    if !jref.exists() {
+        anyhow::bail!(
+            "Нет эталона {}: скачай его из релиза jarvis-models или построй свой \
+             (Настройки → Wake Word → запиши 3–5 сэмплов → «Собрать модель», \
+             либо cargo run -p jarvis-core --example wake_enroll)",
+            jref.display()
         );
-        det.load_reference(&jref).map_err(|e| {
-            anyhow::anyhow!("эталон {}: {e}", jref.display())
-        })?;
-        println!("🎯 Wake word: метрический детектор ({} — дикторонезависимый)", EMBEDDING_REFERENCE);
-        return Ok(WakeEngine::Embedding(det));
     }
-    let rpw_path = crate::paths::wakeword_model_file(rpw_name);
-    let det = create_detector(&rpw_path, threshold)?;
-    println!("🎯 Wake word: DTW-детектор ({rpw_name} — голос владельца)");
-    let frame = det.get_samples_per_frame();
-    Ok(WakeEngine::Dtw {
-        det,
-        frame,
-        buffer: std::collections::VecDeque::new(),
-    })
+    let embedder = FastConformerEmbedder::new(Arc::clone(stt));
+    let mut det =
+        rustpotter::EmbeddingDetector::new(embedder, rustpotter::EmbeddingConfig::default());
+    det.load_reference(&jref)
+        .map_err(|e| anyhow::anyhow!("эталон {}: {e}", jref.display()))?;
+    println!(
+        "🎯 Wake word: метрический детектор ({} — дикторонезависимый, порог {:.4})",
+        EMBEDDING_REFERENCE,
+        det.reference().map(|r| r.threshold).unwrap_or(f32::NAN)
+    );
+    Ok(WakeEngine { det })
 }

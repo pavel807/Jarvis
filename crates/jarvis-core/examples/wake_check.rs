@@ -53,7 +53,7 @@ fn main() -> Result<()> {
         let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let label = jarvis_core::tts::label_of_sample(&name);
         let mut audio = read_window(&path).with_context(|| name.clone())?;
-        // Окно 1.2 с: обрезка/паддинг тишиной.
+        // Окно 1.2 с, идемпотентно (см. wake_verify): файл уже окно — как есть.
         let window = 16_000 * 12 / 10;
         audio.resize(window, 0.0);
         match jarvis_core::wake::score_reference(&stt, &audio) {

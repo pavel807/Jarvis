@@ -10,7 +10,7 @@ use crate::paths;
 use crate::tts::list_wav_samples;
 use anyhow::{Context, Result, bail};
 use rustpotter::{
-    Rustpotter, WakewordRefBuildFromFiles, WakewordSave,
+    Rustpotter,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,6 @@ const RECORD_SILENCE_SECS: f32 = 0.7;
 const RECORD_RMS_THRESHOLD: f32 = 0.02;
 const TARGET_RATE: usize = 16_000;
 /// Значение mfcc_size, совпадающее с дефолтами rustpotter.
-const MFCC_SIZE: u16 = 30;
 
 /// Каталоги с сэмплами: (обучающие, проверочные).
 pub fn sample_dirs() -> (PathBuf, PathBuf) {
@@ -327,11 +326,15 @@ pub fn record_sample(
 ///
 /// Это не нейросеть: сравниваются MFCC-признаки записей с потоком с микрофона
 /// (dynamic time warping). Нужно 3–8 сэмплов фразы, построение занимает секунды.
-pub fn build_reference_wakeword(events: &EventTx, cancel: &AtomicBool) -> Result<PathBuf> {
+pub fn build_reference_wakeword(
+    events: &EventTx,
+    cancel: &AtomicBool,
+) -> Result<PathBuf> {
     let (train_dir, _) = sample_dirs();
 
-    // В reference-модель попадают только записи фразы: файлы с меткой
-    // [jarvis] в имени. Фоновые шумы (метка none) для DTW не нужны.
+    // В эталон попадают только записи фразы: файлы с меткой
+    // [jarvis] в имени. Фоновые шумы (метка none) для негативов не нужны:
+    // негативы синтезируются (похожие слова, гул, тишина).
     let samples: Vec<String> = list_wav_samples(&train_dir)
         .into_iter()
         .filter(|(p, _)| {
@@ -352,42 +355,10 @@ pub fn build_reference_wakeword(events: &EventTx, cancel: &AtomicBool) -> Result
         bail!("Отменено");
     }
 
-    println!(
-        "🧩 Построение DTW-модели wake word из {} сэмплов...",
-        samples.len()
-    );
+    println!("🧩 Построение метрической модели wake word из {} сэмплов...", samples.len());
     let started = std::time::Instant::now();
-
-    let wakeword = <rustpotter::WakewordRef as WakewordRefBuildFromFiles>::new_from_sample_files(
-        "jarvis".to_string(),
-        None,
-        None,
-        samples.clone(),
-        MFCC_SIZE,
-    )
-    .map_err(|e| anyhow::anyhow!("Не удалось построить модель: {e}"))?;
-
-    let out = paths::models_dir().join("jarvis_model_trained.rpw");
-    wakeword
-        .save_to_file(&out.to_string_lossy())
-        .map_err(|e| anyhow::anyhow!("Не удалось сохранить модель: {e}"))?;
-
-    println!(
-        "✅ DTW-модель готова за {:.1?}: {:?}",
-        started.elapsed(),
-        out
-    );
-    // Метрический эталон из тех же записей: устойчив к тону и темпу,
-    // негативы синтезируются. Провал не роняет DTW-модель.
-    if let Err(e) = build_reference_embedding(events, cancel, &samples) {
-        eprintln!("⚠️ Метрический эталон не построен: {e:#}");
-        let _ = events.send(JarvisEvent::Log {
-            message: format!("Метрический эталон не построен: {e:#}"),
-        });
-    }
-    let _ = events.send(JarvisEvent::Log {
-        message: format!("Модель wake word построена ({:.1?})", started.elapsed()),
-    });
+    let out = build_reference_embedding(events, cancel, &samples)?;
+    println!("✅ Модель wake word готова за {:.1?}: {:?}", started.elapsed(), out);
     Ok(out)
 }
 
@@ -408,9 +379,15 @@ fn synth_negatives(events: &EventTx) -> Result<Vec<Vec<f32>>> {
     let engine = crate::tts_silero::SileroEngine::new_no_stress("ru_eduard")
         .context("Silero для негативов недоступен")?;
     let mut negatives = Vec::new();
-    for (i, text) in ["сервис", "запись", "нравится", "привет", "музыка"]
-        .into_iter()
-        .enumerate()
+    // Фонетически близкие к «Джарвис» слова — обязательная часть набора:
+    // именно они учат вычитание отсекать ложные срабатывания.
+    for (i, text) in [
+        "сервис", "запись", "нравится", "привет", "музыка",
+        "джаз", "жарко", "завтрак", "джинсы", "сверстник",
+        "университет", "маркетинг",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let audio = engine.synthesize_with("ru_eduard", text, 1.0)?;
         let mono = crate::audio::resample_audio(&audio, crate::tts_silero::SAMPLE_RATE as usize, 16_000);
