@@ -22,3 +22,7 @@ vendor/
 graphify-out/
 payload.json
 resp2.json
+
+# Пользовательские данные рядом с settings.toml (базовый каталог = cwd в тестах)
+schedule.json
+memory.json
