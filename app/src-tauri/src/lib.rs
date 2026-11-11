@@ -317,6 +317,172 @@ struct Status {
     cwd: String,
 }
 
+// =========================================================================
+// Модели LLM: статус, явная загрузка (без авто-качания), перезагрузка
+// =========================================================================
+
+/// Одновременных загрузок не ведём: повторный клик по «Скачать» игнорируется
+/// с понятным сообщением, а не плодит второй поток на тот же архив.
+static LLM_DOWNLOADING: AtomicBool = AtomicBool::new(false);
+
+/// Запись о модели для UI: установлена ли, размер, можно ли скачать кнопкой.
+#[derive(serde::Serialize)]
+struct LlmModelInfo {
+    name: String,
+    installed: bool,
+    /// Размер каталога модели, МБ (None — ещё не скачана).
+    size_mb: Option<u64>,
+    /// Есть ли для модели кнопка «Скачать» (каталог загрузок приложения).
+    downloadable: bool,
+}
+
+fn dir_size_bytes(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            match entry.metadata() {
+                Ok(meta) if meta.is_file() => total += meta.len(),
+                Ok(meta) if meta.is_dir() => total += dir_size_bytes(&entry.path()),
+                _ => {}
+            }
+        }
+    }
+    total
+}
+
+fn dir_size_mb(dir: &Path) -> u64 {
+    dir_size_bytes(dir) / 1_048_576
+}
+
+/// Каталог моделей для UI: качаемый из релиза Qwen3.5-0.8B (candle) плюс
+/// всё, что пользователь опустил в models/ вручную (candle-совместимое:
+/// config.json + tokenizer.json).
+#[tauri::command]
+fn llm_models_status() -> Vec<LlmModelInfo> {
+    let models_dir = paths::models_dir();
+    let mut out = Vec::new();
+
+    let qwen_dir = models_dir.join("qwen3.5-0.8b");
+    let qwen_installed = jarvis_core::model_fetch::qwen35_ready(&qwen_dir);
+    out.push(LlmModelInfo {
+        name: "qwen3.5-0.8b".into(),
+        installed: qwen_installed,
+        size_mb: qwen_installed.then(|| dir_size_mb(&qwen_dir)),
+        downloadable: true,
+    });
+
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.flatten().map(|e| e.path()) {
+            let Some(name) = entry.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name == "qwen3.5-0.8b" || name == "silero" || name == "fastconformer" {
+                continue;
+            }
+            if entry.join("config.json").is_file() && entry.join("tokenizer.json").is_file() {
+                out.push(LlmModelInfo {
+                    name: name.to_string(),
+                    installed: true,
+                    size_mb: Some(dir_size_mb(&entry)),
+                    downloadable: false,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Явная загрузка модели по решению пользователя. Прогресс уходит в UI
+/// событиями download_progress; по завершении LLM перезагружается сама,
+/// без перезапуска приложения.
+#[tauri::command]
+fn llm_download_model(
+    app: tauri::AppHandle,
+    shared: State<'_, Arc<Shared>>,
+    name: String,
+) -> Result<String, String> {
+    // Загружать можно только то, что приложение знает откуда: локальные
+    // каталоги пользователь наполняет сам.
+    if name != "qwen3.5-0.8b" {
+        return Err(format!(
+            "Модель «{name}» не скачивается из приложения: опусти её каталог с config.json, tokenizer.json и весами в {}",
+            paths::models_dir().display()
+        ));
+    }
+    if LLM_DOWNLOADING.swap(true, Ordering::SeqCst) {
+        return Err("Загрузка уже идёт — дождись окончания".into());
+    }
+
+    let (tx, rx) = channel::<JarvisEvent>();
+    let llm = Arc::clone(&shared.shared_llm);
+    let app2 = app.clone();
+    let name2 = name.clone();
+    std::thread::spawn(move || {
+        let name = name2;
+        // Прогресс — напрямую в UI: событие движка и мост не нужны.
+        let mut last: u8 = 0;
+        let result = jarvis_core::model_fetch::ensure_qwen35_with_progress(
+            &paths::models_dir().join(&name),
+            &mut |pct: u8| {
+                if pct >= last + 2 || pct >= 100 {
+                    last = pct;
+                    let _ = app.emit(
+                        "engine-event",
+                        &JarvisEvent::DownloadProgress {
+                            what: format!("Модель {name}"),
+                            percent: pct,
+                        },
+                    );
+                }
+            },
+        );
+        let _ = app.emit(
+            "engine-event",
+            &JarvisEvent::DownloadProgress {
+                what: format!("Модель {name}"),
+                percent: 100,
+            },
+        );
+        match result {
+            Ok(()) => {
+                let _ = tx.send(JarvisEvent::Log {
+                    message: format!("Модель {name} скачана, загружаю движок"),
+                });
+                // Движок перечитает модель без перезапуска приложения.
+                spawn_llm_loader(&llm, &tx);
+                for ev in rx {
+                    let _ = app2.emit("engine-event", &ev);
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(JarvisEvent::Error {
+                    message: format!("Загрузка модели не удалась: {e:#}"),
+                });
+                for ev in rx {
+                    let _ = app2.emit("engine-event", &ev);
+                }
+            }
+        }
+        LLM_DOWNLOADING.store(false, Ordering::SeqCst);
+    });
+    Ok(format!("Скачиваю {name} — прогресс появится в интерфейсе"))
+}
+
+/// Перезагрузка LLM без перезапуска приложения: после смены модели в
+/// настройках или провала первой загрузки.
+#[tauri::command]
+fn llm_reload(app: tauri::AppHandle, shared: State<'_, Arc<Shared>>) -> Result<String, String> {
+    let (tx, rx) = channel::<JarvisEvent>();
+    let llm = Arc::clone(&shared.shared_llm);
+    std::thread::spawn(move || {
+        spawn_llm_loader(&llm, &tx);
+        for ev in rx {
+            let _ = app.emit("engine-event", &ev);
+        }
+    });
+    Ok("Перезагружаю модель".into())
+}
+
 #[tauri::command]
 fn status(shared: State<'_, Arc<Shared>>) -> Status {
     Status {
@@ -1279,6 +1445,9 @@ pub fn run() {
             open_external,
             llm_ask,
             llm_cancel,
+            llm_models_status,
+            llm_download_model,
+            llm_reload,
             open_mic_settings,
             mic_status,
             mic_request,

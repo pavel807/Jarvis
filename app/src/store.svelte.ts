@@ -55,6 +55,8 @@ export interface Settings {
   tts_speed: number;
   // Отклик
   ack_before_llm: boolean;
+  /** Перебивание: микрофон слушает, пока Джарвис говорит. */
+  barge_in: boolean;
   /** Помнить темы, от которых разговор ушёл в сторону. */
   topic_memory: boolean;
   /** Фильтр говорящего: в ответы идёт только голос владельца. */
@@ -174,6 +176,8 @@ export const store = $state({
   /** Момент последней реплики в диалоге — для телеметрии на главной. */
   lastActivity: 0 as number,
   trainProgress: { epoch: 0, total: 0 } as { epoch: number; total: number },
+  /** Загрузка модели: что качается и сколько готово (null — ничего не идёт). */
+  download: null as null | { what: string; percent: number },
   recording: false,
   /**
    * Доступ к микрофону: false — движок ждёт разрешения (показываем меню),
@@ -407,6 +411,18 @@ export async function initEvents() {
       case "train_done":
         store.trainProgress = { epoch: 0, total: 0 };
         break;
+      case "download_progress": {
+        const percent = Number((ev.percent as number) ?? 0);
+        if (percent >= 100) {
+          store.download = null;
+        } else {
+          store.download = {
+            what: (ev.what as string) ?? "",
+            percent: Math.max(0, Math.min(99, percent)),
+          };
+        }
+        break;
+      }
       case "record_saved":
         store.recording = false;
         break;

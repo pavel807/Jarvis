@@ -18,7 +18,7 @@
 Что ты видишь на экране?
 Повтори всё чётко и с выражением — громко, тихо, быстро и медленно.`;
 
-  const state = $derived(store.voiceTrain.state);
+  const vtState = $derived(store.voiceTrain.state);
   const lastOk = $derived(store.voiceTrain.lastOk);
   const overlap = $derived(store.voiceTrain.overlap);
 
@@ -65,13 +65,13 @@
   </div>
 
   <div class="vt-actions">
-    {#if state === "recording"}
+    {#if vtState === "recording"}
       <button class="btn btn--secondary" onclick={stop}>
         <span class="vt-dot"></span>
         Стоп
       </button>
       <span class="vt-live">Идёт запись…</span>
-    {:else if state === "checking"}
+    {:else if vtState === "checking"}
       <span class="vt-live"><span class="spinner"></span> Проверяю запись…</span>
     {:else}
       <button class="btn btn--primary" onclick={start}>
@@ -81,7 +81,7 @@
     {/if}
   </div>
 
-  {#if lastOk !== null && state === "idle"}
+  {#if lastOk !== null && vtState === "idle"}
     <div class="card vt-result" class:is-ok={lastOk} class:is-bad={!lastOk}>
       {#if lastOk}
         <p class="vt-result__title">Голос записан — совпадение {Math.round(overlap * 100)}%</p>

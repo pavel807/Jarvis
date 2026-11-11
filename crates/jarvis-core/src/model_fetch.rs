@@ -189,7 +189,7 @@ fn silero_ready(dir: &Path) -> bool {
     dir.join("v5_cis_base.safetensors").is_file() && dir.join("alphabet.json").is_file()
 }
 
-fn qwen35_ready(dir: &Path) -> bool {
+pub fn qwen35_ready(dir: &Path) -> bool {
     if !dir.join("config.json").is_file() || !dir.join("tokenizer.json").is_file() {
         return false;
     }

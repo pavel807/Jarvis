@@ -181,6 +181,28 @@
     toast("Модель сменится после перезапуска Джарвиса", "ok");
   }
 
+  // ---------- Модели на диске: что установлено и что можно скачать ----------
+
+  /** Список моделей из бэкенда: установлена ли, размер, кнопка «Скачать». */
+  let models = $state<{ name: string; installed: boolean; size_mb: number | null; downloadable: boolean }[]>([]);
+
+  async function loadModels() {
+    try {
+      models = await invoke("llm_models_status");
+    } catch (e) {
+      console.warn("llm_models_status:", e);
+    }
+  }
+
+  async function downloadModel(name: string) {
+    try {
+      await invoke("llm_download_model", { name });
+      toast(`Скачиваю ${name} — прогресс внизу списка`, "ok");
+    } catch (e) {
+      toast(`Не удалось начать загрузку: ${e}`, "err");
+    }
+  }
+
   // ---------- Облачная модель ----------
 
   /** Облако выбрано? */
@@ -248,6 +270,7 @@
       { rootMargin: "-16% 0px -74% 0px" },
     );
     for (const el of Object.values(sectionEls)) el && observer.observe(el);
+    void loadModels();
     return () => observer?.disconnect();
   });
 
@@ -480,6 +503,33 @@
           </button>
         {/if}
       {/each}
+      {#each models.filter((m) => hit(m.name, m.installed ? "установлена" : "скачать модель", "модель")) as m (m.name)}
+        <div class="row-item">
+          <span class="row-item__text">
+            <span class="row-item__title">{m.name}</span>
+            <span class="row-item__hint">
+              {m.installed ? `Установлена${m.size_mb ? ` — ${m.size_mb} МБ` : ""}` : "Не скачана — модель не станет мозгом, пока её не скачать"}
+            </span>
+          </span>
+          {#if m.installed}
+            <span class="row-item__value"><AppIcon name="check" size={15} /></span>
+          {:else if m.downloadable}
+            <button class="btn btn--secondary btn--sm" disabled={!!store.download} onclick={() => downloadModel(m.name)}>
+              Скачать
+            </button>
+          {/if}
+        </div>
+      {/each}
+      {#if store.download}
+        <div class="row-item">
+          <span class="row-item__text">
+            <span class="row-item__title">Загрузка: {store.download.what}</span>
+            <span class="row-item__hint">
+              <progress value={store.download.percent} max="100"></progress> {store.download.percent}%
+            </span>
+          </span>
+        </div>
+      {/if}
       {#each apiChoices as choice (choice.preset)}
         {#if hit(choice.title, choice.hint, "модель", "облако", "api")}
           <button class="row-item" onclick={() => pickApi(choice.preset)}>

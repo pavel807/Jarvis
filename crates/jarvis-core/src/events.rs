@@ -111,6 +111,12 @@ pub enum JarvisEvent {
         overlap: f32,
         transcript: String,
     },
+    /// Ход загрузки модели: что качается и сколько готово (0..=100).
+    /// Событие только для UI (прогресс-бар), движок его не слушает.
+    DownloadProgress {
+        what: String,
+        percent: u8,
+    },
     AudioLevel {
         level: f32,
         source: String,
