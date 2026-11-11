@@ -61,6 +61,19 @@ pub fn request_snapshot() -> u64 {
 }
 
 /// Промпт для ответов по результатам веб-поиска.
+/// Глубокое исследование (по логике OpenJarvis deep-research): модель сама
+/// делает несколько поисков с разными формулировками и синтезирует ответ
+/// со списком источников. Работает существующий агентный цикл — research
+/// лишь запрещает сворачивать первый web_search в одно-хоповую сводку.
+pub const RESEARCH_SYSTEM_PROMPT: &str = concat!(
+    "Ты Джарвис, голосовой ассистент, и тебе поручили ИССЛЕДОВАТЬ вопрос. ",
+    "Сделай 2–4 web_search с разными формулировками (узкий запрос, синонимы, год), ",
+    "сопоставь сниппеты между собой, найди расхождения и цифры. ",
+    "Затем ответь по-русски: краткий вывод, 2–4 факта с числами, что осталось неясным, ",
+    "и источники доменами (например «по данным auto.ru»). Без markdown и эмодзи — ",
+    "ответ озвучивается. Если поиска не хватает — сделай ещё; не выдумывай."
+);
+
 pub const WEB_SYSTEM_PROMPT: &str = concat!(
     "Ты Джарвис, голосовой ассистент (мужской род: «готов», «понял»). Ниже свежие результаты поиска. ",
     "Ответь по-русски одним-двумя предложениями, только суть, без вступлений и без ссылок. ",
@@ -626,6 +639,26 @@ pub fn ask(
         let verdict = router::classify_detailed(&prompt);
         let is_action = system == CHAT_SYSTEM_PROMPT && verdict.intent == router::Intent::Action;
 
+        // «Исследуй…» / «проведи расследование…» — глубокий разбор с
+        // несколькими поисками: та же агентная машина, другой промпт.
+        if system == CHAT_SYSTEM_PROMPT && router::is_research_request(&prompt) {
+            run_action(
+                &shared,
+                &format!(
+                    "{}\nСегодняшняя дата: {}.",
+                    RESEARCH_SYSTEM_PROMPT,
+                    crate::text::today_russian()
+                ),
+                &prompt,
+                verdict.confidence,
+                &audio_tx,
+                &events,
+                &cancel,
+                &history,
+            );
+            return;
+        }
+
         if is_action {
             let system = router::action_prompt_for(&prompt);
             run_action(
@@ -1178,6 +1211,9 @@ fn run_action(
     // Промпт шага не постоянен: после веб-поиска переключаемся на веб-промпт
     // (ответ строго по результатам), иначе модель продолжает «задачу».
     let mut active_system: String = system.to_string();
+    // Режим исследования: web_search возвращает сниппеты модели для новых
+    // поисков, а не сразу в озвучку (см. ветку WebSearch ниже).
+    let research = system == RESEARCH_SYSTEM_PROMPT;
     let mut active_task: Option<crate::tasks::Task> = None;
     let mut nudged = false;
     let mut done_calls: Vec<String> = Vec::new();
@@ -1437,7 +1473,7 @@ fn run_action(
                     return;
                 }
                 loop_history.push((user_msg.clone(), text.clone()));
-                if matches!(&call, tools::ToolCall::WebSearch { .. }) {
+                if matches!(&call, tools::ToolCall::WebSearch { .. }) && !research {
                     // Результаты поиска — не «продолжай задачу», а материал
                     // для ответа: переключаемся на веб-промпт и отдаём
                     // сниппеты целиком. Голые заголовки модель 2B превращает
@@ -1448,6 +1484,19 @@ fn run_action(
                         crate::text::today_russian()
                     );
                     user_msg = outcome.detail;
+                } else if matches!(&call, tools::ToolCall::WebSearch { .. }) {
+                    // Исследование: сниппеты возвращаются модели как материал,
+                    // следующий шаг — новый web_search или финальная сводка.
+                    active_system = format!(
+                        "{}\nСегодняшняя дата: {}.",
+                        RESEARCH_SYSTEM_PROMPT,
+                        crate::text::today_russian()
+                    );
+                    loop_history.push((user_msg.clone(), text.clone()));
+                    user_msg = format!(
+                        "Результаты поиска:\n{}\n\nПродолжай: если данных мало — ещё web_search по новой формулировке;                          если достаточно — финальная сводка текстом (вывод, факты, источники доменами), без tool.",
+                        outcome.detail.chars().take(3000).collect::<String>()
+                    );
                 } else {
                     // 800 символов вместо 400: вывод команды и содержимое файла
                     // в 400 знаков не влезали, и модель продолжала задачу вслепую.
