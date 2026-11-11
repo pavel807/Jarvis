@@ -10,10 +10,28 @@ ONNX-модели ruaccent динамически квантованы (int8-в�
 Выход: models/stress-ru/accent.safetensors,
        models/stress-ru/omograph/model.safetensors
 
-Запуск: python3 scripts/export_stress_models.py
-Требуется: onnx, numpy, torch, safetensors.
+Запуск: uv run scripts/export_stress_models.py
+Зависимости берутся из заголовка ниже: uv сам поставит их в изолированное
+окружение (torch — CPU-сборка, втрое меньше скачивание). Без uv можно
+запустить python3, если все пакеты уже стоят в системе.
+
+Куда писать: JARVIS_MODELS_DIR, иначе models/ репозитория — так же, как
+определяет папку моделей само приложение (paths.rs).
 """
 
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["numpy", "onnx", "torch", "safetensors"]
+#
+# [tool.uv.sources]
+# torch = { index = "pytorch-cpu" }
+#
+# [[tool.uv.index]]
+# name = "pytorch-cpu"
+# url = "https://download.pytorch.org/whl/cpu"
+# ///
+
+import os
 import sys
 import urllib.request
 from pathlib import Path
@@ -25,6 +43,7 @@ from onnx import numpy_helper
 from safetensors.torch import save_file
 
 ROOT = Path(__file__).resolve().parent.parent
+MODELS = Path(os.environ.get("JARVIS_MODELS_DIR", ROOT / "models"))
 
 # Откуда берём исходные ONNX (в репозитории они не хранятся).
 SOURCES = {
@@ -83,10 +102,10 @@ def export(onnx_path: Path, out_path: Path) -> int:
 
 def main() -> int:
     jobs = [
-        (ROOT / "models/stress-ru/accent.onnx", ROOT / "models/stress-ru/accent.safetensors"),
+        (MODELS / "stress-ru/accent.onnx", MODELS / "stress-ru/accent.safetensors"),
         (
-            ROOT / "models/stress-ru/omograph/model.onnx",
-            ROOT / "models/stress-ru/omograph/model.safetensors",
+            MODELS / "stress-ru/omograph/model.onnx",
+            MODELS / "stress-ru/omograph/model.safetensors",
         ),
     ]
     for src, dst in jobs:
@@ -97,7 +116,11 @@ def main() -> int:
                 continue
             download(url, src)
         count = export(src, dst)
-        print(f"✅ {dst.relative_to(ROOT)}: {count} тензоров")
+        try:
+            shown = dst.relative_to(MODELS)
+        except ValueError:
+            shown = dst
+        print(f"✅ {shown}: {count} тензоров")
     return 0
 
 

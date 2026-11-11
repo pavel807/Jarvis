@@ -18,7 +18,7 @@ state_dict) и файлами токенизатора. Torch нужен тол�
    с формами (для ревизии отсутствующих/лишних весов).
 
 Запуск:
-  uv run --with torch,safetensors,pyyaml python tools/convert_fastconformer.py
+  uv run tools/convert_fastconformer.py
 
 Вход (при отсутствии скачивается):
   build/fastconformer/nemo/stt_ru_fastconformer_hybrid_large_pc.nemo
@@ -26,8 +26,21 @@ state_dict) и файлами токенизатора. Torch нужен тол�
   models/fastconformer/{config.json,model.safetensors,tokenizer.json,tokenizer.vocab}
 """
 
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["torch", "safetensors", "pyyaml", "numpy", "sentencepiece"]
+#
+# [tool.uv.sources]
+# torch = { index = "pytorch-cpu" }
+#
+# [[tool.uv.index]]
+# name = "pytorch-cpu"
+# url = "https://download.pytorch.org/whl/cpu"
+# ///
+
 import io
 import json
+import os
 import sys
 import tarfile
 from pathlib import Path
@@ -37,12 +50,13 @@ import yaml
 from safetensors.torch import save_file
 
 ROOT = Path(__file__).resolve().parent.parent
+MODELS = Path(os.environ.get("JARVIS_MODELS_DIR", ROOT / "models"))
 NEMO_URL = (
     "https://huggingface.co/nvidia/stt_ru_fastconformer_hybrid_large_pc/"
     "resolve/main/stt_ru_fastconformer_hybrid_large_pc.nemo"
 )
 NEMO_PATH = ROOT / "build/fastconformer/nemo/stt_ru_fastconformer_hybrid_large_pc.nemo"
-OUT_DIR = ROOT / "models/fastconformer"
+OUT_DIR = MODELS / "fastconformer"
 
 
 def download_if_needed() -> None:
@@ -72,8 +86,12 @@ def main() -> int:
                 config_yaml = yaml.safe_load(tar.extractfile(member))
             elif name == "model_weights.ckpt":
                 weights_bytes = tar.extractfile(member).read()
-            elif name.startswith("tokenizer"):
-                tokenizer_files[name] = tar.extractfile(member).read()
+            # У этого чекпоинта имена с хэш-префиксом: 4aede02d…_tokenizer.model,
+            # 20633f00…_vocab.txt. Рантайм ждёт tokenizer.vocab (piece\tscore):
+            # в _vocab.txt scores нет, поэтому словарь собираем из
+            # tokenizer.model через sentencepiece, а сам _vocab.txt не нужен.
+            elif name.endswith("_tokenizer.model"):
+                tokenizer_files["tokenizer.model"] = tar.extractfile(member).read()
 
     if config_yaml is None or weights_bytes is None:
         print(f"❌ В .nemo не найден model_config.yaml/model_weights.ckpt; содержимое: {list(tokenizer_files)}")
@@ -84,10 +102,21 @@ def main() -> int:
         json.dumps(config_yaml, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    # --- Токенизатор: копируем как есть.
+    # --- Токенизатор: модель копируем, словарь собираем со score.
     for name, data in tokenizer_files.items():
         (OUT_DIR / name).write_bytes(data)
         print(f"🔑 tokenizer: {name} ({len(data)} байт)")
+    if "tokenizer.model" in tokenizer_files:
+        import sentencepiece as spm
+        sp = spm.SentencePieceProcessor()
+        if not sp.LoadFromSerializedProto(tokenizer_files["tokenizer.model"]):
+            raise RuntimeError("sentencepiece не смог прочитать tokenizer.model")
+        lines = [
+            f"{sp.IdToPiece(i)}\t{sp.GetScore(i)}"
+            for i in range(sp.GetPieceSize())
+        ]
+        (OUT_DIR / "tokenizer.vocab").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"🔑 tokenizer.vocab: {len(lines)} строк со score")
 
     # --- Веса: torch.load (pickle из архива), сохраняем под исходными именами.
     state = torch.load(io.BytesIO(weights_bytes), map_location="cpu", weights_only=True)
@@ -110,7 +139,7 @@ def main() -> int:
     save_file(tensors, str(safetensors_path), metadata={"format": "pt"})
     size_mb = safetensors_path.stat().st_size / 1e6
     total_params = sum(t.numel() for t in tensors.values())
-    print(f"✅ {safetensors_path.relative_to(ROOT)}: {len(tensors)} тензоров, "
+    print(f"✅ {safetensors_path.relative_to(OUT_DIR)}: {len(tensors)} тензоров, "
           f"{total_params/1e6:.1f}M параметров, {size_mb:.0f} MB")
     if skipped:
         print(f"⚠️  не-тензоры пропущены: {skipped}")
@@ -119,7 +148,7 @@ def main() -> int:
     report_path = ROOT / "build/fastconformer/weights_report.json"
     report = {name: list(t.shape) for name, t in sorted(tensors.items())}
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(f"📄 отчёт форм: {report_path.relative_to(ROOT)}")
+    print(f"📄 отчёт форм: {report_path}")
 
     # Краткая сводка по группам слоёв (для ревизии глазами).
     groups: dict[str, int] = {}
