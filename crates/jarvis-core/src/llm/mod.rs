@@ -312,6 +312,10 @@ pub struct SharedLlmState {
     pub engine: Mutex<Option<LlmEngine>>,
     pub condvar: Condvar,
     pub failed: AtomicBool,
+    /// Поколение загрузчика: смена llm_backend/llm_model в настройках
+    /// увеличивает счётчик — старый загрузчик (например, качающий модель
+    /// uzu) видит устаревшее поколение и не записывает свой движок.
+    pub generation: AtomicU64,
 }
 
 pub type SharedLlm = Arc<SharedLlmState>;
@@ -322,6 +326,7 @@ impl SharedLlmState {
             engine: Mutex::new(None),
             condvar: Condvar::new(),
             failed: AtomicBool::new(false),
+            generation: AtomicU64::new(1),
         }
     }
 }
@@ -337,11 +342,19 @@ pub fn spawn_llm_loader(shared: &SharedLlm, events: &EventTx) {
     let events = events.clone();
 
     std::thread::spawn(move || {
+        let generation = shared.generation.load(Ordering::SeqCst);
         let _ = events.send(JarvisEvent::LlmStatus {
             status: "loading".into(),
         });
 
         let loaded = LlmEngine::load(&crate::paths::models_dir(), &events);
+        if shared.generation.load(Ordering::SeqCst) != generation {
+            // Пока грузились, выбрали другой бэкенд/модель: этот движок
+            // устарел — не прогреваем и не записываем (загрузку запустил
+            // свежий поток).
+            println!("↩️ Загрузчик LLM устарел (сменился бэкенд/модель) — выхожу");
+            return;
+        }
         match loaded {
             Ok(mut engine) => {
                 // Прогрев Metal-шейдеров на коротком промпте.
@@ -364,6 +377,10 @@ pub fn spawn_llm_loader(shared: &SharedLlm, events: &EventTx) {
                 );
                 println!("🔥 LLM прогрета за {:.1?}", started.elapsed());
 
+                if shared.generation.load(Ordering::SeqCst) != generation {
+                    println!("↩️ Загрузчик LLM устарел после прогрева — выхожу");
+                    return;
+                }
                 let mut guard = shared.engine.lock().unwrap_or_else(|e| e.into_inner());
                 *guard = Some(engine);
                 drop(guard);
@@ -382,6 +399,14 @@ pub fn spawn_llm_loader(shared: &SharedLlm, events: &EventTx) {
             }
         }
     });
+}
+
+/// Перезагрузка LLM на лету: смена бэкенда/модели в настройках.
+/// Старый загрузчик отваливается по поколению (см. SharedLlmState.generation).
+pub fn reload_llm(shared: &SharedLlm, events: &EventTx) {
+    shared.generation.fetch_add(1, Ordering::SeqCst);
+    shared.failed.store(false, Ordering::SeqCst);
+    spawn_llm_loader(shared, events);
 }
 
 fn wait_for_engine(

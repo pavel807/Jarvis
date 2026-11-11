@@ -47,6 +47,23 @@ pub fn ensure_silero_with_progress(progress: &mut dyn FnMut(u8)) -> Result<()> {
     }
 }
 
+/// Докачать файл вакворда из релиза (jarvis_model_2.rpw, jarvis_model.jref):
+/// маленький файл, прогресс не важен. Ошибка — честная (ассет может быть
+/// ещё не выложен), вызывающий решает сам.
+pub fn ensure_wakeword(name: &str) -> Result<()> {
+    let dest = crate::paths::wakeword_model_file(name);
+    if dest.exists() {
+        return Ok(());
+    }
+    let dir = dest.parent().context("нет родителя у пути модели")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("не создать {}", dir.display()))?;
+    let url = format!("{}/{}", base_url(), name);
+    println!("📥 Загрузка модели вакворда: {url}");
+    let expected = remote_size(&url);
+    download(&url, &dest, expected, &mut |_| {})
+        .with_context(|| format!("не удалось скачать {name}"))
+}
+
 /// Гарантирует наличие файлов Qwen3.5-0.8B в `dir` (config, tokenizer, веса),
 /// иначе качает `qwen3.5-0.8b.tar.gz` из релиза.
 pub fn ensure_qwen35(dir: &Path) -> Result<()> {

@@ -82,7 +82,7 @@ pub struct SttJob {
 }
 
 pub fn spawn_stt_worker(
-    mut stt: Stt,
+    stt: Arc<Mutex<crate::stt::Stt>>,
     settings: Arc<RwLock<crate::settings::Settings>>,
     commands: Arc<RwLock<CommandsConfig>>,
 ) -> (SyncSender<SttJob>, Receiver<anyhow::Result<String>>) {
@@ -95,6 +95,7 @@ pub fn spawn_stt_worker(
         let mut dict: Option<crate::asr::ctc::JarvisDictionary> = None;
         let mut dict_len = 0usize;
         while let Ok(job) = rx.recv() {
+            let mut stt = stt.lock().unwrap_or_else(|e| e.into_inner());
             let started = Instant::now();
             let (decoder_name, beam_width, dict_enabled) = {
                 let s = settings.read().unwrap_or_else(|e| e.into_inner());
@@ -381,15 +382,38 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     println!("✅ Микрофон запущен и готов к работе");
     println!("💡 Скажи 'Джарвис' для активации...");
 
-    let (stt_tx, stt_rx) = spawn_stt_worker(stt, Arc::clone(&h.settings), Arc::clone(&h.commands));
+    let stt = Arc::new(Mutex::new(stt));
+    let (stt_tx, stt_rx) = spawn_stt_worker(
+        Arc::clone(&stt),
+        Arc::clone(&h.settings),
+        Arc::clone(&h.commands),
+    );
 
     let (wake_threshold, ww_model) = {
         let s = h.settings.read().unwrap_or_else(|e| e.into_inner());
         (s.wake_threshold, s.wakeword_model.clone())
     };
-    let mut det = wake::create_detector(&paths::wakeword_model_file(&ww_model), wake_threshold)?;
+    // Дефолтные модели вакворда качаются из релиза (.jref — дикторонезависимый,
+    // .rpw — обученный на голосе владельца); нет ни одной — движок не падает,
+    // а ждёт: модель появится после обучения в приложении.
+    let _ = crate::model_fetch::ensure_wakeword(&ww_model);
+    let _ = crate::model_fetch::ensure_wakeword(wake::EMBEDDING_REFERENCE);
+    let mut det = loop {
+        match wake::create_engine(&stt, &ww_model, wake_threshold) {
+            Ok(det) => break det,
+            Err(e) => {
+                let message = format!(
+                    "Модель вакворда не готова: {e:#}. Открой «Wake Word» в приложении и запиши 3–5 сэмплов фразы — движок подхватит её сам."
+                );
+                eprintln!("⏳ {message}");
+                let _ = h.events.send(JarvisEvent::Error { message });
+                // Ждём: файл появится из обучения в приложении или докачки.
+                std::thread::sleep(Duration::from_secs(3));
+                let _ = crate::model_fetch::ensure_wakeword(wake::EMBEDDING_REFERENCE);
+            }
+        }
+    };
 
-    let mut wi16 = VecDeque::<i16>::new();
     let history_capacity = wake::SAMPLE_RATE * HISTORY_BUFFER_SECS;
     let mut audio_history = VecDeque::<f32>::with_capacity(history_capacity);
 
@@ -455,10 +479,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
         if h.wakeword_reload.load(Ordering::SeqCst) && state == AppState::WaitingForWakeWord {
             h.wakeword_reload.store(false, Ordering::SeqCst);
             let snap = h.settings.read().unwrap_or_else(|e| e.into_inner()).clone();
-            match wake::create_detector(
-                &paths::wakeword_model_file(&snap.wakeword_model),
-                snap.wake_threshold,
-            ) {
+            match wake::create_engine(&stt, &snap.wakeword_model, snap.wake_threshold) {
                 Ok(d) => {
                     det = d;
                     println!("🔄 Модель wake word обновлена");
@@ -488,7 +509,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
         if h.paused.load(Ordering::SeqCst) {
             let _ = mic_rx.recv_timeout(Duration::from_millis(100));
             command_buffer.clear();
-            wi16.clear();
+            det.reset();
             audio_history.clear();
             has_speech_started = false;
             silence_samples = 0;
@@ -557,7 +578,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                                 // диалога с владельцем.
                                 state = AppState::WaitingForWakeWord;
                                 followup_deadline = None;
-                                wi16.clear();
+                                det.reset();
                                 audio_history.clear();
                                 continue;
                             }
@@ -575,7 +596,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                                 reset_phrase_state(&mut command_buffer, &mut has_speech_started, &mut silence_samples, &mut voiced_samples, &mut vad);
                                 state = AppState::WaitingForWakeWord;
                                 followup_deadline = None;
-                                wi16.clear();
+                                det.reset();
                                 audio_history.clear();
                                 continue;
                             }
@@ -630,7 +651,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                             followup_deadline = None;
                             last_outcome_followup = false;
                             audio_history.clear();
-                            wi16.clear();
+                            det.reset();
                             h.llm_history
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
@@ -865,7 +886,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 
                 state = AppState::WaitingForWakeWord;
                 command_buffer.clear();
-                wi16.clear();
+                det.reset();
                 audio_history.clear();
                 h.llm_history
                     .lock()
@@ -887,15 +908,8 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 
         match state {
             AppState::WaitingForWakeWord => {
-                for &s in &chunk_16k {
-                    wi16.push_back((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
-                }
-
-                while wi16.len() >= det.get_samples_per_frame() {
-                    let n = det.get_samples_per_frame();
-                    let fr: Vec<i16> = wi16.drain(..n).collect();
-
-                    if let Some(d) = det.process_samples(fr) {
+                if let Some(d) = det.process_16k(&chunk_16k) {
+                    {
                         eprintln!("🎯 Wake word: {} ({:.3})", d.name, d.score);
                         let _ = h.events.send(JarvisEvent::WakeWordDetected {
                             name: d.name.clone(),
@@ -920,7 +934,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                         // задержка перед началом слушания.
                         std::thread::sleep(Duration::from_millis(60));
 
-                        wi16.clear();
+                        det.reset();
                         audio_history.clear();
 
                         state = AppState::WaitingForCommand;
@@ -937,8 +951,6 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                         let _ = h.events.send(JarvisEvent::StateChanged {
                             state: "listening".into(),
                         });
-
-                        break;
                     }
                 }
             }

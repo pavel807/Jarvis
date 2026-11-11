@@ -219,7 +219,7 @@
     await patchSettings({ llm_backend: "api", api_preset: preset, api_base_url: base, api_model: model });
     toast(
       settings.api_key
-        ? "Облако включится после перезапуска Джарвиса"
+        ? "Переключаюсь на облако — модель загрузится на лету"
         : "Впиши API-ключ ниже — он сохранится сам",
       "ok",
     );

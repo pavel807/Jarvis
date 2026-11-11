@@ -6,7 +6,7 @@ use jarvis_core::engine::{EngineHandles, run_engine};
 use jarvis_core::events::JarvisEvent;
 use jarvis_core::llm::{self, ChatTurn, SharedLlmState, spawn_llm_loader};
 use jarvis_core::paths;
-use jarvis_core::settings::{Settings, spawn_settings_watcher};
+use jarvis_core::settings::{Settings, spawn_settings_watcher_with};
 use jarvis_core::stt::Stt;
 use jarvis_core::tts::{self, AudioMessage, SharedTtsState};
 use jarvis_core::wake_train;
@@ -193,7 +193,13 @@ fn spawn_engine(
     let shared_engine = Arc::clone(shared);
 
     spawn_config_watcher(paths::commands_file(), Arc::clone(&shared_engine.commands));
-    spawn_settings_watcher(paths::settings_file(), Arc::clone(&shared_engine.settings));
+    let llm_for_watcher = Arc::clone(&shared_engine.shared_llm);
+    let events_for_watcher = events_tx.clone();
+    spawn_settings_watcher_with(paths::settings_file(), Arc::clone(&shared_engine.settings), move |_| {
+        // Выбрал облако в мастере/настройках — LLM переключается сразу,
+        // а не после перезапуска (и не ждёт, пока качается локальная).
+        jarvis_core::llm::reload_llm(&llm_for_watcher, &events_for_watcher);
+    });
 
     std::thread::spawn(move || {
         // Канал для хаба таймеров: окно «Утилиты» получает события.

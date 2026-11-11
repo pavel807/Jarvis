@@ -272,10 +272,23 @@ impl Settings {
 
 /// Горячая перезагрузка settings.toml раз в секунду.
 pub fn spawn_settings_watcher(settings_path: PathBuf, settings: Arc<RwLock<Settings>>) {
+    spawn_settings_watcher_with(settings_path, settings, |_| {})
+}
+
+/// То же, что [`spawn_settings_watcher`], но с колбэком: смена
+/// llm_backend/llm_model (мастер первого запуска, настройки) перезагружает
+/// LLM на лету — выбранное облако не должно ждать перезапуска приложения,
+/// пока в фоне качается локальная модель.
+pub fn spawn_settings_watcher_with(
+    settings_path: PathBuf,
+    settings: Arc<RwLock<Settings>>,
+    on_llm_change: impl Fn(&Settings) + Send + 'static,
+) {
     std::thread::spawn(move || {
         let mut last_modified = fs::metadata(&settings_path)
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
+        let mut previous = Settings::load(&settings_path).ok();
 
         loop {
             std::thread::sleep(Duration::from_secs(1));
@@ -286,6 +299,11 @@ pub fn spawn_settings_watcher(settings_path: PathBuf, settings: Arc<RwLock<Setti
             {
                 match Settings::load(&settings_path) {
                     Ok(new_cfg) => {
+                        let llm_changed = previous.as_ref().is_none_or(|prev| {
+                            prev.llm_backend != new_cfg.llm_backend
+                                || prev.llm_model != new_cfg.llm_model
+                        });
+                        previous = Some(new_cfg.clone());
                         let mut lock = settings.write().unwrap_or_else(|e| e.into_inner());
                         *lock = new_cfg.clone();
                         drop(lock);
@@ -295,6 +313,10 @@ pub fn spawn_settings_watcher(settings_path: PathBuf, settings: Arc<RwLock<Setti
                         // перезапуска работал по старым параметрам.
                         new_cfg.apply_hot();
                         println!("⚡ Настройки перезагружены");
+                        if llm_changed {
+                            println!("🧠 Сменился бэкенд/модель LLM — перезагружаю");
+                            on_llm_change(&new_cfg);
+                        }
                     }
                     Err(e) => eprintln!("❌ Ошибка обновления настроек: {e}"),
                 }

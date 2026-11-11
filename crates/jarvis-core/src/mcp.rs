@@ -38,6 +38,9 @@ pub struct McpTool {
 /// Живое подключение к одному серверу.
 struct McpServer {
     name: String,
+    /// Процесс держим живым: drop Child не убивает его, поэтому поле
+    /// существует ради владения и не читается.
+    #[allow(dead_code)]
     child: Child,
     stdin: Mutex<ChildStdin>,
     /// Каналы ответов по request id: reader-поток кладёт Value, вызывающий
@@ -140,10 +143,6 @@ impl McpServer {
             })
             .unwrap_or_default();
         Ok((server, tools))
-    }
-
-    fn server_name(&self) -> String {
-        self.name.clone()
     }
 
     /// JSON-RPC request: отправка, ожидание ответа с таймаутом.

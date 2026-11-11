@@ -10,7 +10,7 @@ use crate::paths;
 use crate::tts::list_wav_samples;
 use anyhow::{Context, Result, bail};
 use rustpotter::{
-    Rustpotter, RustpotterConfig, SampleFormat, WakewordRefBuildFromFiles, WakewordSave,
+    Rustpotter, WakewordRefBuildFromFiles, WakewordSave,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -387,10 +387,9 @@ pub fn build_reference_wakeword(events: &EventTx, cancel: &AtomicBool) -> Result
 pub fn test_wakeword(rpw: &Path, wav: &Path) -> Result<f32> {
     let samples = read_wav_i16_16k(wav)?;
 
-    let mut cfg = RustpotterConfig::default();
-    cfg.fmt.sample_rate = TARGET_RATE;
-    cfg.fmt.channels = 1;
-    cfg.fmt.sample_format = SampleFormat::I16;
+    // Тот же конфиг, что у боевого детектора (band_pass выключен): с
+    // дефолтным конфигом совпадение с reference-моделью не находится.
+    let cfg = crate::wake::detector_config(0.0);
 
     let mut det = Rustpotter::new(&cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
     det.add_wakeword_from_file("jarvis", rpw.to_str().context("путь не UTF-8")?)
