@@ -128,6 +128,11 @@ Cargo workspace
     блокировка: loginctl; сон: systemctl; уведомления: notify-send;
     буфер: wl-copy или xclip/xsel. На Wayland управление окнами недоступно
     (честный отказ), но музыка, громкость, буфер и скриншот (grim) работают.
+    Элементы интерфейса (ui_read/ui_click/ui_type/ui_menu) — **AT-SPI2**
+    (`auto/atspi_linux.rs`): то же чтение экрана текстом и действия по
+    именам элементов, что на macOS, работает на X11 и Wayland (GTK/Qt
+    отдают дерево через at-spi2-core); клики и Enter по координатам
+    выполняют xdotool (X11) или ydotool (Wayland).
   - **Windows** — PowerShell 5.1 (есть в системе): окна — user32
     (ShowWindow/SetForegroundWindow); музыка — SMTC, а если API недоступен —
     медиа-клавиши с честной формулировкой «отправил команду»; громкость —
@@ -195,19 +200,25 @@ Cargo workspace
 Общее:
 - Rust (stable, edition 2024), [bun](https://bun.sh)
 - ~8 ГБ RAM под модели (STT + TTS + LLM одновременно)
-- Доступ в интернет при первом запуске: в `models/` скачиваются
-  FastConformer (~460 МБ, релиз `pavel807/jarvis-models`) и модели ударителя —
-  из HuggingFace, LLM (uzu) — из каталога Mirai, а Silero v5
-  (~91 МБ) и Qwen3.5-0.8B (~1.7 ГБ BF16, бэкенд candle) — из релиза
-  `pavel807/jarvis-models` (переопределяется `JARVIS_MODELS_BASE_URL`)
+- Доступ в интернет при первом запуске. Что качается само: STT
+  (FastConformer, ~460 МБ), TTS (Silero v5, ~91 МБ) и модели ударителя.
+  LLM **не качается сама**: какую модель поставить — решает пользователь
+  в мастере первого запуска или Настройках → Модель (кнопка «Скачать»
+  показывает прогресс и подключает модель без перезапуска; источники:
+  релиз `pavel807/jarvis-models` для candle-Qwen3.5-0.8B, каталог Mirai
+  для uzu на macOS; переопределяется `JARVIS_MODELS_BASE_URL`)
 
 macOS:
 - Apple Silicon (Metal ускоряет LLM/TTS), Xcode с компонентом **Metal Toolchain**
   (`xcodebuild -downloadComponent MetalToolchain`)
 
 Linux:
+- Пакет `at-spi2-core` — дерево элементов интерфейса (ui_read/ui_click/
+  ui_type/ui_menu); шина org.a11y.Bus поднимается им же
 - X11-сессия для управления окнами; на Wayland окна недоступны (музыка,
-  громкость, буфер, скриншот через grim работают)
+  громкость, буфер, скриншот через grim работают). Ввод по координатам
+  (клики по элементам, Enter после автозаполнения): `xdotool` (X11) или
+  `ydotool` + запущенная служба `ydotoold` (Wayland)
 - Утилиты по одной на функцию — отсутствующая даёт честный отказ:
   `wmctrl` или `xdotool` (окна), `playerctl` (музыка), `pactl` или `amixer`
   (громкость), `brightnessctl` или `xrandr` (яркость), `notify-send`

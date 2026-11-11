@@ -132,9 +132,16 @@ impl Default for Settings {
             } else {
                 "candle".to_string()
             },
-            // 8-бит (mirai-l) вместо 4-бит: та же Qwen3.5 2B, но вдвое меньше
-            // квантизационных повреждений весов — заметно меньше выдумывает.
-            llm_model: "qwen3.5-2b-mirai-l".to_string(),
+            // Модель по умолчанию — родная для бэкенда: uzu живёт в каталоге
+            // Mirai (macOS), candle качается из релиза jarvis-models и на
+            // Linux выбран по умолчанию.
+            llm_model: if cfg!(target_os = "macos") {
+                // 8-бит (mirai-l) вместо 4-бит: та же Qwen3.5 2B, но вдвое меньше
+                // квантизационных повреждений весов — заметно меньше выдумывает.
+                "qwen3.5-2b-mirai-l".to_string()
+            } else {
+                crate::llm::qwen35::LOCAL_DIR_NAME.to_string()
+            },
             web_search_auto: true,
             llm_normalize: true,
             llm_temperature: 0.6,
@@ -276,6 +283,22 @@ pub fn spawn_settings_watcher(settings_path: PathBuf, settings: Arc<RwLock<Setti
 #[cfg(test)]
 mod tests {
     use super::Settings;
+
+    #[test]
+    fn default_model_matches_default_backend() {
+        // Дефолт согласован внутри: candle (не-macOS) — модель из релиза
+        // jarvis-models, uzu (macOS) — модель каталога Mirai. Раньше на
+        // Linux дефолт указывал на mirai-имя, которое candle не грузит.
+        let s = Settings::load(&std::path::PathBuf::from("/nonexistent/settings.toml"))
+            .unwrap_or_else(|_| Settings::load(&crate::paths::settings_file()).unwrap());
+        if cfg!(target_os = "macos") {
+            assert_eq!(s.llm_backend, "uzu");
+            assert_eq!(s.llm_model, "qwen3.5-2b-mirai-l");
+        } else {
+            assert_eq!(s.llm_backend, "candle");
+            assert_eq!(s.llm_model, crate::llm::qwen35::LOCAL_DIR_NAME);
+        }
+    }
 
     #[test]
     fn zero_max_tokens_stays_uncapped_in_llm_params() {
