@@ -6,6 +6,7 @@
 use anyhow::Result;
 
 fn main() -> Result<()> {
+    jarvis_core::init_tuning();
     let started = std::time::Instant::now();
     let engine = jarvis_core::tts_silero::SileroEngine::new_no_stress("ru_eduard")?;
     println!("✅ Silero загрузился за {:.1?}", started.elapsed());

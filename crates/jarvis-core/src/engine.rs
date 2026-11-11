@@ -350,6 +350,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     let (stream, native_sr) = {
         #[cfg(target_os = "macos")]
         let mut told_user = false;
+        let mut first_mic_fail = true;
         let opened;
         loop {
             #[cfg(target_os = "macos")]
@@ -372,7 +373,19 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                     opened = pair;
                     break;
                 }
-                Err(e) => return Err(e.context("Не удалось создать входной аудиопоток.")),
+                Err(e) => {
+                    // Устройство могло быть занято/переподключено: движок не
+                    // умирает, а ждёт и пробует снова — как с моделью вакворда.
+                    let hint = "Подключи/выбери микрофон — Джарвис подхватит его сам.";
+                    if first_mic_fail {
+                        first_mic_fail = false;
+                        eprintln!("⏳ {e:#}. {hint}");
+                        let _ = h.events.send(JarvisEvent::Error {
+                            message: format!("{e:#}. {hint}"),
+                        });
+                    }
+                    std::thread::sleep(Duration::from_secs(3));
+                }
             }
         }
         opened
@@ -427,6 +440,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     let mut audio_history = VecDeque::<f32>::with_capacity(history_capacity);
 
     let mut state = AppState::WaitingForWakeWord;
+    let mut last_score_log = Instant::now();
     let mut command_buffer = Vec::new();
     let mut followup_deadline: Option<Instant> = None;
 
@@ -917,6 +931,16 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
 
         match state {
             AppState::WaitingForWakeWord => {
+                // Диагностика порога: что «слышит» метрический детектор —
+                // в журнал раз в 2 с (тюнинга ради, в озвучку не идёт).
+                if last_score_log.elapsed() > Duration::from_secs(2)
+                    && let Some(score) = det.last_score()
+                {
+                    last_score_log = Instant::now();
+                    let _ = h.events.send(JarvisEvent::Log {
+                        message: format!("🎯 wake: {score:.3}"),
+                    });
+                }
                 if let Some(d) = det.process_16k(&chunk_16k) {
                     {
                         eprintln!("🎯 Wake word: {} ({:.3})", d.name, d.score);

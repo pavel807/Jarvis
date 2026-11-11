@@ -143,6 +143,14 @@ impl WakeEngine {
             WakeEngine::Embedding(det) => det.reset(),
         }
     }
+
+    /// Счёт последнего окна метрического детектора (тюнение порога в UI).
+    pub fn last_score(&self) -> Option<f32> {
+        match self {
+            WakeEngine::Dtw { .. } => None,
+            WakeEngine::Embedding(det) => det.last_raw_score(),
+        }
+    }
 }
 
 /// Эталон метрического детектора — фиксированное имя в папке моделей.
@@ -175,6 +183,17 @@ pub fn create_engine(
     rpw_name: &str,
     threshold: f32,
 ) -> Result<WakeEngine> {
+    let rpw_path = crate::paths::wakeword_model_file(rpw_name);
+    if rpw_path.exists() {
+        let det = create_detector(&rpw_path, threshold)?;
+        println!("🎯 Wake word: DTW-детектор ({rpw_name} — обучен на голосе владельца)");
+        let frame = det.get_samples_per_frame();
+        return Ok(WakeEngine::Dtw {
+            det,
+            frame,
+            buffer: std::collections::VecDeque::new(),
+        });
+    }
     let jref = crate::paths::models_dir().join(EMBEDDING_REFERENCE);
     if jref.exists() {
         let embedder = FastConformerEmbedder::new(Arc::clone(stt));
