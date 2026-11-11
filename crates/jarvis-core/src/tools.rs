@@ -200,6 +200,28 @@ pub enum ToolCall {
         app: Option<String>,
         path: Vec<String>,
     },
+    /// Запомнить факт о пользователе насовсем (долговременная память,
+    /// логика OpenJarvis: устойчивые предпочтения, проекты, ограничения).
+    Remember {
+        text: String,
+    },
+    /// Задача по расписанию: каждый день в HH:MM или каждые N минут;
+    /// промпт выполняется сам, ответ проговаривается.
+    ScheduleAdd {
+        prompt: String,
+        daily_at: Option<String>,
+        every_minutes: Option<u64>,
+    },
+    ScheduleList,
+    ScheduleRemove {
+        id: u64,
+    },
+    /// Внешний инструмент MCP-сервера (серверы — в settings.toml).
+    McpCall {
+        server: String,
+        tool: String,
+        args: Value,
+    },
 }
 
 /// Блокируем только реально разрушительные команды. Всё остальное — на
@@ -298,6 +320,12 @@ const ALIASES: &[(&str, &str)] = &[
     ("команда", "shell"),
     ("командная_строка", "shell"),
     ("выполнить", "shell"),
+    // Долговременная память и расписание (логика OpenJarvis)
+    ("remember", "remember"),
+    ("schedule_add", "schedule_add"),
+    ("schedule_list", "schedule_list"),
+    ("schedule_remove", "schedule_remove"),
+    ("mcp_call", "mcp_call"),
     // Автоматизация экрана через Accessibility (без модели зрения)
     ("ui_read", "ui_read"),
     ("read_screen_tool", "ui_read"),
@@ -1188,6 +1216,28 @@ fn build(name: &str, args: &Value) -> Result<ToolCall, String> {
             seconds_from_now: get_seconds()?,
             label: get_label(),
         },
+        "remember" => ToolCall::Remember {
+            text: get_str(&["text", "fact", "текст", "факт", "что_запомнить"])?.to_string(),
+        },
+        "schedule_add" => ToolCall::ScheduleAdd {
+            prompt: get_str(&["prompt", "task", "промпт", "текст", "что_делать"])?.to_string(),
+            daily_at: arg_str(args, &["daily_at", "at", "time", "время", "каждый_день"])
+                .map(str::to_string),
+            every_minutes: arg_u64(args, &["every_minutes", "interval", "каждые_минут"]),
+        },
+        "schedule_list" => ToolCall::ScheduleList,
+        "schedule_remove" => ToolCall::ScheduleRemove {
+            id: arg_u64(args, &["id", "номер"])
+                .ok_or_else(|| "нет поля id".to_string())?,
+        },
+        "mcp_call" => ToolCall::McpCall {
+            server: get_str(&["server", "сервер"])?.to_string(),
+            tool: get_str(&["tool", "name", "инструмент"])?.to_string(),
+            args: args
+                .get("args")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+        },
         "set_volume" => ToolCall::SetVolume {
             percent: get_percent()?,
         },
@@ -1631,6 +1681,11 @@ fn tool_name(call: &ToolCall) -> &'static str {
         ToolCall::OpenUrl { .. } => "open_url",
         ToolCall::OpenPath { .. } => "open_path",
         ToolCall::WebSearch { .. } => "web_search",
+        ToolCall::Remember { .. } => "remember",
+        ToolCall::ScheduleAdd { .. } => "schedule_add",
+        ToolCall::ScheduleList => "schedule_list",
+        ToolCall::ScheduleRemove { .. } => "schedule_remove",
+        ToolCall::McpCall { .. } => "mcp_call",
         ToolCall::TimerStop => "timer_stop",
         ToolCall::AlarmStop => "alarm_stop",
         ToolCall::OpenUtils { .. } => "open_utils",
@@ -1680,6 +1735,11 @@ fn tool_name(call: &ToolCall) -> &'static str {
 fn tool_summary(call: &ToolCall) -> String {
     match call {
         ToolCall::Shell { cmd } => cmd.chars().take(120).collect(),
+        ToolCall::Remember { text } => text.chars().take(80).collect(),
+        ToolCall::ScheduleAdd { prompt, .. } => prompt.chars().take(80).collect(),
+        ToolCall::ScheduleList => String::new(),
+        ToolCall::ScheduleRemove { id } => format!("№{id}"),
+        ToolCall::McpCall { server, tool, .. } => format!("{server}/{tool}"),
         ToolCall::OpenApp { name } => name.clone(),
         ToolCall::QuitApp { name } => name.clone(),
         ToolCall::OpenUrl { url, .. } => url.chars().take(120).collect(),
@@ -2166,6 +2226,72 @@ fn execute_inner(
             ToolOutcome::ok(with_label(format!("Поставил будильник через {human}")))
         }
 
+        ToolCall::Remember { text } => {
+            println!("🔧 remember");
+            log("🧠 запоминаю факт".into());
+            if crate::memory::add_facts(std::slice::from_ref(&text)) > 0 {
+                ToolOutcome::ok(format!("Запомнил: {}", text.chars().take(120).collect::<String>()))
+            } else {
+                ToolOutcome::ok("Это я уже знал.".to_string())
+            }
+        }
+        ToolCall::ScheduleAdd {
+            prompt,
+            daily_at,
+            every_minutes,
+        } => {
+            println!("🔧 schedule_add");
+            log("⏰ задача в расписание".into());
+            let repeat = match (&daily_at, &every_minutes) {
+                (Some(at), _) => format!("каждый день в {at}"),
+                (_, Some(m)) => format!("каждые {m} мин"),
+                _ => String::new(),
+            };
+            let schedule = if let Some(at) = daily_at {
+                crate::schedule::Schedule::Daily { hhmm: at }
+            } else if let Some(minutes) = every_minutes {
+                crate::schedule::Schedule::Interval {
+                    minutes,
+                }
+            } else {
+                return ToolOutcome::fail(
+                    "Не понял повтор: нужен daily_at «ЧЧ:ММ» (каждый день) или every_minutes",
+                );
+            };
+            match crate::schedule::add(&prompt, schedule) {
+                Ok(id) => ToolOutcome::ok(format!(
+                    "Поставил в расписание №{id} ({repeat}): {}",
+                    prompt.chars().take(80).collect::<String>()
+                )),
+                Err(e) => ToolOutcome::fail(format!("Не поставил в расписание: {e:#}")),
+            }
+        }
+        ToolCall::ScheduleList => {
+            println!("🔧 schedule_list");
+            log("⏰ список расписаний".into());
+            ToolOutcome::ok(crate::schedule::describe_all())
+        }
+        ToolCall::ScheduleRemove { id } => {
+            println!("🔧 schedule_remove: {id}");
+            log("⏰ убираю задачу".into());
+            if crate::schedule::remove(id) {
+                ToolOutcome::ok(format!("Задача №{id} убрана из расписания"))
+            } else {
+                ToolOutcome::fail(format!("Задачи №{id} нет в расписании"))
+            }
+        }
+        ToolCall::McpCall { server, tool, args } => {
+            println!("🔧 mcp_call: {server}/{tool}");
+            log(format!("🔌 MCP: {server}/{tool}"));
+            crate::mcp::ensure_connected();
+            match crate::mcp::call(&server, &tool, &args) {
+                Ok(text) => ToolOutcome::with_detail(
+                    format!("Выполнил {server}/{tool}"),
+                    text.chars().take(2000).collect::<String>(),
+                ),
+                Err(e) => ToolOutcome::fail(format!("{server}/{tool} не удался: {e:#}")),
+            }
+        }
         ToolCall::SetVolume { percent } => {
             println!("🔧 set_volume: {percent}");
             log(format!("🔧 set_volume: {percent}"));
@@ -3734,6 +3860,75 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel::<AudioMessage>();
         let (etx, _erx) = std::sync::mpsc::channel::<crate::events::JarvisEvent>();
         execute(call, &tx, &etx)
+    }
+
+    /// remember: парс и запись факта в долговременную память.
+    #[test]
+    fn remember_tool_roundtrip() {
+        let ToolParse::Call(ToolCall::Remember { text }) =
+            parse(r#"<tool>{"name":"remember","args":{"text":"Предпочитает короткие ответы"}}</tool>"#)
+        else {
+            panic!("remember не распознан");
+        };
+        assert_eq!(text, "Предпочитает короткие ответы");
+    }
+
+    /// schedule_add: оба формата расписания парсятся, execute пишет в стор
+    /// (в тесте — в репо, где base_dir; запись идемпотентна по id).
+    #[test]
+    fn schedule_add_parse_daily_and_interval() {
+        let ToolParse::Call(ToolCall::ScheduleAdd { prompt, daily_at, every_minutes }) =
+            parse(r#"<tool>{"name":"schedule_add","args":{"prompt":"Сводка новостей","daily_at":"08:00"}}</tool>"#)
+        else {
+            panic!("schedule_add daily не распознан");
+        };
+        assert_eq!(prompt, "Сводка новостей");
+        assert_eq!(daily_at.as_deref(), Some("08:00"));
+        assert_eq!(every_minutes, None);
+
+        let ToolParse::Call(ToolCall::ScheduleAdd { every_minutes, .. }) =
+            parse(r#"<tool>{"name":"schedule_add","args":{"prompt":"Проверить почту","every_minutes":30}}</tool>"#)
+        else {
+            panic!("schedule_add interval не распознан");
+        };
+        assert_eq!(every_minutes, Some(30));
+    }
+
+    /// mcp_call: вложенный объект args доходит без искажений.
+    #[test]
+    fn mcp_call_parses_nested_args() {
+        let ToolParse::Call(ToolCall::McpCall { server, tool, args }) =
+            parse(r#"<tool>{"name":"mcp_call","args":{"server":"fs","tool":"read_file","args":{"path":"/tmp/x.txt"}}}</tool>"#)
+        else {
+            panic!("mcp_call не распознан");
+        };
+        assert_eq!(server, "fs");
+        assert_eq!(tool, "read_file");
+        assert_eq!(args["path"], "/tmp/x.txt");
+    }
+
+    /// schedule_execute: полный круг add → list → remove через execute.
+    #[test]
+    fn schedule_tools_roundtrip() {
+        let outcome = exec_for_test(ToolCall::ScheduleAdd {
+            prompt: "Тестовая задача из теста".into(),
+            daily_at: Some("07:30".into()),
+            every_minutes: None,
+        });
+        assert!(outcome.ok, "{}", outcome.speech);
+        let listed = exec_for_test(ToolCall::ScheduleList);
+        assert!(listed.ok && listed.speech.contains("Тестовая задача из теста"));
+        // Убираем всё, что наштамповали: id парсим из списка задач.
+        let ids: Vec<u64> = crate::schedule::list()
+            .iter()
+            .filter(|t| t.prompt.contains("Тестовая задача из теста"))
+            .map(|t| t.id)
+            .collect();
+        assert!(!ids.is_empty());
+        for id in ids {
+            let removed = exec_for_test(ToolCall::ScheduleRemove { id });
+            assert!(removed.ok);
+        }
     }
 
     /// file_write: перечитывание после записи — успешный сценарий.

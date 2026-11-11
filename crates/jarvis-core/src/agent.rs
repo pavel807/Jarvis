@@ -117,6 +117,11 @@ pub const KNOWN_NAMES: &[&str] = &[
     "ui_click",
     "ui_type",
     "ui_menu",
+    "remember",
+    "schedule_add",
+    "schedule_list",
+    "schedule_remove",
+    "mcp_call",
 ];
 
 const FIVE_SECONDS: Duration = Duration::from_secs(5);
@@ -193,11 +198,12 @@ pub fn spec_for(name: &str) -> Option<ToolSpec> {
             platforms::ALL,
         ),
         "ui_read" => (
-            // Чтение Accessibility-дерева: только смотрите, ничего не меняете.
+            // Чтение дерева элементов: macOS (Accessibility), Linux (AT-SPI) —
+            // только смотрите, ничего не меняете.
             RiskLevel::Low,
             Duration::from_secs(20),
             Postcondition::None,
-            platforms::MACOS_ONLY,
+            platforms::ALL,
         ),
         "ui_click" | "ui_menu" => (
             // Клик/меню меняют состояние приложения: средний риск, результат
@@ -205,7 +211,7 @@ pub fn spec_for(name: &str) -> Option<ToolSpec> {
             RiskLevel::Medium,
             Duration::from_secs(30),
             Postcondition::None,
-            platforms::MACOS_ONLY,
+            platforms::ALL,
         ),
         "ui_type" => (
             // Ввод текста в чужое поле: средний риск, верификация — readback
@@ -213,7 +219,27 @@ pub fn spec_for(name: &str) -> Option<ToolSpec> {
             RiskLevel::Medium,
             Duration::from_secs(30),
             Postcondition::None,
-            platforms::MACOS_ONLY,
+            platforms::ALL,
+        ),
+        "remember" | "schedule_list" => (
+            // Запись в локальные файлы памяти/расписания.
+            RiskLevel::Low,
+            FIVE_SECONDS,
+            Postcondition::None,
+            platforms::ALL,
+        ),
+        "schedule_add" | "schedule_remove" => (
+            RiskLevel::Low,
+            FIVE_SECONDS,
+            Postcondition::None,
+            platforms::ALL,
+        ),
+        "mcp_call" => (
+            // Внешний процесс: код не наш, лимит времени generous, риск средний.
+            RiskLevel::Medium,
+            Duration::from_secs(70),
+            Postcondition::None,
+            platforms::ALL,
         ),
         "file_read" | "file_list" | "file_search" | "file_glob" => (
             RiskLevel::Low,

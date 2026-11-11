@@ -111,6 +111,27 @@ pub struct Settings {
     pub speaker_filter: bool,
     /// Порог косинусного сходства с голосовым профилем владельца (0..1).
     pub speaker_threshold: f32,
+
+    // --- Каналы и внешние инструменты (по логике OpenJarvis) ---
+    /// Токен Telegram-бота (BotFather). Пусто — канал не запускается.
+    pub telegram_bot_token: String,
+    /// Разрешённые chat_id через запятую: кому бот отвечает.
+    pub telegram_chat_ids: String,
+    /// Внешние MCP-серверы: [[mcp_servers]] name/cmd/args в settings.toml.
+    pub mcp_servers: Vec<McpServerConfig>,
+}
+
+/// Один внешний MCP-сервер: процесс stdio, инструменты которого появляются
+/// у модели как mcp_call {"server":"имя","tool":"...","args":{...}}.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    /// Короткое имя: попадает в tool-вызов модели.
+    pub name: String,
+    /// Исполняемый файл (в PATH или полный путь).
+    pub cmd: String,
+    /// Аргументы запуска.
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 impl Default for Settings {
@@ -167,6 +188,9 @@ impl Default for Settings {
             // он просто пропускает всё и ни на что не влияет.
             speaker_filter: true,
             speaker_threshold: 0.6,
+            telegram_bot_token: String::new(),
+            telegram_chat_ids: String::new(),
+            mcp_servers: Vec::new(),
         }
     }
 }
