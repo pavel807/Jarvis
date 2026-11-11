@@ -235,9 +235,11 @@ fn main() -> Result<()> {
     if let Some(&worst_holdout) = holdout_scores.iter().min_by(|a, b| a.partial_cmp(b).unwrap()) {
         let mut reference = rustpotter::EmbeddingReference::load_reference_only(&out)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        // Порог: ниже худшего невиданного голоса (запас 0.10 — шумовые
-        // аугментации слегка проседают), но не в отрицательную зону.
-        let calibrated = (worst_holdout - 0.10).max(0.0).max(reference.threshold * 0.3);
+        // Порог: существенно ниже худшего невиданного TTS-голоса — живой
+        // голос в эмбеддинг-пространстве сидит ниже синтетики, и запас
+        // должен покрывать этот сдвиг. Негативы (≤ 0.34) остаются далеко
+        // снизу; шумовые аугментации позитивов слегка проседают — учтено.
+        let calibrated = (worst_holdout - 0.25).max(0.0).max(reference.threshold * 0.3);
         if (calibrated - reference.threshold).abs() > f32::EPSILON {
             reference.set_threshold(calibrated);
             println!(
