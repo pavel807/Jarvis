@@ -58,6 +58,10 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 speakrs = { workspace = true, features = ["cpu"] }
 candle-core = { workspace = true}
 candle-nn = { workspace = true}
+# AT-SPI2 — Linux-эквивалент macOS Accessibility: чтение дерева элементов UI,
+# клики и ввод текста по именам элементов (ui_read/ui_click/ui_type/ui_menu).
+atspi = { version = "0.30", default-features = true, features = ["tokio", "zbus"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 
 
 [dev-dependencies]

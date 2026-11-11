@@ -7,18 +7,9 @@
 
 use anyhow::{anyhow, Result};
 
-/// Роли, которые перечисляет `ui_read` и принимает `ui_click`/`ui_type`.
-pub const ELEMENT_ROLES: &[&str] = &[
-    "button",
-    "checkbox",
-    "radio button",
-    "pop up button",
-    "text field",
-    "secure text field",
-    "static text",
-    "link",
-    "slider",
-];
+// Словарь элементов и канонизация ролей — общие для всех ОС: перечисляет
+// ui_read и принимает ui_click/ui_type на macOS и Linux.
+use super::{normalize_role, ELEMENT_ROLES};
 
 /// Снимок экрана: активное приложение и элементы управления.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -57,23 +48,6 @@ pub fn run_ax(script: &str) -> Result<String> {
 // =========================================================================
 // Чистые построители (покрыты тестами без обращения к системе)
 // =========================================================================
-
-/// Канонизация роли: русские и частые синонимы → AppleScript-класс.
-pub fn normalize_role(role: &str) -> String {
-    match role.trim().to_lowercase().as_str() {
-        "кнопка" | "кнопку" | "" => "button".into(),
-        "флажок" | "чекбокс" | "галочка" => "checkbox".into(),
-        "переключатель" => "radio button".into(),
-        "список" | "выпадающий список" | "выпадашка" => "pop up button".into(),
-        "поле" | "поле ввода" | "текстовое поле" => "text field".into(),
-        "пароль" | "поле пароля" => "secure text field".into(),
-        "надпись" | "текст" => "static text".into(),
-        "ссылка" => "link".into(),
-        "ползунок" => "slider".into(),
-        "меню" | "пункт меню" | "menu bar item" => "menu bar item".into(),
-        other => other.to_string(),
-    }
-}
 
 /// Предложение окна для AppleScript: число — индекс, иначе поиск по имени.
 pub fn window_clause(window: Option<&str>) -> String {
