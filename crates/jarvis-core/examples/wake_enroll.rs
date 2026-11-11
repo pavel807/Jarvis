@@ -49,11 +49,13 @@ fn main() -> Result<()> {
         "ru_aigul", "ru_albina", "ru_alexandr", "ru_alfia", "ru_bogdan",
         "ru_dmitriy", "ru_eduard", "ru_ekaterina", "ru_gamat", "ru_igor",
         "ru_karina", "ru_kejilgan", "ru_kermen", "ru_marat", "ru_miyau",
+        // ru_sibday исключён: не-русское произношение «Джарвис» ломает
+        // шаблон (скор 0.51) — это кураторство данных, а не порог.
         "ru_nurgul", "ru_oksana", "ru_onaoy", "ru_ramilia", "ru_roman",
-        "ru_safarhuja", "ru_saida", "ru_sibday", "ru_vika", "ru_zara",
+        "ru_safarhuja", "ru_saida", "ru_vika", "ru_zara",
         "ru_zhadyra", "ru_zhazira", "ru_zinaida",
     ];
-    let tempos = [0.9_f32, 1.0, 1.1];
+    let tempos = [0.95_f32, 1.0, 1.05];
     let mut skipped = 0;
     for voice in voices {
         for (k, speed) in tempos.iter().enumerate() {
@@ -70,9 +72,13 @@ fn main() -> Result<()> {
 
     // --- Негативы: похожие по звучанию слова, шум, тишина ---
     let mut negatives = Vec::new();
-    for (i, text) in ["сервис", "запись", "нравится", "привет", "музыка"]
-        .into_iter()
-        .enumerate()
+    for (i, text) in [
+        "сервис", "запись", "нравится", "привет", "музыка",
+        "джаз", "джазовый", "джазист", "жарко", "завтрак",
+        "джинсы", "сверстник", "университет", "маркетинг",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let audio = engine.synthesize_with("ru_eduard", text, 1.0)?;
         let window = write_window(&train, &format!("[none]_neg_{i}_{text}"), &audio)?;
@@ -113,16 +119,10 @@ fn main() -> Result<()> {
         .enroll(&positives, &negatives)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // Самопроверка: счёт = cos(x, позитив) − cos(x, негатив).
-    let mut embedder2 = jarvis_core::wake::FastConformerEmbedder::new(std::sync::Arc::clone(&stt));
+    // Самопроверка: score_reference — та же семантика, что у боевого
+    // детектора (центрирование + max по позитивам).
     let mut score = |w: &[f32]| -> f32 {
-        let mut e = embedder2.embed(w).expect("embed");
-        rustpotter::l2_normalize(&mut e);
-        e.iter()
-            .zip(&reference.positive)
-            .map(|(a, b)| a * b)
-            .sum::<f32>()
-            - e.iter().zip(&reference.negative).map(|(a, b)| a * b).sum::<f32>()
+        jarvis_core::wake::score_reference(&stt, w).expect("score")
     };
     println!("— счёты позитивов:");
     let mut min_pos = f32::MAX;
@@ -138,9 +138,9 @@ fn main() -> Result<()> {
         max_neg = max_neg.max(s);
         println!("   {i}: {s:.3}");
     }
-    let suggested = max_neg + 0.5 * (min_pos - max_neg);
     println!(
-        "✅ Зазор: позитив ≥ {min_pos:.3}, негатив ≤ {max_neg:.3}; рекомендованный порог {suggested:.3}"
+        "✅ Зазор: позитив ≥ {min_pos:.3}, негатив ≤ {max_neg:.3}; порог в эталоне {stored:.4}",
+        stored = reference.threshold
     );
 
     let out = jarvis_core::paths::models_dir().join(jarvis_core::wake::EMBEDDING_REFERENCE);
