@@ -59,6 +59,28 @@
     toast("Модель включится после перезапуска Джарвиса", "ok");
   }
 
+  // ---------- Модели на диске: локальная candle-модель может быть не скачана ----------
+
+  let models = $state<{ name: string; installed: boolean; size_mb: number | null; downloadable: boolean }[]>([]);
+
+  async function loadModels() {
+    try {
+      models = await invoke("llm_models_status");
+    } catch {
+      // Мастер может работать до готовности бэкенда — просто без кнопок.
+    }
+  }
+  void loadModels();
+
+  async function downloadModel(name: string) {
+    try {
+      await invoke("llm_download_model", { name });
+      toast(`Скачиваю ${name} — прогресс под списком`, "ok");
+    } catch (e) {
+      toast(`Не удалось начать загрузку: ${e}`, "err");
+    }
+  }
+
   const apiActive = $derived(settings.llm_backend === "api");
   const yandexActive = $derived(apiActive && settings.api_preset === "yandex");
 
@@ -151,6 +173,33 @@
             {/if}
           </button>
         {/each}
+        {#each models as m (m.name)}
+          <div class="row-item">
+            <span class="row-item__text">
+              <span class="row-item__title">{m.name}</span>
+              <span class="row-item__hint">
+                {m.installed ? `Установлена${m.size_mb ? ` — ${m.size_mb} МБ` : ""}` : "Не скачана"}
+              </span>
+            </span>
+            {#if m.installed}
+              <span class="row-item__value"><AppIcon name="check" size={15} /></span>
+            {:else if m.downloadable}
+              <button class="btn btn--secondary btn--sm" disabled={!!store.download} onclick={() => downloadModel(m.name)}>
+                Скачать
+              </button>
+            {/if}
+          </div>
+        {/each}
+        {#if store.download}
+          <div class="row-item">
+            <span class="row-item__text">
+              <span class="row-item__title">Загрузка: {store.download.what}</span>
+              <span class="row-item__hint">
+                <progress value={store.download.percent} max="100"></progress> {store.download.percent}%
+              </span>
+            </span>
+          </div>
+        {/if}
         <button class="row-item" onclick={() => pickApi("yandex")}>
           <span class="row-item__text">
             <span class="row-item__title">Яндекс GPT — облако</span>

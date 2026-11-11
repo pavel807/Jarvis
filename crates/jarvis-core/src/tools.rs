@@ -11,6 +11,7 @@ use crate::text::fix_lookalikes;
 use crate::tts::AudioMessage;
 use serde_json::Value;
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::mpsc::Sender;
 use std::time::Duration;

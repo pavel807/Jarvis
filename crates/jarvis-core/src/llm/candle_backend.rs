@@ -5,7 +5,7 @@
 use super::config::{self, ModelConfig};
 use super::streaming::{MAX_SENTENCE_CHARS, find_chunk_end, speakable, strip_think};
 use super::template;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, IndexOp};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -108,11 +108,17 @@ fn load_model_dir(
     models_dir: &std::path::Path,
 ) -> Result<(CandleModel, Tokenizer, Vec<u32>, bool, &'static str)> {
     let dir = models_dir.join(config::model_name());
-    // Qwen3.5-0.8B не качается ни из HF, ни из Mirai — тянем из релиза
-    // jarvis-models, если файлов ещё нет.
-    if config::model_name() == super::qwen35::LOCAL_DIR_NAME {
-        crate::model_fetch::ensure_qwen35(&dir)
-            .with_context(|| format!("Не удалось подготовить Qwen3.5 в {}", dir.display()))?;
+    // Модели не качаются сами: что скачать — решает пользователь (Настройки
+    // → Модель или мастер первого запуска). Здесь только честная ошибка,
+    // если выбранной модели на диске нет.
+    if config::model_name() == super::qwen35::LOCAL_DIR_NAME
+        && !crate::model_fetch::qwen35_ready(&dir)
+    {
+        bail!(
+            "Модель {} не скачана (каталог {} пуст или неполон). Выбери «Скачать» в Настройках → Модель — загрузка покажет прогресс и подключит модель сама",
+            config::model_name(),
+            dir.display()
+        );
     }
     if super::qwen35::Qwen35Config::is_qwen35_config(&dir.join("config.json")) {
         let device = pick_device();

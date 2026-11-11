@@ -124,6 +124,9 @@ fn main() -> Result<()> {
                 JarvisEvent::RecordSaved { path } => println!("💾 Сэмпл записан: {}", path),
                 // AudioLevel приходит ~20 раз в секунду — в консоль не льём.
                 JarvisEvent::AudioLevel { .. } => {}
+                JarvisEvent::DownloadProgress { what, percent } => {
+                    print!("\r⬇️ {what}: {percent}%")
+                }
                 JarvisEvent::Error { message } => eprintln!("❗ {}", message),
                 JarvisEvent::Reply { text } => println!("💬 {}", text),
                 JarvisEvent::Log { message } => println!("{}", message),

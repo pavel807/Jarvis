@@ -1,7 +1,7 @@
 //! Диагностика TCC-доступа к микрофону: печатает статус разрешения macOS.
 //! Запуск: cargo run -p jarvis-core --example mic_check
-
 fn main() {
+    #[cfg(target_os = "macos")]
     match jarvis_core::audio::mic_authorized() {
         Some(true) => println!("✅ Доступ к микрофону разрешён"),
         Some(false) => println!(
@@ -11,4 +11,6 @@ fn main() {
         ),
         None => println!("⚠️ Не удалось определить статус (класс AVCaptureDevice не найден)"),
     }
+    #[cfg(not(target_os = "macos"))]
+    println!("ℹ️ macOS-диагностика TCC: на этой ОС отдельного разрешения на микрофон нет");
 }

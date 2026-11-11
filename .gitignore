@@ -17,3 +17,8 @@
 settings.toml
 .jarvis-fixes-backup-*
 vendor/
+
+# Локальные артефакты
+graphify-out/
+payload.json
+resp2.json
