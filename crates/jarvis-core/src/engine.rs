@@ -389,27 +389,36 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
         Arc::clone(&h.commands),
     );
 
-    let (wake_threshold, ww_model) = {
+    let ww_model = {
         let s = h.settings.read().unwrap_or_else(|e| e.into_inner());
-        (s.wake_threshold, s.wakeword_model.clone())
+        s.wakeword_model.clone()
     };
     // Дефолтные модели вакворда качаются из релиза (.jref — дикторонезависимый,
     // .rpw — обученный на голосе владельца); нет ни одной — движок не падает,
     // а ждёт: модель появится после обучения в приложении.
     let _ = crate::model_fetch::ensure_wakeword(&ww_model);
     let _ = crate::model_fetch::ensure_wakeword(wake::EMBEDDING_REFERENCE);
+    let mut first_wait = true;
     let mut det = loop {
-        match wake::create_engine(&stt, &ww_model, wake_threshold) {
+        // Настройки перечитываем на каждом круге: обучение в приложении
+        // (ww_apply) меняет имя модели и порог — подхватываем без перезапуска.
+        let (ww_name, threshold) = {
+            let s = h.settings.read().unwrap_or_else(|e| e.into_inner());
+            (s.wakeword_model.clone(), s.wake_threshold)
+        };
+        match wake::create_engine(&stt, &ww_name, threshold) {
             Ok(det) => break det,
             Err(e) => {
-                let message = format!(
-                    "Модель вакворда не готова: {e:#}. Открой «Wake Word» в приложении и запиши 3–5 сэмплов фразы — движок подхватит её сам."
-                );
-                eprintln!("⏳ {message}");
-                let _ = h.events.send(JarvisEvent::Error { message });
+                let hint = "Открой «Wake Word» в приложении и запиши 3–5 сэмплов фразы — движок подхватит модель сам.";
+                if first_wait {
+                    first_wait = false;
+                    eprintln!("⏳ Модель вакворда не готова: {e:#}. {hint}");
+                    let _ = h.events.send(JarvisEvent::Error {
+                        message: format!("Модель вакворда не готова: {e:#}. {hint}"),
+                    });
+                }
                 // Ждём: файл появится из обучения в приложении или докачки.
                 std::thread::sleep(Duration::from_secs(3));
-                let _ = crate::model_fetch::ensure_wakeword(wake::EMBEDDING_REFERENCE);
             }
         }
     };

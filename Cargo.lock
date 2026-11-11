@@ -6542,7 +6542,7 @@ dependencies = [
 [[package]]
 name = "rustpotter"
 version = "4.0.1"
-source = "git+https://github.com/pavel807/RustPotter#6bcdb172b0468fb55949751cdc8d63033989abcc"
+source = "git+https://github.com/pavel807/RustPotter#b89fa97ac6c4c30d7951ca1c0baf08c7c2e344c6"
 dependencies = [
  "candle-core",
  "candle-nn",

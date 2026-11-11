@@ -1,7 +1,7 @@
 //! Детектор wake word (RustPotter): создание, горячая подмена модели.
 
 use anyhow::{Context, Result, anyhow, bail};
-use rustpotter::{Rustpotter, RustpotterConfig, SampleFormat};
+use rustpotter::{FrameEmbedder, Rustpotter, RustpotterConfig, SampleFormat};
 use std::path::Path;
 
 pub const SAMPLE_RATE: usize = 16_000;
@@ -147,6 +147,26 @@ impl WakeEngine {
 
 /// Эталон метрического детектора — фиксированное имя в папке моделей.
 pub const EMBEDDING_REFERENCE: &str = "jarvis_model.jref";
+
+/// Счёт окна аудио против эталона метрического детектора (диагностика,
+/// пример wake_check): cos(x, позитив) − cos(x, негатив).
+/// None — эталона нет на диске.
+pub fn score_reference(
+    stt: &Arc<Mutex<crate::stt::Stt>>,
+    window: &[f32],
+) -> Option<f32> {
+    let path = crate::paths::models_dir().join(EMBEDDING_REFERENCE);
+    if !path.exists() {
+        return None;
+    }
+    let reference = rustpotter::EmbeddingReference::load_reference_only(&path).ok()?;
+    let mut e = FastConformerEmbedder::new(Arc::clone(stt)).embed(window).ok()?;
+    rustpotter::l2_normalize(&mut e);
+    Some(
+        e.iter().zip(&reference.positive).map(|(a, b)| a * b).sum::<f32>()
+            - e.iter().zip(&reference.negative).map(|(a, b)| a * b).sum::<f32>(),
+    )
+}
 
 /// Создать движок вакворда: метрический, если есть эталон .jref (любой
 /// голос), иначе DTW по .rpw (голос владельца).

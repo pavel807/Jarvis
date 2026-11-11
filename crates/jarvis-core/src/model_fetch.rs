@@ -58,8 +58,14 @@ pub fn ensure_wakeword(name: &str) -> Result<()> {
     let dir = dest.parent().context("нет родителя у пути модели")?;
     std::fs::create_dir_all(dir).with_context(|| format!("не создать {}", dir.display()))?;
     let url = format!("{}/{}", base_url(), name);
-    println!("📥 Загрузка модели вакворда: {url}");
+    // Ассет может быть не выложен (опциональная модель) — это не ошибка:
+    // движок умеет жить без него (метрический эталон или обучение в приложении).
     let expected = remote_size(&url);
+    if expected == 0 {
+        println!("ℹ️ В релизе нет «{name}» — пропускаю докачку");
+        return Ok(());
+    }
+    println!("📥 Загрузка модели вакворда: {url}");
     download(&url, &dest, expected, &mut |_| {})
         .with_context(|| format!("не удалось скачать {name}"))
 }
