@@ -785,6 +785,44 @@ fn tool_block_for(prompt: &str) -> String {
 /// маленькая: подробные инструкции её только путают. Поэтому — одна строка на
 /// инструмент, примеры аргументов вместо JSON-схем, и только те инструменты,
 /// которые нужны по интенту.
+/// Просьба о глубоком исследовании (мульти-хоп поисков): «исследуй»,
+/// «собери информацию», «проведи расследование». Список узкий намеренно:
+/// широкий зацепил бы обычные «найди», которые живут одним web_search.
+pub fn is_research_request(prompt: &str) -> bool {
+    let t = prompt.to_lowercase();
+    [
+        "исследуй",
+        "исследовать",
+        "проведи расследование",
+        "проведи исследование",
+        "глубокий разбор",
+        "глубоко разберись",
+        "собери информацию",
+        "собери всё про",
+        "разберись во",
+        "изучи вопрос",
+        "мульти-хоп",
+    ]
+    .iter()
+    .any(|k| t.contains(k))
+}
+
+#[cfg(test)]
+mod research_tests {
+    use super::*;
+
+    #[test]
+    fn research_phrases_match_and_normal_searches_do_not() {
+        assert!(is_research_request("исследуй рынок электрокаров 2026"));
+        assert!(is_research_request("собери информацию про FastConformer"));
+        assert!(is_research_request("Проведи расследование: куда пропал LLama 4"));
+        // Обычный поиск — одна выдача, не исследование.
+        assert!(!is_research_request("найди цену на бензин"));
+        assert!(!is_research_request("какая погода в Москве"));
+        assert!(!is_research_request("открой ютуб"));
+    }
+}
+
 pub fn action_prompt_for(prompt: &str) -> String {
     let os = crate::tools::os_name();
     let tools = tool_block_for(prompt);
