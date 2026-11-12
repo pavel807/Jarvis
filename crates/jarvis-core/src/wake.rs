@@ -128,24 +128,41 @@ pub const EMBEDDING_REFERENCE: &str = "jarvis_model.jref";
 /// Счёт окна аудио против эталона (диагностика, wake_check) — та же
 /// семантика, что у боевого детектора: центрмирование → max по позитивам
 /// минус сходство с негативом. None — эталона нет.
-pub fn score_reference(
-    stt: &Arc<Mutex<crate::stt::Stt>>,
-    window: &[f32],
-) -> Option<f32> {
+pub fn score_reference(stt: &Arc<Mutex<crate::stt::Stt>>, window: &[f32]) -> Option<f32> {
     let path = crate::paths::models_dir().join(EMBEDDING_REFERENCE);
     let reference = rustpotter::EmbeddingReference::load_reference_only(&path).ok()?;
-    let mut e = FastConformerEmbedder::new(Arc::clone(stt)).embed(window).ok()?;
+    let mut e = FastConformerEmbedder::new(Arc::clone(stt))
+        .embed(window)
+        .ok()?;
     rustpotter::l2_normalize(&mut e);
+    // Центрирование тем же фоновым средним, что и в детекторе.
     for (x, m) in e.iter_mut().zip(&reference.mean) {
         *x -= m;
     }
-    rustpotter::l2_normalize(&mut e);
-    let best = reference
+    // Guard вырожденного остатка — как в детекторе (см. MIN_RESIDUAL_NORM).
+    let residual: f32 = e.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if !residual.is_finite() || residual < rustpotter::MIN_RESIDUAL_NORM {
+        return Some(-1.0);
+    }
+    for x in e.iter_mut() {
+        *x /= residual;
+    }
+    let best_p = reference
         .positives
         .iter()
         .map(|p| e.iter().zip(p).map(|(a, b)| a * b).sum::<f32>())
         .fold(f32::NEG_INFINITY, f32::max);
-    Some(best - e.iter().zip(&reference.negative).map(|(a, b)| a * b).sum::<f32>())
+    let best_n = reference
+        .negatives
+        .iter()
+        .map(|n| e.iter().zip(n).map(|(a, b)| a * b).sum::<f32>())
+        .fold(f32::NEG_INFINITY, f32::max);
+    // Вес негативов заморожен в эталоне (reference.weight): бой и диагностика
+    // обязаны считать по ОДНОЙ шкале. Без веса счёт здесь систематически
+    // ниже боевого (best_p - best_n вместо best_p - w*best_n), а порог
+    // калибруется по hold-out именно здесь — то есть калибровали бы на одной
+    // шкале, а сравнивали в бою на другой: ложные срабатывания вслепую.
+    Some(best_p - reference.weight * best_n)
 }
 
 /// Создать движок вакворда: метрический, если есть эталон .jref (любой
@@ -153,7 +170,7 @@ pub fn score_reference(
 pub fn create_engine(
     stt: &Arc<Mutex<crate::stt::Stt>>,
     _rpw_name: &str,
-    _threshold: f32,
+    threshold_setting: f32,
 ) -> Result<WakeEngine> {
     let jref = crate::paths::models_dir().join(EMBEDDING_REFERENCE);
     if !jref.exists() {
@@ -166,13 +183,25 @@ pub fn create_engine(
     }
     let embedder = FastConformerEmbedder::new(Arc::clone(stt));
     let mut det =
-        rustpotter::EmbeddingDetector::new(embedder, rustpotter::EmbeddingConfig::default());
+        rustpotter::EmbeddingDetector::new(embedder, rustpotter::EmbeddingConfig::default())
+            .map_err(|e| anyhow::anyhow!("конфигурация wake-детектора: {e}"))?;
     det.load_reference(&jref)
         .map_err(|e| anyhow::anyhow!("эталон {}: {e}", jref.display()))?;
+    let calibrated = det.reference().map(|r| r.threshold).unwrap_or(f32::NAN);
+    // Порог метрического детектора калибруется при сборке эталона и лежит
+    // в самом .jref. Значение из настроек сюда НЕ подставляется: шкала
+    // счёта метрики не та же, что у DTW, и подстановка молча сломала бы
+    // калибровку. Если значения разошлись — говорим об этом явно.
+    if (threshold_setting - calibrated).abs() > f32::EPSILON {
+        eprintln!(
+            "⚠️ wake_threshold из настроек ({threshold_setting:.4}) не применяется: \
+             метрический детектор использует калиброванный порог эталона {calibrated:.4}. \
+             Подстрой порог пересборкой эталона (cargo run -p jarvis-core --example wake_enroll)."
+        );
+    }
     println!(
-        "🎯 Wake word: метрический детектор ({} — дикторонезависимый, порог {:.4})",
-        EMBEDDING_REFERENCE,
-        det.reference().map(|r| r.threshold).unwrap_or(f32::NAN)
+        "🎯 Wake word: метрический детектор ({} — дикторонезависимый, порог {calibrated:.4})",
+        EMBEDDING_REFERENCE
     );
     Ok(WakeEngine { det })
 }

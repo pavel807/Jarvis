@@ -3,7 +3,9 @@
 //! Позитивы — записи [jarvis] из train-каталога; негативы — [none].
 //! Запуск: JARVIS_HOME=~/.local/share/Jarvis cargo run -p jarvis-core --example wake_verify
 //!
-//! Критерии приёмки: счёт позитивов ≥ 0.75, негативов ≤ 0.3.
+//! Счёты считаются на БОЕВОЙ шкале (best_p − weight·best_n) — той же,
+//! что и в детекторе. Критерии приёмки: худший позитив выше порога,
+//! лучший негатив ниже порога с запасом.
 
 use anyhow::{Context, Result};
 
@@ -47,20 +49,29 @@ fn main() -> Result<()> {
         &jarvis_core::paths::models_dir(),
     )?));
     let (train_dir, _) = jarvis_core::wake_train::sample_dirs();
-    let threshold = rustpotter::EmbeddingReference::load_reference_only(
+    let reference = rustpotter::EmbeddingReference::load_reference_only(
         &jarvis_core::paths::models_dir().join(jarvis_core::wake::EMBEDDING_REFERENCE),
     )
-    .context("эталон .jref не загрузился — пересобери: cargo run -p jarvis-core --example wake_enroll")?
-    .threshold;
+    .context(
+        "эталон .jref не загрузился — пересобери: cargo run -p jarvis-core --example wake_enroll",
+    )?;
+    let threshold = reference.threshold;
 
     let mut pos_scores: Vec<(String, f32)> = Vec::new();
     let mut neg_scores: Vec<(String, f32)> = Vec::new();
     for entry in std::fs::read_dir(&train_dir)?.flatten() {
         let path = entry.path();
-        if path.extension().is_none_or(|e| !e.eq_ignore_ascii_case("wav")) {
+        if path
+            .extension()
+            .is_none_or(|e| !e.eq_ignore_ascii_case("wav"))
+        {
             continue;
         }
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let label = jarvis_core::tts::label_of_sample(&name);
         let window = read_window(&path)?;
         let Some(score) = jarvis_core::wake::score_reference(&stt, &window) else {
@@ -97,6 +108,14 @@ fn main() -> Result<()> {
 
     println!("=== Верификация wake word (порог эталона {threshold:.3}) ===");
     println!(
+        "эталон v{}: позитивов {}, негативов {}, вес негативов {}, фон: {}",
+        reference.version,
+        reference.positives_count,
+        reference.negatives_count,
+        reference.weight,
+        reference.mean_source
+    );
+    println!(
         "позитивы ({}): min {pmin:.3} / mean {pmean:.3} / max {pmax:.3}",
         pos_scores.len()
     );
@@ -120,16 +139,15 @@ fn main() -> Result<()> {
     // допускает снижение при min_pos < 0.85), негатив до порога — запас
     // минимум ×1.5 (штатно фонетически близкие слова дают 0.28-0.38).
     let margin = threshold - nmax;
-    let pass = fnr == 0
-        && fpr == 0
-        && pmin >= 0.7
-        && margin >= nmax.abs().max(0.1) * 0.5;
+    let pass = fnr == 0 && fpr == 0 && pmin >= 0.7 && margin >= nmax.abs().max(0.1) * 0.5;
     if pass {
         println!(
             "✅ ВЕРИФИКАЦИЯ ПРОЙДЕНА: позитивы ≥ {pmin:.3}, FNR/FPR = 0, запас негатива до порога {margin:.3}"
         );
     } else {
-        println!("❌ ВЕРИФИКАЦИЯ НЕ ПРОЙДЕНА: pmin {pmin:.3}, nmax {nmax:.3}, FNR {fnr}, FPR {fpr}, запас {margin:.3}");
+        println!(
+            "❌ ВЕРИФИКАЦИЯ НЕ ПРОЙДЕНА: pmin {pmin:.3}, nmax {nmax:.3}, FNR {fnr}, FPR {fpr}, запас {margin:.3}"
+        );
         std::process::exit(1);
     }
     Ok(())

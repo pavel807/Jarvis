@@ -9,9 +9,7 @@ use crate::events::{EventTx, JarvisEvent};
 use crate::paths;
 use crate::tts::list_wav_samples;
 use anyhow::{Context, Result, bail};
-use rustpotter::{
-    Rustpotter,
-};
+use rustpotter::Rustpotter;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,8 +19,6 @@ use std::time::{Duration, SystemTime};
 const RECORD_SILENCE_SECS: f32 = 0.7;
 const RECORD_RMS_THRESHOLD: f32 = 0.02;
 const TARGET_RATE: usize = 16_000;
-/// Значение mfcc_size, совпадающее с дефолтами rustpotter.
-
 /// Каталоги с сэмплами: (обучающие, проверочные).
 pub fn sample_dirs() -> (PathBuf, PathBuf) {
     (
@@ -326,10 +322,7 @@ pub fn record_sample(
 ///
 /// Это не нейросеть: сравниваются MFCC-признаки записей с потоком с микрофона
 /// (dynamic time warping). Нужно 3–8 сэмплов фразы, построение занимает секунды.
-pub fn build_reference_wakeword(
-    events: &EventTx,
-    cancel: &AtomicBool,
-) -> Result<PathBuf> {
+pub fn build_reference_wakeword(events: &EventTx, cancel: &AtomicBool) -> Result<PathBuf> {
     let (train_dir, _) = sample_dirs();
 
     // В эталон попадают только записи фразы: файлы с меткой
@@ -355,10 +348,17 @@ pub fn build_reference_wakeword(
         bail!("Отменено");
     }
 
-    println!("🧩 Построение метрической модели wake word из {} сэмплов...", samples.len());
+    println!(
+        "🧩 Построение метрической модели wake word из {} сэмплов...",
+        samples.len()
+    );
     let started = std::time::Instant::now();
     let out = build_reference_embedding(events, cancel, &samples)?;
-    println!("✅ Модель wake word готова за {:.1?}: {:?}", started.elapsed(), out);
+    println!(
+        "✅ Модель wake word готова за {:.1?}: {:?}",
+        started.elapsed(),
+        out
+    );
     Ok(out)
 }
 
@@ -382,15 +382,25 @@ fn synth_negatives(events: &EventTx) -> Result<Vec<Vec<f32>>> {
     // Фонетически близкие к «Джарвис» слова — обязательная часть набора:
     // именно они учат вычитание отсекать ложные срабатывания.
     for (i, text) in [
-        "сервис", "запись", "нравится", "привет", "музыка",
-        "джаз", "жарко", "завтрак", "джинсы", "сверстник",
-        "университет", "маркетинг",
+        "сервис",
+        "запись",
+        "нравится",
+        "привет",
+        "музыка",
+        "джаз",
+        "жарко",
+        "завтрак",
+        "джинсы",
+        "сверстник",
+        "университет",
+        "маркетинг",
     ]
     .into_iter()
     .enumerate()
     {
         let audio = engine.synthesize_with("ru_eduard", text, 1.0)?;
-        let mono = crate::audio::resample_audio(&audio, crate::tts_silero::SAMPLE_RATE as usize, 16_000);
+        let mono =
+            crate::audio::resample_audio(&audio, crate::tts_silero::SAMPLE_RATE as usize, 16_000);
         negatives.push(pad_window(&mono, window));
         let _ = i;
     }
@@ -423,12 +433,13 @@ pub fn build_reference_embedding(
             .context("FastConformer не загружен — метрический эталон не собрать")?,
     ));
     let embedder = crate::wake::FastConformerEmbedder::new(std::sync::Arc::clone(&stt));
-    let mut detector = rustpotter::EmbeddingDetector::new(embedder, Default::default());
+    let mut detector = rustpotter::EmbeddingDetector::new(embedder, Default::default())
+        .map_err(|e| anyhow::anyhow!("конфигурация wake-детектора: {e}"))?;
 
     let mut positives = Vec::new();
     for path in samples {
-        let mut reader = hound::WavReader::open(path)
-            .with_context(|| format!("не открыть {path:?}"))?;
+        let mut reader =
+            hound::WavReader::open(path).with_context(|| format!("не открыть {path:?}"))?;
         let spec = reader.spec();
         let raw: Vec<f32> = reader
             .samples::<i32>()
@@ -454,10 +465,7 @@ pub fn build_reference_embedding(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!(
         "✅ Метрический эталон готов: {:?} (позитивов {}, негативов {}, порог {:.4})",
-        out,
-        reference.positives_count,
-        reference.negatives_count,
-        reference.threshold
+        out, reference.positives_count, reference.negatives_count, reference.threshold
     );
     let _ = events.send(JarvisEvent::Log {
         message: format!(
@@ -557,11 +565,11 @@ mod voice_train_tests {
     #[test]
     fn phrase_overlap_full_reading() {
         // Читал ровно фразу — совпадение 1.0 независимо от пунктуации и регистра.
-        assert_eq!(phrase_overlap(VOICE_TRAINING_PHRASE, VOICE_TRAINING_PHRASE), 1.0);
         assert_eq!(
-            phrase_overlap("Привет, мир!", "привет   МИР!!!"),
+            phrase_overlap(VOICE_TRAINING_PHRASE, VOICE_TRAINING_PHRASE),
             1.0
         );
+        assert_eq!(phrase_overlap("Привет, мир!", "привет   МИР!!!"), 1.0);
     }
 
     #[test]
@@ -599,7 +607,10 @@ mod voice_train_tests {
             ("э", "экран"),
             ("ю", "юля"),
         ] {
-            assert!(t.contains(sample), "фонема «{phoneme}» потеряна: нет слова «{sample}»");
+            assert!(
+                t.contains(sample),
+                "фонема «{phoneme}» потеряна: нет слова «{sample}»"
+            );
         }
     }
 }

@@ -75,68 +75,225 @@ fn main() -> Result<()> {
     // --- Позитивы: «Джарвис» всеми дикторами Silero в трёх темпах ---
     // Чем шире покрытие тембров, тем выше шанс, что живой голос пользователя
     // ложится на ближайший эталон (счёт — максимум по позитивам).
-    // Детерминизм: генерация воспроизводима при пересборке эталона.
-    let mut rng_state: u64 = 0x4A_41_52_56_49_53; // "JARVIS"
-    let mut noise_sample = || {
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 7;
-        rng_state ^= rng_state << 17;
-        (rng_state % 20_000) as f32 / 20_000.0 - 0.5
-    };
-
-    let mut positives = Vec::new();
     let voices: &[&str] = &[
-        "ru_aigul", "ru_albina", "ru_alexandr", "ru_alfia", "ru_bogdan",
-        "ru_dmitriy", "ru_eduard", "ru_ekaterina", "ru_gamat", "ru_igor",
-        "ru_karina", "ru_kejilgan", "ru_kermen", "ru_marat", "ru_miyau",
+        "ru_aigul",
+        "ru_albina",
+        "ru_alexandr",
+        "ru_alfia",
+        "ru_bogdan",
+        "ru_dmitriy",
+        "ru_eduard",
+        "ru_ekaterina",
+        "ru_gamat",
+        "ru_igor",
+        "ru_karina",
+        "ru_kejilgan",
+        "ru_kermen",
+        "ru_marat",
+        "ru_miyau",
         // ru_sibday исключён: не-русское произношение «Джарвис» ломает
         // шаблон (скор 0.51) — это кураторство данных, а не порог.
-        "ru_nurgul", "ru_oksana", "ru_onaoy", "ru_ramilia", "ru_roman",
-        "ru_safarhuja", "ru_saida", "ru_vika", "ru_zara",
-        "ru_zhadyra", "ru_zhazira", "ru_zinaida",
+        "ru_nurgul",
+        "ru_oksana",
+        "ru_onaoy",
+        "ru_ramilia",
+        "ru_roman",
+        "ru_safarhuja",
+        "ru_saida",
+        "ru_vika",
+        "ru_zara",
+        "ru_zhadyra",
+        "ru_zhazira",
+        "ru_zinaida",
     ];
     let tempos = [0.95_f32, 1.0, 1.05];
-    const HOLD_OUT: usize = 4; // последних голосов — только верификация
-    let enrolled_voices = voices.len().saturating_sub(HOLD_OUT);
+    const HOLD_OUT: usize = 4; // последних кураторских голосов — верификация
     let mut skipped = 0;
-    for (vi, voice) in voices.iter().enumerate() {
+    // voice → его окна (до кураторства).
+    let mut per_voice: Vec<(&str, Vec<Vec<f32>>)> = Vec::new();
+    for voice in voices {
+        let mut windows = Vec::new();
         for (k, speed) in tempos.iter().enumerate() {
             let Ok(audio) = engine.synthesize_with(voice, "Джарвис", *speed) else {
                 skipped += 1;
                 continue;
             };
-            let window =
-                write_window(&train, &format!("[jarvis]_default_{voice}_{k}"), &audio)?;
+            let window = write_window(&train, &format!("[jarvis]_default_{voice}_{k}"), &audio)?;
+            windows.push(window);
+        }
+        if !windows.is_empty() {
+            per_voice.push((voice, windows));
+        }
+    }
+
+    // --- Кураторство: голос-аутсайдер (чьё «Джарвис» не похоже на
+    // остальные) портит LOO-зазор — такой голос не в эталон. Похожество
+    // голоса = max косинус его среднего (центрированного по словам) к
+    // средним остальных голосов.
+    let stt_probe = std::sync::Arc::new(std::sync::Mutex::new(jarvis_core::stt::Stt::load(
+        &jarvis_core::paths::models_dir(),
+    )?));
+    // Размерность эмбеддинга берём из энкодера: хардкод 512 молча обрезал
+    // бы средние через zip при любой другой модели (тихо, без ошибки).
+    let dims =
+        jarvis_core::wake::FastConformerEmbedder::new(std::sync::Arc::clone(&stt_probe)).dims();
+    let voice_means: Vec<Vec<f32>> = per_voice
+        .iter()
+        .map(|(_, windows)| {
+            let mut acc = vec![0_f32; dims];
+            for w in windows {
+                let mut e = jarvis_core::wake::FastConformerEmbedder::new(std::sync::Arc::clone(
+                    &stt_probe,
+                ))
+                .embed(w)
+                .expect("embed");
+                rustpotter::l2_normalize(&mut e);
+                for (a, x) in acc.iter_mut().zip(&e) {
+                    *a += x;
+                }
+            }
+            let n = windows.len() as f32;
+            for x in acc.iter_mut() {
+                *x /= n;
+            }
+            rustpotter::l2_normalize(&mut acc);
+            acc
+        })
+        .collect();
+    // Среднее направление слов-негативов для центрирования при кураторстве:
+    // слова синтезируем здесь же (те же, что пойдут в негативы).
+    let mut bg_mean = vec![0_f32; dims];
+    let bg_words = [
+        "сервис",
+        "запись",
+        "нравится",
+        "привет",
+        "музыка",
+        "джаз",
+        "джазовый",
+        "джазист",
+        "жарко",
+        "завтрак",
+        "джинсы",
+        "сверстник",
+        "университет",
+        "маркетинг",
+    ];
+    let mut bg_count = 0;
+    for text in bg_words {
+        let Ok(audio) = engine.synthesize_with("ru_eduard", text, 1.0) else {
+            continue;
+        };
+        let mono = jarvis_core::audio::resample_audio(&audio, 48_000, 16_000);
+        let mut w = vec![0_f32; 16_000 * 12 / 10];
+        let start = (w.len() - mono.len().min(w.len() / 2)) / 2;
+        for (i, s) in mono.iter().take(w.len() - start).enumerate() {
+            w[start + i] = *s;
+        }
+        let mut e =
+            jarvis_core::wake::FastConformerEmbedder::new(std::sync::Arc::clone(&stt_probe))
+                .embed(&w)
+                .expect("embed");
+        rustpotter::l2_normalize(&mut e);
+        for (a, x) in bg_mean.iter_mut().zip(&e) {
+            *a += x;
+        }
+        bg_count += 1;
+    }
+    if bg_count == 0 {
+        anyhow::bail!(
+            "ни одного фонового слова не синтезировалось — нечем центрировать эмбеддинги"
+        );
+    }
+    for x in bg_mean.iter_mut() {
+        *x /= bg_count as f32;
+    }
+    rustpotter::l2_normalize(&mut bg_mean);
+
+    let voice_sim = |i: usize| -> f32 {
+        let mut best = f32::NEG_INFINITY;
+        for (j, m) in voice_means.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            // Центрированные голосовые средние: убираем общий фон слов.
+            let mut a: Vec<f32> = voice_means[i]
+                .iter()
+                .zip(&bg_mean)
+                .map(|(x, m)| x - m)
+                .collect();
+            let mut b: Vec<f32> = m.iter().zip(&bg_mean).map(|(x, m)| x - m).collect();
+            rustpotter::l2_normalize(&mut a);
+            rustpotter::l2_normalize(&mut b);
+            best = best.max(a.iter().zip(&b).map(|(x, y)| x * y).sum::<f32>());
+        }
+        best
+    };
+    let sim_before: Vec<(String, f32)> = per_voice
+        .iter()
+        .enumerate()
+        .map(|(i, (v, _))| (v.to_string(), voice_sim(i)))
+        .collect();
+    for (v, sim) in &sim_before {
+        println!("🎙️ голос {v}: похожесть на остальные {sim:.3}");
+    }
+    const MIN_VOICE_SIM: f32 = 0.5;
+    let kept: Vec<usize> = (0..per_voice.len())
+        .filter(|&i| voice_sim(i) >= MIN_VOICE_SIM)
+        .collect();
+    let dropped: Vec<&str> = per_voice
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| voice_sim(*i) < MIN_VOICE_SIM)
+        .map(|(_, (v, _))| *v)
+        .collect();
+    if !dropped.is_empty() {
+        println!(
+            "🗑️ Голоса-аутсайдеры (похожесть < {MIN_VOICE_SIM}): {}",
+            dropped.join(", ")
+        );
+    }
+    assert!(
+        kept.len() >= 8,
+        "после кураторства осталось {} голосов — нужно ≥ 8",
+        kept.len()
+    );
+    let enrolled_count = kept.len().saturating_sub(HOLD_OUT);
+
+    let mut positives = Vec::new();
+    for (order, &vi) in kept.iter().enumerate() {
+        let windows = &per_voice[vi].1;
+        for window in windows {
             // Hold-out голоса идут в файлы для верификации, но НЕ в эталон:
             // их счёты — честная оценка на невиданных голосах.
-            if vi < enrolled_voices {
+            if order < enrolled_count {
                 positives.push(window.clone());
-                // Шумовая аугментация: бытовой фон ~26 дБ ниже речи —
-                // приближает эталон к живому микрофону с комнатой.
-                let noisy: Vec<f32> = window
-                    .iter()
-                    .map(|s| s + 0.05 * noise_sample())
-                    .collect();
-                let nw = write_window(
-                    &train,
-                    &format!("[jarvis]_default_{voice}_{k}_noise"),
-                    &noisy,
-                )?;
-                positives.push(nw);
             }
         }
     }
     println!(
-        "🎙️ Позитивов в эталоне: {} (hold-out голосов: {HOLD_OUT}, пропущено: {skipped})",
-        positives.len()
+        "🎙️ Позитивов в эталоне: {} (голосов {}, hold-out голосов: {HOLD_OUT}, пропущено: {skipped})",
+        positives.len(),
+        enrolled_count,
     );
 
     // --- Негативы: похожие по звучанию слова, шум, тишина ---
     let mut negatives = Vec::new();
     for (i, text) in [
-        "сервис", "запись", "нравится", "привет", "музыка",
-        "джаз", "джазовый", "джазист", "жарко", "завтрак",
-        "джинсы", "сверстник", "университет", "маркетинг",
+        "сервис",
+        "запись",
+        "нравится",
+        "привет",
+        "музыка",
+        "джаз",
+        "джазовый",
+        "джазист",
+        "жарко",
+        "завтрак",
+        "джинсы",
+        "сверстник",
+        "университет",
+        "маркетинг",
     ]
     .into_iter()
     .enumerate()
@@ -145,11 +302,8 @@ fn main() -> Result<()> {
         let window = write_window(&train, &format!("[none]_neg_{i}_{text}"), &audio)?;
         negatives.push(window);
     }
-    negatives.push(vec![0_f32; WINDOW_SAMPLES]); // тишина
-    let noise: Vec<f32> = (0..WINDOW_SAMPLES)
-        .map(|i| 0.03 * ((i as f32 * 0.037).sin() + (i as f32 * 0.011).cos()))
-        .collect(); // бытовой гул
-    negatives.push(noise);
+    // Тишина и гул не добавляем: нулевой/низкочастотный эмбеддинг после
+    // центрирования даёт фантомные направления (см. embedding.rs guard).
 
     // --- Детектор: настоящий энкодер FastConformer ---
     let stt = std::sync::Arc::new(std::sync::Mutex::new(jarvis_core::stt::Stt::load(
@@ -158,7 +312,19 @@ fn main() -> Result<()> {
     let embedder = jarvis_core::wake::FastConformerEmbedder::new(std::sync::Arc::clone(&stt));
     println!("🧠 Размерность эмбеддинга: {}", embedder.dims());
 
-    let mut detector = EmbeddingDetector::new(embedder, EmbeddingConfig::default());
+    // negative_weight 0.3: при w=1.0 жёсткие негативы подавляют и
+    // позитивы (ближайший негатив «сервис» лежит в ~0.4 от любого
+    // «Джарвиса» — фонетическое родство), мин-скор позитивов падал до
+    // 0.58. 0.3 держит позитивы ≥ 0.78 и негативы ≤ 0.3. Вес замораживается
+    // в эталоне — боевой счёт использует тот же.
+    let mut detector = EmbeddingDetector::new(
+        embedder,
+        EmbeddingConfig {
+            negative_weight: 0.3,
+            ..EmbeddingConfig::default()
+        },
+    )
+    .expect("конфиг детектора");
 
     // Замер цены окна в установившемся режиме — должен укладываться в hop.
     {
@@ -170,21 +336,32 @@ fn main() -> Result<()> {
             println!("⏱ Эмбеддинг окна 1.2 с ({}): {:.0?}", i, started.elapsed());
         }
         // Раскладка цены: mel vs энкодер vs декодер (через полный transcribe).
-        if let Ok(t) = stt.lock().unwrap_or_else(|e| e.into_inner()).model().transcribe(&positives[0]) {
-            println!("⏱ transcribe 1.2 с: mel {:.0} мс, encoder {:.0} мс, decode {:.0} мс",
-                t.mel_ms, t.encoder_ms, t.decode_ms);
+        if let Ok(t) = stt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .model()
+            .transcribe(&positives[0])
+        {
+            println!(
+                "⏱ transcribe 1.2 с: mel {:.0} мс, encoder {:.0} мс, decode {:.0} мс",
+                t.mel_ms, t.encoder_ms, t.decode_ms
+            );
         }
     }
 
     let reference = detector
         .enroll(&positives, &negatives)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Сохраняем ДО самопроверки: score_reference читает эталон с диска.
+    let out = jarvis_core::paths::models_dir().join(jarvis_core::wake::EMBEDDING_REFERENCE);
+    detector
+        .save_reference(&out)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .with_context(|| format!("сохранение {}", out.display()))?;
 
     // Самопроверка: score_reference — та же семантика, что у боевого
     // детектора (центрирование + max по позитивам).
-    let mut score = |w: &[f32]| -> f32 {
-        jarvis_core::wake::score_reference(&stt, w).expect("score")
-    };
+    let score = |w: &[f32]| -> f32 { jarvis_core::wake::score_reference(&stt, w).expect("score") };
     println!("— счёты позитивов:");
     let mut min_pos = f32::MAX;
     for (i, p) in positives.iter().enumerate() {
@@ -204,12 +381,6 @@ fn main() -> Result<()> {
         stored = reference.threshold
     );
 
-    let out = jarvis_core::paths::models_dir().join(jarvis_core::wake::EMBEDDING_REFERENCE);
-    detector
-        .save_reference(&out)
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .with_context(|| format!("сохранение {}", out.display()))?;
-
     // Калибровка порога по hold-out голосам: само-совпадение записей
     // регистрации завышает min_pos (они внутри эталона), из-за чего порог
     // оказывался выше счёта живого голоса. Считаем невиданные голоса
@@ -217,14 +388,18 @@ fn main() -> Result<()> {
     let mut holdout_scores: Vec<f32> = Vec::new();
     for entry in std::fs::read_dir(&train)?.flatten() {
         let path = entry.path();
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         if !name.ends_with(".wav") || !name.contains("[jarvis]") {
             continue;
         }
-        // Hold-out — файлы голосов из хвоста списка (не участвовали).
-        let enrolled = voices[..enrolled_voices]
+        // Hold-out — файлы голосов из хвоста кураторского списка.
+        let enrolled = kept[..enrolled_count]
             .iter()
-            .any(|v| name.contains(v));
+            .any(|&vi| name.contains(per_voice[vi].0));
         if enrolled {
             continue;
         }
@@ -232,14 +407,19 @@ fn main() -> Result<()> {
             holdout_scores.push(score);
         }
     }
-    if let Some(&worst_holdout) = holdout_scores.iter().min_by(|a, b| a.partial_cmp(b).unwrap()) {
+    if let Some(&worst_holdout) = holdout_scores
+        .iter()
+        .min_by(|a, b| a.partial_cmp(b).unwrap())
+    {
         let mut reference = rustpotter::EmbeddingReference::load_reference_only(&out)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         // Порог: существенно ниже худшего невиданного TTS-голоса — живой
         // голос в эмбеддинг-пространстве сидит ниже синтетики, и запас
         // должен покрывать этот сдвиг. Негативы (≤ 0.34) остаются далеко
         // снизу; шумовые аугментации позитивов слегка проседают — учтено.
-        let calibrated = (worst_holdout - 0.25).max(0.0).max(reference.threshold * 0.3);
+        let calibrated = (worst_holdout - 0.25)
+            .max(0.0)
+            .max(reference.threshold * 0.3);
         if (calibrated - reference.threshold).abs() > f32::EPSILON {
             reference.set_threshold(calibrated);
             println!(
