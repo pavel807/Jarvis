@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { store, toast, go } from "../store.svelte";
+  import { store, toast, go, settings, patchSettings } from "../store.svelte";
   import AppIcon from "../components/AppIcon.svelte";
 
   interface Sample {
@@ -21,6 +21,43 @@
   let testFile = $state("");
   let testScore = $state<number | null>(null);
   let notice = $state("");
+  interface PhraseReport {
+    phrase: string;
+    total: number;
+    detected: number;
+    worst_score: number;
+    window_ms: number;
+    samples_dir: string;
+  }
+
+  let phraseBusy = $state(false);
+  let phraseReport = $state<PhraseReport | null>(null);
+
+  /**
+   * Сгенерировать фразу-активацию разными дикторами и проверить, что
+   * модель её слышит: сколько вариантов произнесения распознано буквально.
+   */
+  async function generatePhrase() {
+    const phrase = (settings.wake_word ?? "").trim();
+    if (!phrase) {
+      toast("Впишите фразу-активацию", "err");
+      return;
+    }
+    phraseBusy = true;
+    try {
+      const report = await invoke<PhraseReport>("wake_phrase_generate", { phrase });
+      phraseReport = report;
+      await patchSettings({ wake_window_ms: report.window_ms });
+      toast(
+        `Фраза услышана в ${report.detected} из ${report.total} вариантов`,
+        report.detected === report.total ? "ok" : "err",
+      );
+    } catch (e) {
+      toast(`Не удалось проверить фразу: ${e}`, "err");
+    } finally {
+      phraseBusy = false;
+    }
+  }
 
   const isNoise = (s: Sample) => s.path.includes("none");
   const phraseSamples = $derived(train.filter((s) => !isNoise(s)));
@@ -136,6 +173,38 @@
         или не откликается — запишите несколько образцов своим голосом.
       </p>
     </div>
+  </div>
+
+  <div class="card card--outline" style="margin-bottom: 12px">
+    <div class="card__title">Активационная фраза</div>
+    <p class="card__hint">
+      Любая фраза: «Джарвис», «Компьютер», «Найджер веса». Детектор слушает
+      ASR-модель и срабатывает, когда она услышала фразу буквально, — голос
+      значения не имеет. Фраза применяется после перезапуска движка.
+    </p>
+    <label class="api-field">
+      <span class="api-field__label">Фраза-активация</span>
+      <input
+        class="input"
+        type="text"
+        value={settings.wake_word}
+        placeholder="Джарвис"
+        onchange={(e) => void patchSettings({ wake_word: e.currentTarget.value })}
+      />
+    </label>
+    <button class="btn btn--primary btn--block" disabled={phraseBusy} onclick={generatePhrase}>
+      {#if phraseBusy}
+        <span class="spinner"></span>
+      {/if}
+      {phraseBusy ? "Синтезирую…" : "Сгенерировать и проверить фразу"}
+    </button>
+    {#if phraseReport}
+      <p class="card__hint">
+        Услышано {phraseReport.detected} из {phraseReport.total} вариантов
+        (худший счёт {phraseReport.worst_score.toFixed(3)}), окно детектора —
+        {phraseReport.window_ms} мс.
+      </p>
+    {/if}
   </div>
 
   <div class="grid-2">

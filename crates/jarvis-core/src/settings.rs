@@ -35,6 +35,9 @@ pub struct Settings {
     pub wake_detector: String,
     /// Слово-активация для CTC-детектора (в любом регистре).
     pub wake_word: String,
+    /// Длина окна CTC-детектора, мс: окно должно накрывать фразу целиком.
+    /// Подбирается автоматически при генерации фразы.
+    pub wake_window_ms: usize,
 
     // --- STT (FastConformer) ---
     /// Декодер ASR: "rnnt" — транзьюсер жадно (по умолчанию, точнее),
@@ -152,6 +155,7 @@ impl Default for Settings {
             wakeword_model: "jarvis_model_2.rpw".to_string(),
             wake_detector: "ctc".to_string(),
             wake_word: "Джарвис".to_string(),
+            wake_window_ms: 1200,
             asr_decoder: "rnnt".to_string(),
             asr_beam_width: 8,
             asr_dict: true,

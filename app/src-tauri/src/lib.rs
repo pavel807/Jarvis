@@ -557,6 +557,14 @@ fn get_settings(shared: State<'_, Arc<Shared>>) -> Settings {
 fn save_settings(shared: State<'_, Arc<Shared>>, settings: Settings) -> Result<(), String> {
     let voice = settings.tts_voice.clone();
     let voice_changed = tts::current_voice() != voice;
+    // Смена фразы-активации, режима детектора или длины окна: детектор
+    // пересобирается на ходу, не дожидаясь перезапуска движка.
+    let wake_changed = {
+        let cur = shared.settings.read().unwrap_or_else(|e| e.into_inner());
+        cur.wake_word != settings.wake_word
+            || cur.wake_detector != settings.wake_detector
+            || cur.wake_window_ms != settings.wake_window_ms
+    };
     settings
         .save(&paths::settings_file())
         .map_err(|e| e.to_string())?;
@@ -565,6 +573,9 @@ fn save_settings(shared: State<'_, Arc<Shared>>, settings: Settings) -> Result<(
 
     if voice_changed {
         tts::set_voice(&shared.shared_tts, &shared.tts_failed, &voice);
+    }
+    if wake_changed {
+        shared.wakeword_reload.store(true, Ordering::SeqCst);
     }
     Ok(())
 }
@@ -1004,6 +1015,18 @@ fn ww_delete(path: String, shared: State<'_, Arc<Shared>>) -> Result<(), String>
         .speaker_invalidate
         .store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
+}
+
+// ---------- Активационная фраза ----------
+
+/// Синтезировать фразу разными дикторами Silero и проверить, слышит ли её
+/// модель: сколько вариантов произнесения распознано буквально.
+#[tauri::command]
+fn wake_phrase_generate(phrase: String) -> Result<jarvis_core::wake_phrase::PhraseReport, String> {
+    // Отдельный экземпляр ASR: веса в mmap, второй экземпляр дёшев.
+    let stt = jarvis_core::stt::Stt::load(&paths::models_dir()).map_err(|e| e.to_string())?;
+    let stt = std::sync::Arc::new(std::sync::Mutex::new(stt));
+    jarvis_core::wake_phrase::generate_and_check(&stt, &phrase).map_err(|e| format!("{e:#}"))
 }
 
 // ---------- Диктант для профиля голоса ----------
@@ -1468,6 +1491,7 @@ pub fn run() {
             ww_build,
             ww_apply,
             ww_test,
+            wake_phrase_generate,
         ])
         .run(tauri::generate_context!())
         .expect("Не удалось запустить Jarvis");

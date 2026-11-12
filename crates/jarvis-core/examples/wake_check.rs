@@ -18,10 +18,11 @@ fn main() -> Result<()> {
         .map(|s| s.wakeword_model)
         .unwrap_or_default();
 
-    let (mode, word) = jarvis_core::settings::Settings::load(&jarvis_core::paths::settings_file())
-        .map(|s| (s.wake_detector, s.wake_word))
-        .unwrap_or_else(|_| ("ctc".to_string(), "Джарвис".to_string()));
-    jarvis_core::wake::create_engine(&stt, &ww, threshold, &mode, &word)?;
+    let (mode, word, window_ms) =
+        jarvis_core::settings::Settings::load(&jarvis_core::paths::settings_file())
+            .map(|s| (s.wake_detector, s.wake_word, s.wake_window_ms))
+            .unwrap_or_else(|_| ("ctc".to_string(), "Джарвис".to_string(), 1200));
+    jarvis_core::wake::create_engine(&stt, &ww, threshold, &mode, &word, window_ms)?;
     println!("✅ Движок wake word создан");
 
     // Эталонные записи из train-каталога: позитивы должны давать счёт выше

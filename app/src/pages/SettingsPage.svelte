@@ -17,6 +17,7 @@
     { key: "ai", title: "Модель" },
     { key: "general", title: "Общие" },
     { key: "mic", title: "Микрофон" },
+    { key: "telegram", title: "Telegram" },
     { key: "system", title: "Система" },
 ] as const;
 
@@ -622,6 +623,44 @@
   </section>
 
   <!-- Система -->
+  <section class="settings-section" data-section="telegram" bind:this={sectionEls.telegram}>
+    <h2 class="section-title">Telegram</h2>
+    <div class="card card--flush">
+      {#if hit("телеграм", "telegram", "бот", "чат", "канал")}
+        <div class="row-item">
+          <span class="row-item__text">
+            <span class="row-item__title">Канал в Telegram</span>
+            <span class="row-item__hint">
+              Токен бота от BotFather и id чатов через запятую. Пусто — канал выключен.
+            </span>
+          </span>
+        </div>
+        <div class="api-fields">
+          <label class="api-field">
+            <span class="api-field__label">Токен бота</span>
+            <input
+              class="input"
+              type="password"
+              value={settings.telegram_bot_token}
+              placeholder="123456789:AAH..."
+              onchange={(e) => void patchSettings({ telegram_bot_token: e.currentTarget.value })}
+            />
+          </label>
+          <label class="api-field">
+            <span class="api-field__label">Чаты</span>
+            <input
+              class="input"
+              type="text"
+              value={settings.telegram_chat_ids}
+              placeholder="123456789, -1001234567890"
+              onchange={(e) => void patchSettings({ telegram_chat_ids: e.currentTarget.value })}
+            />
+          </label>
+        </div>
+      {/if}
+    </div>
+  </section>
+
   <section class="settings-section" data-section="system" bind:this={sectionEls.system}>
     <h2 class="section-title">Система</h2>
     {#if autostartSupported}

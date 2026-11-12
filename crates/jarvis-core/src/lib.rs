@@ -54,6 +54,7 @@ pub mod tts_silero;
 pub mod auto;
 pub mod wake;
 pub mod wake_ctc;
+pub mod wake_phrase;
 pub mod wake_train;
 pub mod weather;
 pub mod web;

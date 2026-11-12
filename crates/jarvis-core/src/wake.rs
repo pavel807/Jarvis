@@ -211,6 +211,7 @@ pub fn create_engine(
     threshold_setting: f32,
     mode: &str,
     word: &str,
+    window_ms: usize,
 ) -> Result<WakeEngine> {
     // CTC-детектор: эталон — слово текстом, поэтому файл .jref не нужен
     // и новое активационное слово не требует пересборки модели.
@@ -219,11 +220,12 @@ pub fn create_engine(
         if w.is_empty() {
             bail!("Пустое слово-активация: задайте wake_word в настройках");
         }
-        let engine = crate::wake_ctc::CtcWakeEngine::new(
-            Arc::clone(stt),
-            &w,
-            crate::wake_ctc::CtcConfig::default(),
-        );
+        let mut config = crate::wake_ctc::CtcConfig::default();
+        // Окно должно накрывать фразу целиком: короткая фраза помещается
+        // в стандартное 1.2 с, длинная — требует более широкого окна.
+        config.window_ms = window_ms.max(config.window_ms);
+        let engine =
+            crate::wake_ctc::CtcWakeEngine::new(Arc::clone(stt), &w, config);
         println!("🎯 Wake word: CTC-детектор, слово «{w}» (эталон не нужен)");
         return Ok(WakeEngine::Ctc(engine));
     }

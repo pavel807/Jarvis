@@ -415,16 +415,17 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     let mut det = loop {
         // Настройки перечитываем на каждом круге: обучение в приложении
         // (ww_apply) меняет имя модели и порог — подхватываем без перезапуска.
-        let (ww_name, threshold, mode, word) = {
+        let (ww_name, threshold, mode, word, window_ms) = {
             let s = h.settings.read().unwrap_or_else(|e| e.into_inner());
             (
                 s.wakeword_model.clone(),
                 s.wake_threshold,
                 s.wake_detector.clone(),
                 s.wake_word.clone(),
+                s.wake_window_ms,
             )
         };
-        match wake::create_engine(&stt, &ww_name, threshold, &mode, &word) {
+        match wake::create_engine(&stt, &ww_name, threshold, &mode, &word, window_ms) {
             Ok(det) => break det,
             Err(e) => {
                 let text = format!("{e:#}");
@@ -524,6 +525,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                 snap.wake_threshold,
                 &snap.wake_detector,
                 &snap.wake_word,
+                snap.wake_window_ms,
             ) {
                 Ok(d) => {
                     det = d;

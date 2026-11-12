@@ -39,6 +39,13 @@ export interface Settings {
   // Wake word
   wake_threshold: number;
   wakeword_model: string;
+  /** Детектор wake word: "ctc" — по фразе (любая, дикторонезависимо),
+   *  "metric" — по эталону .jref. */
+  wake_detector: string;
+  /** Фраза-активация для CTC-детектора. */
+  wake_word: string;
+  /** Длина окна детектора, мс: должна накрывать фразу целиком. */
+  wake_window_ms: number;
   // Ответы
   llm_enabled: boolean;
   /** Бэкенд LLM: "uzu" (Metal, модели каталога Mirai) или "candle". */
@@ -63,6 +70,11 @@ export interface Settings {
   speaker_filter: boolean;
   /** Порог косинусного сходства с голосовым профилем владельца. */
   speaker_threshold: number;
+  // Telegram
+  /** Токен бота (BotFather). Пусто — канал не запускается. */
+  telegram_bot_token: string;
+  /** Чаты: id через запятую (группа — с минусом). */
+  telegram_chat_ids: string;
 
   // --- Облачные модели (OpenAI-совместимый API) ---
   /** Мастер первого запуска пройден (иначе показывается онбординг). */
@@ -261,6 +273,9 @@ export const settings = $state<Settings>({
   followup_window_secs: 8,
   wake_threshold: 0.6,
   wakeword_model: "jarvis_model_2.rpw",
+  wake_detector: "ctc",
+  wake_word: "Джарвис",
+  wake_window_ms: 1200,
   llm_enabled: true,
   llm_backend: "uzu",
   llm_model: "qwen3.5-2b-mirai-m",
@@ -275,6 +290,8 @@ export const settings = $state<Settings>({
   topic_memory: true,
   speaker_filter: true,
   speaker_threshold: 0.6,
+  telegram_bot_token: "",
+  telegram_chat_ids: "",
   setup_done: false,
   api_preset: "yandex",
   api_base_url: "https://llm.api.cloud.yandex.net/v1",
