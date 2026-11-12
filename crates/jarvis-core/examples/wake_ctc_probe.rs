@@ -48,6 +48,9 @@ fn main() -> Result<()> {
         &jarvis_core::paths::models_dir(),
     )?));
 
+    // Переиспользуемые буферы декода: в горячем пути аллокаций нет.
+    let mut scratch = jarvis_core::wake_ctc::CtcScratch::default();
+
     let target = jarvis_core::wake_ctc::encode_word(&stt, &word)
         .with_context(|| format!("не закодировать слово «{word}»"))?;
     let pieces: Vec<String> = {
@@ -129,21 +132,22 @@ fn main() -> Result<()> {
                 for (i, s) in mono.iter().take(window_len - start).enumerate() {
                     w[start + i] = *s;
                 }
-                let Some(post) = jarvis_core::wake_ctc::ctc_log_posteriors(&stt, &w) else {
+                if jarvis_core::wake_ctc::ctc_frames(&stt, &w, &mut scratch).is_none() {
                     continue;
-                };
+                }
                 total += 1;
-                let m = jarvis_core::wake_ctc::match_word_text(&stt, &post, &word);
+                let m = jarvis_core::wake_ctc::match_word_text(&stt, &mut scratch, &word);
                 match m {
                     Some(m) => {
                         hits += 1;
                         worst = worst.min(m.score);
                     }
                     None => {
-                        let stream = jarvis_core::wake_ctc::greedy_stream(&post);
+                        jarvis_core::wake_ctc::greedy_stream(&scratch.frames, &mut scratch.stream);
                         let pieces: Vec<String> = {
                             let guard = stt.lock().unwrap();
-                            stream
+                            scratch
+                                .stream
                                 .iter()
                                 .map(|(id, _, _)| {
                                     guard
@@ -183,17 +187,17 @@ fn main() -> Result<()> {
             .to_string();
         let label = jarvis_core::tts::label_of_sample(&name);
         let window = read_window(&path)?;
-        let Some(post) = jarvis_core::wake_ctc::ctc_log_posteriors(&stt, &window) else {
+        if jarvis_core::wake_ctc::ctc_frames(&stt, &window, &mut scratch).is_none() {
             eprintln!("⚠️ {name}: постеры не посчитались");
             continue;
-        };
-        let m = jarvis_core::wake_ctc::match_word_text(&stt, &post, &word);
+        }
+        let m = jarvis_core::wake_ctc::match_word_text(&stt, &mut scratch, &word);
         let score = m.as_ref().map(|m| m.score).unwrap_or(f32::NEG_INFINITY);
         if samples_printed < 3 {
-            let stream = jarvis_core::wake_ctc::greedy_stream(&post);
+            jarvis_core::wake_ctc::greedy_stream(&scratch.frames, &mut scratch.stream);
             let decoded: String = {
                 let guard = stt.lock().unwrap();
-                let ids: Vec<usize> = stream.iter().map(|(id, _, _)| *id).collect();
+                let ids: Vec<usize> = scratch.stream.iter().map(|(id, _, _)| *id).collect();
                 guard.model().tokenizer.decode(&ids)
             };
             println!(
@@ -211,15 +215,15 @@ fn main() -> Result<()> {
 
     // Шумовые случаи: считаем отдельно от корпуса.
     for (title, w) in &noise_cases {
-        let Some(post) = jarvis_core::wake_ctc::ctc_log_posteriors(&stt, w) else {
+        if jarvis_core::wake_ctc::ctc_frames(&stt, w, &mut scratch).is_none() {
             eprintln!("⚠️ {title}: постеры не посчитались");
             continue;
-        };
-        let m = jarvis_core::wake_ctc::match_word_text(&stt, &post, &word);
-        let stream = jarvis_core::wake_ctc::greedy_stream(&post);
+        }
+        let m = jarvis_core::wake_ctc::match_word_text(&stt, &mut scratch, &word);
+        jarvis_core::wake_ctc::greedy_stream(&scratch.frames, &mut scratch.stream);
         let decoded: String = {
             let guard = stt.lock().unwrap();
-            let ids: Vec<usize> = stream.iter().map(|(id, _, _)| *id).collect();
+            let ids: Vec<usize> = scratch.stream.iter().map(|(id, _, _)| *id).collect();
             guard.model().tokenizer.decode(&ids)
         };
         println!(

@@ -1,45 +1,74 @@
-//! Wake word по CTC-постерам FastConformer: эталон — **текст**, а не облако аудио.
+//! Wake word по CTC-постерам FastConformer: эталон — **слово (или фраза) текстом**,
+//! а не облако аудио.
 //!
 //! Метрический детектор (`wake.rs`) сравнивает окно с облаком эмбеддингов,
 //! набранным из синтетических голосов. Следствия: новое активационное слово
 //! требует синтеза дикторов и записи сэмплов, а представление (mean-pool
 //! кадров) теряет порядок звуков — «Джарвис» и «даже» сближаются.
 //!
-//! Здесь эталон — слово текстом. CTC-постеры кадров фонетичны: у разных
+//! Здесь эталон — фраза текстом. CTC-постеры кадров фонетичны: у разных
 //! дикторов они сходятся к одному и тому же распределению по токенам,
-//! поэтому совпадение не зависит от тембра. Слово задаётся текстом в
-//! рантайме — любое активационное слово, без переобучения.
+//! поэтому совпадение не зависит от тембра. Фраза задаётся текстом в
+//! рантайме — любая, без переобучения.
 //!
 //! Сопоставление идёт по ТЕКСТУ декода, а не по id токенов: модель
 //! сегментирует услышанное слово своими кусками («компьютер» →
 //! `▁ком|п|ью|тер`), а текстовый токенизатор — своими
 //! (`▁Ко|м|п|ью|тер`). Сравнение по тексту переживает любую сегментацию.
+//!
+//! Горячий путь (окно раз в ~160 мс) почти не аллоцирует:
+//! - `log_softmax` и `argmax` считаются на стороне модели (`candle-nn`), в
+//!   Rust приходит только строка argmax-токенов и их лог-постеры — вместо
+//!   матрицы «кадры × словарь»;
+//! - переиспользуются буферы [`CtcScratch`]: поток декода, текст, карта
+//!   символов и список id для декодирования;
+//! - нормализация кусков идёт без промежуточных `String`.
 
 use crate::stt::Stt;
 use std::sync::{Arc, Mutex};
 
-/// Лог-постеры CTC по кадрам окна: `frames × vocab`, раскладка построчно.
+/// Что CTC услышала в окне: argmax-токен каждого кадра и его лог-постер.
 ///
-/// `blank` — последний индекс в словаре (CTC-blank в NeMo).
-pub struct CtcPosteriors {
+/// Полная матрица постеров (кадры × словарь) не нужна: для решения хватает
+/// argmax и его вероятности, а она считается на стороне модели.
+#[derive(Default, Clone)]
+pub struct CtcFrames {
+    /// Число кадров.
     pub frames: usize,
+    /// Размер словаря вместе с blank.
     pub vocab: usize,
+    /// blank — последний индекс словаря (CTC-blank в NeMo).
     pub blank: usize,
-    /// log-softmax по каждому кадру, построчно: `data[f * vocab + v]`.
-    pub data: Vec<f32>,
+    /// argmax-токен кадра.
+    pub ids: Vec<usize>,
+    /// лог-постер argmax-токена кадра.
+    pub logp: Vec<f32>,
 }
 
-impl CtcPosteriors {
-    /// Лог-постер кадра `f` для токена `v`.
-    pub fn logp(&self, f: usize, v: usize) -> f32 {
-        self.data[f * self.vocab + v]
-    }
+/// Буферы, переиспользуемые между окнами: в горячем пути аллокаций нет.
+#[derive(Default)]
+pub struct CtcScratch {
+    /// Результат декода模型: argmax-токены кадров.
+    pub frames: CtcFrames,
+    /// Поток greedy-декода: (токен, лог-постер, кадр).
+    pub stream: Vec<(usize, f32, usize)>,
+    /// Нормализованный текст декода.
+    pub text: String,
+    /// Карта «символ → (кадр, лог-постер)».
+    pub chars: Vec<(usize, f32)>,
+    /// id для декодирования текста.
+    pub decode_ids: Vec<usize>,
 }
 
-/// Посчитать лог-постеры CTC для окна 16 кГц mono.
+/// Посчитать argmax-токены и их лог-постеры для окна 16 кГц mono.
 ///
-/// None — модель не отдала постеры (ошибка forward или пустой вход).
-pub fn ctc_log_posteriors(stt: &Arc<Mutex<Stt>>, window: &[f32]) -> Option<CtcPosteriors> {
+/// None — модель не отдала логиты (ошибка forward или пустой вход).
+pub fn ctc_frames(
+    stt: &Arc<Mutex<Stt>>,
+    window: &[f32],
+    scratch: &mut CtcScratch,
+) -> Option<()> {
+    use candle_core::D;
     let guard = stt.lock().ok()?;
     let model = guard.model();
     let (mel, length) = model.frontend.compute(window, &model.device).ok()?;
@@ -47,57 +76,55 @@ pub fn ctc_log_posteriors(stt: &Arc<Mutex<Stt>>, window: &[f32]) -> Option<CtcPo
     let (t, _d) = (enc.dim(1).ok()?, enc.dim(2).ok()?);
     let logits = model.ctc_head.logits(&enc).ok()?;
     let (bt, vocab) = (logits.dim(1).ok()?, logits.dim(2).ok()?);
-    let flat: Vec<f32> = logits.reshape((bt * vocab,)).ok()?.to_vec1::<f32>().ok()?;
-    let frames = t_valid.min(t).min(bt);
-    let blank = vocab - 1;
-    // log_softmax по каждому кадру — вручную, чтобы не зависеть от
-    // поведения log_softmax на 3D-тензоре в разных бэкендах.
-    let mut data = Vec::with_capacity(frames * vocab);
-    for f in 0..frames {
-        let row = &flat[f * vocab..(f + 1) * vocab];
-        let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let sum: f32 = row.iter().map(|v| (v - max).exp()).sum();
-        let lse = max + sum.ln();
-        for &v in row {
-            data.push(v - lse);
-        }
-    }
-    Some(CtcPosteriors {
-        frames,
-        vocab,
-        blank,
-        data,
-    })
+    // log-softmax и argmax — на стороне модели: в Rust тянулась бы вся
+    // матрица «кадры × словарь» (сотни килобайт на каждое окно).
+    let post = candle_nn::ops::log_softmax(&logits, D::Minus1).ok()?;
+    let values = post.max(D::Minus1).ok()?;
+    let indices = post.argmax(D::Minus1).ok()?;
+    let logp: Vec<f32> = values.reshape((bt,)).ok()?.to_vec1::<f32>().ok()?;
+    let ids: Vec<u32> = indices.reshape((bt,)).ok()?.to_vec1::<u32>().ok()?;
+    let frames = t_valid.min(t).min(bt).min(logp.len()).min(ids.len());
+    scratch.frames.frames = frames;
+    scratch.frames.vocab = vocab;
+    scratch.frames.blank = vocab.saturating_sub(1);
+    scratch.frames.ids.clear();
+    scratch.frames.ids.extend(ids.iter().take(frames).map(|v| *v as usize));
+    scratch.frames.logp.clear();
+    scratch.frames.logp.extend(logp.iter().take(frames).copied());
+    Some(())
 }
 
 /// Greedy-декод CTC: поток `(токен, лог-постер, кадр)` без blank'ов.
-pub fn greedy_stream(post: &CtcPosteriors) -> Vec<(usize, f32, usize)> {
-    let mut out = Vec::new();
+///
+/// Пишет в переиспользуемый буфер `out`.
+pub fn greedy_stream(frames: &CtcFrames, out: &mut Vec<(usize, f32, usize)>) {
+    out.clear();
     let mut prev = usize::MAX;
-    for f in 0..post.frames {
-        let mut best = 0usize;
-        let mut best_v = f32::NEG_INFINITY;
-        for v in 0..post.vocab {
-            let lp = post.logp(f, v);
-            if lp > best_v {
-                best_v = lp;
-                best = v;
-            }
+    for f in 0..frames.frames {
+        let id = frames.ids[f];
+        if id != frames.blank && id != prev {
+            out.push((id, frames.logp[f], f));
         }
-        if best != post.blank && best != prev {
-            out.push((best, best_v, f));
-        }
-        prev = best;
+        prev = id;
     }
-    out
 }
 
 /// Привести текст к сопоставимому виду: нижний регистр, только буквы и цифры.
 pub fn normalize(text: &str) -> String {
-    text.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
+    let mut out = String::with_capacity(text.len());
+    push_normalized(&mut out, text);
+    out
+}
+
+/// Дописать в `out` нормализованные символы `text` — без промежуточного `String`.
+fn push_normalized(out: &mut String, text: &str) {
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            for lc in c.to_lowercase() {
+                out.push(lc);
+            }
+        }
+    }
 }
 
 /// Найденное вхождение слова: средний лог-постер на токен и кадровый размах.
@@ -110,80 +137,83 @@ pub struct WordMatch {
     pub tokens: usize,
 }
 
-/// Найти вхождение слова в декоде CTC по тексту.
+/// Найти вхождение фразы в декоде CTC по тексту.
 ///
-/// Возвращает None, если модель не услышала слово в этом окне. Счёт —
+/// Возвращает None, если модель не услышала фразу в этом окне. Счёт —
 /// средний лог-постер по токенам вхождения: близко к 0 означает, что модель
 /// была уверена в каждом токене (вероятность ≈ 1), сильно ниже — что
 /// услышала, но неуверенно.
 pub fn match_word_text(
     stt: &Arc<Mutex<Stt>>,
-    post: &CtcPosteriors,
+    scratch: &mut CtcScratch,
     word: &str,
 ) -> Option<WordMatch> {
     let needle = normalize(word);
-    if needle.is_empty() || post.frames == 0 {
+    if needle.is_empty() || scratch.frames.frames == 0 {
         return None;
     }
-    let stream = greedy_stream(post);
-    if stream.is_empty() {
+    greedy_stream(&scratch.frames, &mut scratch.stream);
+    if scratch.stream.is_empty() {
         return None;
     }
     // Текст декода + карта «символ → кадр/лог-постер».
-    let mut text = String::new();
-    let mut chars: Vec<(usize, f32)> = Vec::new(); // (кадр, лог-постер) на символ
+    scratch.text.clear();
+    scratch.chars.clear();
     {
         let guard = stt.lock().ok()?;
         let tokenizer = &guard.model().tokenizer;
-        for (id, lp, frame) in &stream {
+        for (id, lp, frame) in &scratch.stream {
             let Some(piece) = tokenizer.piece(*id) else {
                 continue;
             };
-            for c in normalize(piece).chars() {
-                text.push(c);
-                chars.push((*frame, *lp));
+            let before = scratch.text.len();
+            push_normalized(&mut scratch.text, piece);
+            for _ in before..scratch.text.len() {
+                scratch.chars.push((*frame, *lp));
             }
         }
     }
-    if text.is_empty() {
+    if scratch.text.is_empty() {
         return None;
     }
-    let hay: Vec<char> = text.chars().collect();
+    let hay: Vec<char> = scratch.text.chars().collect();
     let pat: Vec<char> = needle.chars().collect();
+    if hay.len() < pat.len() {
+        return None;
+    }
     // Ищем подстроку (буквы и цифры нормализованы, границы слов не важны).
-    let mut start = 0usize;
-    while start + pat.len() <= hay.len() {
-        if hay[start..start + pat.len()] == pat[..] {
-            let seg = &chars[start..start + pat.len()];
-            // Среднее по токенам: у каждого кадра одна и та же вероятность
-            // на все его символы, поэтому усредняем по уникальным кадрам.
-            let mut seen: Vec<(usize, f32)> = Vec::new();
-            for (frame, lp) in seg {
-                if seen.last().map(|(f, _)| *f) != Some(*frame) {
-                    seen.push((*frame, *lp));
-                }
-            }
-            let score = seen.iter().map(|(_, lp)| *lp).sum::<f32>() / seen.len() as f32;
-            let first = seen.first().map(|(f, _)| *f).unwrap_or(0);
-            let last = seen.last().map(|(f, _)| *f).unwrap_or(0);
-            return Some(WordMatch {
-                score,
-                span_frames: last.saturating_sub(first) + 1,
-                tokens: seen.len(),
-            });
+    for start in 0..=hay.len() - pat.len() {
+        if hay[start..start + pat.len()] != pat[..] {
+            continue;
         }
-        start += 1;
+        let seg = &scratch.chars[start..start + pat.len()];
+        // Среднее по токенам: у каждого кадра одна и та же вероятность на
+        // все его символы, поэтому усредняем по уникальным кадрам.
+        let mut seen: Vec<(usize, f32)> = Vec::new();
+        for (frame, lp) in seg {
+            if seen.last().map(|(f, _)| *f) != Some(*frame) {
+                seen.push((*frame, *lp));
+            }
+        }
+        let score = seen.iter().map(|(_, lp)| *lp).sum::<f32>() / seen.len() as f32;
+        let first = seen.first().map(|(f, _)| *f).unwrap_or(0);
+        let last = seen.last().map(|(f, _)| *f).unwrap_or(0);
+        return Some(WordMatch {
+            score,
+            span_frames: last.saturating_sub(first) + 1,
+            tokens: seen.len(),
+        });
     }
     None
 }
 
-/// Нормализовать слово-активацию (для сопоставления с декодом).
+/// Нормализовать фразу-активацию (для сопоставления с декодом).
 pub fn normalize_word(word: &str) -> String {
     normalize(word)
 }
 
-/// Токены слова в словаре CTC (SentencePiece Unigram) — для диагностики:
-/// показывает, как модель может сегментировать это слово.
+/// Токены фразы в словаре CTC (SentencePiece Unigram) — для диагностики:
+/// показывает, как модель может сегментировать эту фразу.
 pub fn encode_word(stt: &Arc<Mutex<Stt>>, word: &str) -> Option<Vec<usize>> {
     let guard = stt.lock().ok()?;
     guard.model().tokenizer.encode(word).ok()
@@ -227,10 +257,10 @@ impl Default for CtcConfig {
             vad_ratio: 3.0,
             hangover_ms: 1200,
             // Порог с большим запасом: на синтетическом корпусе худший
-            // позитив даёт −0.08, а на шуме и негативах слово не
+            // позитив даёт −0.08, а на шуме и негативах фраза не
             // декодируется вовсе (счёт = −∞). Порог защищает только от
             // неуверенных совпадений; основную защиту даёт требование,
-            // чтобы слово реально прозвучало в декоде.
+            // чтобы фраза реально прозвучала в декоде.
             threshold: -0.5,
         }
     }
@@ -246,7 +276,7 @@ pub struct CtcDiag {
     pub encoder_ran: bool,
     /// Что услышала модель (декод CTC).
     pub decoded: String,
-    /// Счёт совпадения (средний лог-постер), None — слова не было.
+    /// Счёт совпадения (средний лог-постер), None — фразы не было.
     pub score: Option<f32>,
     /// Сколько последних окон набрали ≥ порога.
     pub hits: usize,
@@ -268,9 +298,10 @@ pub struct CtcDetection {
 /// Логика окна повторяет проверенную метрическую (VAD с адаптивным шумовым
 /// полом, hangover, hop по сэмплам, cooldown по аудио-времени), но решение
 /// принимается не по сходству с облаком эмбеддингов, а по факту: модель
-/// должна была услышать слово.
+/// должна была услышать фразу.
 pub struct CtcWakeEngine {
     stt: Arc<Mutex<Stt>>,
+    /// Нормализованная фраза-активация (сравнивается с декодом).
     word: String,
     config: CtcConfig,
     buffer: std::collections::VecDeque<f32>,
@@ -287,10 +318,12 @@ pub struct CtcWakeEngine {
     samples_per_hop: usize,
     cooldown_samples: usize,
     hangover_samples: usize,
+    /// Переиспользуемые буферы горячего пути.
+    scratch: CtcScratch,
 }
 
 impl CtcWakeEngine {
-    /// Создать детектор для слова `word` (любое активационное слово).
+    /// Создать детектор для фразы `word` (любая активационная фраза).
     pub fn new(stt: Arc<Mutex<Stt>>, word: &str, config: CtcConfig) -> Self {
         let samples_per_window = config.window_ms * 16_000 / 1000;
         let samples_per_hop = (config.hop_ms * 16_000 / 1000).max(1);
@@ -313,10 +346,11 @@ impl CtcWakeEngine {
             samples_per_hop,
             cooldown_samples,
             hangover_samples,
+            scratch: CtcScratch::default(),
         }
     }
 
-    /// Слово-активация.
+    /// Фраза-активация.
     pub fn word(&self) -> &str {
         &self.word
     }
@@ -407,24 +441,30 @@ impl CtcWakeEngine {
         self.since_embed = 0;
         diag.encoder_ran = true;
 
-        let window: Vec<f32> = self.buffer.iter().copied().collect();
-        let post = match ctc_log_posteriors(&self.stt, &window) {
-            Some(p) => p,
-            None => {
-                self.last_diag = Some(diag);
-                return None;
-            }
-        };
-        let stream = greedy_stream(&post);
+        // Окно без копии: буфер кольцевой, `make_contiguous` даёт срез.
+        let window = self.buffer.make_contiguous();
+        if ctc_frames(&self.stt, window, &mut self.scratch).is_none() {
+            self.last_diag = Some(diag);
+            return None;
+        }
         {
             let Ok(guard) = self.stt.lock() else {
                 self.last_diag = Some(diag);
                 return None;
             };
-            let ids: Vec<usize> = stream.iter().map(|(id, _, _)| *id).collect();
-            diag.decoded = guard.model().tokenizer.decode(&ids);
+            // Декод для журнала: id переиспользуем, текст — для диагностики.
+            self.scratch
+                .decode_ids
+                .clear();
+            self.scratch
+                .decode_ids
+                .extend(self.scratch.stream.iter().map(|(id, _, _)| *id));
+            diag.decoded = guard
+                .model()
+                .tokenizer
+                .decode(&self.scratch.decode_ids);
         }
-        let m = match_word_text(&self.stt, &post, &self.word);
+        let m = match_word_text(&self.stt, &mut self.scratch, &self.word);
         let score = m.as_ref().map(|m| m.score);
         diag.score = score;
 
@@ -460,17 +500,10 @@ impl CtcWakeEngine {
             .iter()
             .map(|(_, s)| *s)
             .fold(f32::NEG_INFINITY, f32::max);
-        let best = if best.is_finite() {
-            best
-        } else {
-            score.unwrap_or_default()
-        };
+        let best = if best.is_finite() { best } else { score.unwrap_or_default() };
         self.recent.clear();
         let decoded = diag.decoded.clone();
         self.last_diag = Some(diag);
-        Some(CtcDetection {
-            score: best,
-            decoded,
-        })
+        Some(CtcDetection { score: best, decoded })
     }
 }

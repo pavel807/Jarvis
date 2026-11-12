@@ -1,43 +1,10 @@
-Jarvis/app main ❯ bun tauri dev
-$ tauri dev
-     Running BeforeDevCommand (`bun run dev`)
-$ vite
-
-  VITE v6.4.5  ready in 327 ms
-
-  ➜  Local:   http://localhost:1420/
-  ➜  Network: use --host to expose
-     Running DevCommand (`cargo  run --no-default-features --color always --`)
-        Info Watching /home/paveldev/Jarvis/app/src-tauri for changes...
-        Info Watching /home/paveldev/Jarvis/crates/jarvis-core for changes...
-    Finished `dev` profile [optimized + debuginfo] target(s) in 0.65s
-     Running `/home/paveldev/Jarvis/target/debug/jarvis-app`
-
-(jarvis-app:5703): libayatana-appindicator-WARNING **: 19:23:55.639: libayatana-appindicator is deprecated. Please use libayatana-appindicator-glib in newly written code.
-🎙️ speakrs: VAD и фильтр говорящего загружены (CPU)
-🧠 Загрузка TTS (silero, голос «ru_eduard») в фоне...
-❌ Ошибка загрузки LLM: Модель qwen3.5-0.8b не скачана (каталог /home/paveldev/.local/share/Jarvis/models/qwen3.5-0.8b пуст или неполон). Выбери «Скачать» в Настройках → Модель — загрузка покажет прогресс и подключит модель сама
-🔧 Собираю веса ударителя из ONNX (/home/paveldev/Jarvis/scripts/export_stress_models.py)...
-19:23:55 [vite-plugin-svelte:load] failed to load virtual css module /home/paveldev/Jarvis/app/src/components/AppIcon.svelte?svelte&type=style&lang.css
-Traceback (most recent call last):
-  File "/home/paveldev/Jarvis/scripts/export_stress_models.py", line 21, in <module>
-    import numpy as np
-ModuleNotFoundError: No module named 'numpy'
-⚠️ Ударитель не загружен, ударения по умолчанию: Скрипт экспорта весов завершился с кодом exit status: 1; ожидался "/home/paveldev/.local/share/Jarvis/models/stress-ru/accent.safetensors"
-🔧 Собираю веса ударителя из ONNX (/home/paveldev/Jarvis/scripts/export_stress_models.py)...
-Traceback (most recent call last):
-  File "/home/paveldev/Jarvis/scripts/export_stress_models.py", line 21, in <module>
-    import numpy as np
-ModuleNotFoundError: No module named 'numpy'
-⚠️ Омографы не загружены, спорные слова — по частоте: Скрипт экспорта весов завершился с кодом exit status: 1; ожидался "/home/paveldev/.local/share/Jarvis/models/stress-ru/omograph/model.safetensors"
-✅ Silero v5 готов (ru_eduard, 48000 Гц) за 229.3ms
-✅ TTS готов к озвучке
-19:23:55 [vite-plugin-svelte:load] failed to load virtual css module /home/paveldev/Jarvis/app/src/pages/SystemPage.svelte?svelte&type=style&lang.css
-19:23:55 [vite-plugin-svelte:load] failed to load virtual css module /home/paveldev/Jarvis/app/src/pages/Home.svelte?svelte&type=style&lang.css
-📥 Загрузка модели: https://github.com/pavel807/jarvis-models/releases/download/models-v1/fastconformer.tar.gz
-  % Total    % Received % Xferd  Average Speed  Time    Time    Time   Current
-                                 Dload  Upload  Total   Spent   Left   Speed
-  0      0   0      0   0      0      0      0                              0
 curl: (22) The requested URL returned error: 404
-⚠️ Не удалось скачать FastConformer: curl завершился с кодом exit status: 22
-❌ STT: Файл весов не найден: "/home/paveldev/.local/share/Jarvis/models/fastconformer/model.safetensors" — модель ещё не скачана
+🎯 Wake word: CTC-детектор, слово «джарвис» (эталон не нужен)
+✅ Qwen3.5-0.8B загружена за 3.6s (24 слоёв: 18 delta-net + 6 attention, vocab=248320)
+   LLM: модель qwen3.5-0.8b/qwen3_5, eos_ids=[248044, 248046]
+   LLM: слоёв=24, vocab=248320, потолок контекста=8192
+✅ LLM загружена за 4.0s
+   LLM: префилл 172 ток. за 2s, декод 9 ток. за 4049 (449.9 мс/ток.)
+🔥 LLM прогрета за 6.2s
+🎯 Wake word: джарвис (-0.002)
+📝 STT[rnnt]: 306.1ms на 7.0 с аудио

@@ -960,7 +960,7 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                 {
                     last_score_log = Instant::now();
                     let _ = h.events.send(JarvisEvent::Log {
-                        message: format!("🎯 wake: {score:.3}"),
+                        message: format!("🎯 wake: {score:.3} — {}", det.describe()),
                     });
                 }
                 if let Some(d) = det.process_16k(&chunk_16k) {
