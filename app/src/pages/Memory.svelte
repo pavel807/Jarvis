@@ -115,7 +115,7 @@
           </span>
           {#if turn.role === "assistant" && !turn.error}
             <div class="log-line__text">
-              <Markdown text={turn.text} />
+              <Markdown text={turn.text} streaming={turn.streaming === true} />
               {#if turn.streaming}<span class="caret"></span>{/if}
             </div>
           {:else}

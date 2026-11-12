@@ -18,8 +18,7 @@
     { key: "general", title: "Общие" },
     { key: "mic", title: "Микрофон" },
     { key: "telegram", title: "Telegram" },
-    { key: "system", title: "Система" },
-] as const;
+  ] as const;
 
   type SectionKey = (typeof SECTIONS)[number]["key"];
 
@@ -120,68 +119,6 @@
     else if (granted === false) micStatus = "pending";
   });
 
-  // ---------- AI-модель ----------
-
-  /**
-   * Модели ответов: mirai-m — 4-битные веса, mirai-l — 8-битные: та же
-   * сеть, вдвое меньше квантизационных повреждений — меньше выдумывает.
-   * 4B — старшая модель, точнее на фактах. Смена — после перезапуска.
-   */
-  const llmChoices = [
-    {
-      backend: "uzu",
-      model: "qwen3.5-2b-mirai-l",
-      title: "Умная — Qwen3.5 2B (8-бит)",
-      hint: "Точные веса, ~2,2 ГБ. Рекомендуется: заметно меньше выдумывает, чем 4-бит.",
-    },
-    {
-      backend: "uzu",
-      model: "qwen3.5-4b-mirai-l",
-      title: "Эксперт — Qwen3.5 4B (8-бит)",
-      hint: "Старшая модель, ~4,5 ГБ. Максимальная точность, отвечает чуть медленнее.",
-    },
-    {
-      backend: "uzu",
-      model: "qwen3.5-0.8b",
-      title: "Быстрая — Qwen3.5 0.8B (4-бит)",
-      hint: "~0,5 ГБ. Самая быстрая, но чаще ошибается.",
-    },
-    {
-      backend: "candle",
-      model: "qwen3.5-0.8b",
-      title: "Классическая — candle 0.8B",
-      hint: "Собственная реализация без Uzu. Модель из папки models/.",
-    },
-  ];
-
-  /** Облачные варианты: отдельная логика выбора (пресет + поля ключа). */
-  const apiChoices = [
-    {
-      preset: "yandex" as const,
-      title: "Яндекс GPT — облако",
-      hint: "Ответы в интернете через Яндекс. Нужен API-ключ Яндекс.Облака и идентификатор каталога.",
-    },
-    {
-      preset: "openai" as const,
-      title: "Своя модель (API) — облако",
-      hint: "Любой OpenAI-совместимый сервис: OpenAI, OpenRouter, LM Studio и другие. Ключ, адрес и модель — ниже.",
-    },
-  ];
-
-  function apiPicked(preset: string): boolean {
-    return settings.llm_backend === "api" && settings.api_preset === preset;
-  }
-
-  function llmPicked(choice: (typeof llmChoices)[number]): boolean {
-    return settings.llm_backend === choice.backend && settings.llm_model === choice.model;
-  }
-
-  async function pickLlm(choice: (typeof llmChoices)[number]) {
-    if (llmPicked(choice)) return;
-    await patchSettings({ llm_backend: choice.backend, llm_model: choice.model });
-    toast("Модель сменится после перезапуска Джарвиса", "ok");
-  }
-
   // ---------- Модели на диске: что установлено и что можно скачать ----------
 
   /** Список моделей из бэкенда: установлена ли, размер, кнопка «Скачать». */
@@ -209,6 +146,11 @@
   /** Облако выбрано? */
   const apiActive = $derived(settings.llm_backend === "api");
   const yandexActive = $derived(apiActive && settings.api_preset === "yandex");
+
+  /** Выбран ли этот облачный пресет. */
+  function apiPicked(preset: string): boolean {
+    return settings.llm_backend === "api" && settings.api_preset === preset;
+  }
 
   async function pickApi(preset: "yandex" | "openai") {
     if (apiActive && settings.api_preset === preset) return;
@@ -243,6 +185,104 @@
     } finally {
       apiChecking = false;
     }
+  }
+
+  // ---------- AI-модель ----------
+
+  /**
+   * Три варианта мозга: Яндекс GPT (облако), своя модель через API (облако)
+   * и Qwen 3.5 локально. Внутри «Qwen 3.5» — выбор версии. На macOS версии
+   * считает движок Mirai (uzu): mirai-l — 8-битные веса, вдвое меньше
+   * квантизационных повреждений — меньше выдумывает. На Linux — candle,
+   * и локальная модель одна: 0.8B из релиза. Смена — после перезапуска.
+   */
+  const isMac = /Mac/.test(navigator.userAgent);
+
+  const qwenChoices = isMac
+    ? [
+        {
+          model: "qwen3.5-2b-mirai-l",
+          title: "Умная — 2B (8-бит)",
+          hint: "Точные веса, ~2,2 ГБ. Рекомендуется: заметно меньше выдумывает.",
+        },
+        {
+          model: "qwen3.5-4b-mirai-l",
+          title: "Эксперт — 4B (8-бит)",
+          hint: "Старшая модель, ~4,5 ГБ. Максимальная точность, отвечает чуть медленнее.",
+        },
+        {
+          model: "qwen3.5-0.8b",
+          title: "Быстрая — 0.8B (4-бит)",
+          hint: "~0,5 ГБ. Самая быстрая, но чаще ошибается.",
+        },
+      ]
+    : [
+        {
+          model: "qwen3.5-0.8b",
+          title: "Qwen 3.5 0.8B",
+          hint: "Локальная модель, ~0,5 ГБ. Качается из релиза при первом запуске.",
+        },
+      ];
+
+  /** Ручные каталоги из models/ (candle-совместимые): показываем как есть. */
+  const manualModels = $derived(
+    models.filter((m) => !qwenChoices.some((c) => c.model === m.name)),
+  );
+
+  /** Три больших варианта выбора мозга. */
+  const llmVariants = [
+    {
+      key: "yandex",
+      title: "Яндекс GPT — облако",
+      hint: "Ответы через Яндекс. Нужен API-ключ Яндекс.Облака и идентификатор каталога.",
+    },
+    {
+      key: "openai",
+      title: "Своя модель (API) — облако",
+      hint: "Любой OpenAI-совместимый сервис: OpenAI, OpenRouter, LM Studio и другие. Ключ, адрес и модель — после выбора.",
+    },
+    {
+      key: "qwen",
+      title: "Qwen 3.5 — локально",
+      hint: "Считается на этом компьютере, без интернета. Внутри — выбрать и скачать версию.",
+    },
+  ] as const;
+
+  type VariantKey = (typeof llmVariants)[number]["key"];
+
+  function variantPicked(key: VariantKey): boolean {
+    if (key === "yandex") return apiPicked("yandex");
+    if (key === "openai") return apiPicked("openai");
+    return settings.llm_backend === "uzu" || settings.llm_backend === "candle";
+  }
+
+  /** Раскрыт ли список версий Qwen. */
+  let qwenOpen = $state(false);
+
+  async function pickVariant(key: VariantKey) {
+    if (variantPicked(key)) {
+      // Повторный клик по «Qwen локально» раскрывает или сворачивает версии.
+      qwenOpen = key === "qwen" ? !qwenOpen : qwenOpen;
+      return;
+    }
+    if (key === "qwen") {
+      qwenOpen = true;
+      await pickQwen(qwenChoices[0]);
+      return;
+    }
+    qwenOpen = false;
+    await pickApi(key);
+  }
+
+  function qwenPicked(choice: (typeof qwenChoices)[number]): boolean {
+    const backend = isMac ? "uzu" : "candle";
+    return settings.llm_backend === backend && settings.llm_model === choice.model;
+  }
+
+  async function pickQwen(choice: (typeof qwenChoices)[number]) {
+    if (qwenPicked(choice)) return;
+    await patchSettings({ llm_backend: isMac ? "uzu" : "candle", llm_model: choice.model });
+    toast("Модель сменится после перезапуска Джарвиса", "ok");
   }
 
   // ---------- Система ----------
@@ -342,31 +382,20 @@
           <span class="row-item__chevron"><AppIcon name="chevronRight" size={15} /></span>
         </button>
       {/if}
-      {#if hit("обучение", "wake word", "джарвис", "распознавание")}
+      {#if hit("wake word", "джарвис", "распознавание", "диктант", "профиль голоса", "дополнительно")}
         <button class="row-item" onclick={() => go("wakeword")}>
           <span class="row-item__icon"><AppIcon name="mic" size={16} /></span>
           <span class="row-item__text">
-            <span class="row-item__title">Обучение на свой голос</span>
+            <span class="row-item__title">Wake word и голос — дополнительно</span>
             <span class="row-item__hint">
-              Джарвис не всегда слышит обращение — запишите образцы
+              Джарвис слышит фразу от любого человека; здесь — проверка фразы
+              и записи для профиля голоса
             </span>
           </span>
           <span class="row-item__chevron"><AppIcon name="chevronRight" size={15} /></span>
         </button>
       {/if}
-      {#if hit("диктант", "профиль голоса", "фильтр голоса", "мой голос")}
-        <button class="row-item" onclick={() => go("voicetrain")}>
-          <span class="row-item__icon"><AppIcon name="speaker" size={16} /></span>
-          <span class="row-item__text">
-            <span class="row-item__title">Диктант для профиля голоса</span>
-            <span class="row-item__hint">
-              Прочитай фразу с экрана — Джарвис запомнит, как звучит твой голос
-            </span>
-          </span>
-          <span class="row-item__chevron"><AppIcon name="chevronRight" size={15} /></span>
-        </button>
-      {/if}
-      {#if hit("помощь", "проблемы", "журнал", "диагностика")}
+      {#if hit("помощь", "проблемы", "диагностика")}
         <button class="row-item" onclick={() => go("help")}>
           <span class="row-item__icon"><AppIcon name="help" size={16} /></span>
           <span class="row-item__text">
@@ -383,37 +412,21 @@
   <section class="settings-section" data-section="general" bind:this={sectionEls.general}>
     <h2 class="section-title">Общие</h2>
     <div class="card card--flush">
-      {#if hit("отвечать", "вопросы", "поведение")}
-        <SwitchRow
-          checked={settings.llm_enabled}
-          title="Отвечать на любые вопросы"
-          hint="Если команда не распознана, Джарвис отвечает сам — без интернета."
-          onchange={(value) => void patchSettings({ llm_enabled: value })}
-        />
-      {/if}
-      {#if hit("темы", "память", "забыли")}
-        <SwitchRow
-          checked={settings.topic_memory}
-          title="Помнить незакрытые темы"
-          hint="«Мы это забыли» — вернёт разговор к теме, от которой отвлеклись."
-          onchange={(value) => void patchSettings({ topic_memory: value })}
-        />
-      {/if}
-      {#if hit("интернет", "поиск", "погода", "новости")}
-        <SwitchRow
-          checked={settings.web_search_auto}
-          title="Искать свежие данные в интернете"
-          hint="Погода, курсы, новости. Требуется подключение к сети."
-          onchange={(value) => void patchSettings({ web_search_auto: value })}
-        />
-      {/if}
-      {#if hit("числа", "сокращения", "нормализация")}
-        <SwitchRow
-          checked={settings.llm_normalize}
-          title="Проговаривать числа и сокращения"
-          hint="«1,5 ГБ» прозвучит как «полтора гигабайта»."
-          onchange={(value) => void patchSettings({ llm_normalize: value })}
-        />
+      {#if hit("имя", "ассистент", "название", "как называть")}
+        <div class="row-item" style="flex-direction: column; align-items: stretch; gap: 6px">
+          <span class="row-item__title">Имя ассистента</span>
+          <span class="row-item__hint">
+            Как он представляется в интерфейсе и разговоре. Фраза-активация
+            («Джарвис») меняется отдельно — «Wake word и голос — дополнительно».
+          </span>
+          <input
+            class="input"
+            type="text"
+            value={settings.assistant_name}
+            placeholder="Джарвис"
+            onchange={(e) => void patchSettings({ assistant_name: e.currentTarget.value.trim() || "Джарвис" })}
+          />
+        </div>
       {/if}
       {#if hit("звук", "сигнал", "подтверждение")}
         <SwitchRow
@@ -421,6 +434,14 @@
           title="Звук перед ответом"
           hint="Короткий сигнал, что вопрос услышан. Выключено — ответ быстрее."
           onchange={(value) => void patchSettings({ ack_before_llm: value })}
+        />
+      {/if}
+      {#if hit("автозапуск", "вход", "запуск") && autostartSupported}
+        <SwitchRow
+          checked={autostart}
+          title="Запускать при входе в систему"
+          hint="Джарвис будет ждать в строке меню сразу после включения."
+          onchange={toggleAutostart}
         />
       {/if}
     </div>
@@ -458,8 +479,8 @@
       {#if hit("посторонние", "голоса", "фильтр", "мой голос", "speakers", "диаризация")}
         <SwitchRow
           checked={settings.speaker_filter}
-          title="Только мой голос"
-          hint="Посторонние голоса на фоне отсекаются до распознавания и не доходят до ответов. Профиль строится из записей в «Обучении» и обновляется сам после новых записей."
+          title="Только мой голос (скоро)"
+          hint="Бета: отсекает посторонние голоса до распознавания. Джарвис и так слышит фразу-активацию от любого человека — это не влияет на отклик, только на ответы."
           onchange={(value) => void patchSettings({ speaker_filter: value })}
         />
         {#if voiceSamples !== null}
@@ -489,38 +510,60 @@
   <section class="settings-section" data-section="ai" bind:this={sectionEls.ai}>
     <h2 class="section-title">Модель</h2>
     <div class="card card--flush">
-      {#each llmChoices as choice (choice.backend + choice.model)}
-        {#if hit(choice.title, choice.hint, "модель")}
-          <button class="row-item" onclick={() => pickLlm(choice)}>
+      {#each llmVariants as variant (variant.key)}
+        {#if hit(variant.title, variant.hint, "модель")}
+          <button class="row-item" onclick={() => pickVariant(variant.key)}>
             <span class="row-item__text">
-              <span class="row-item__title">{choice.title}</span>
-              <span class="row-item__hint">{choice.hint}</span>
+              <span class="row-item__title">{variant.title}</span>
+              <span class="row-item__hint">{variant.hint}</span>
             </span>
-            {#if llmPicked(choice)}
+            {#if variantPicked(variant.key)}
               <span class="row-item__value">
-                <AppIcon name="check" size={15} />
+                <AppIcon name={variant.key === "qwen" ? (qwenOpen ? "chevronUp" : "chevronDown") : "check"} size={15} />
               </span>
             {/if}
           </button>
         {/if}
       {/each}
-      {#each models.filter((m) => hit(m.name, m.installed ? "установлена" : "скачать модель", "модель")) as m (m.name)}
-        <div class="row-item">
-          <span class="row-item__text">
-            <span class="row-item__title">{m.name}</span>
-            <span class="row-item__hint">
-              {m.installed ? `Установлена${m.size_mb ? ` — ${m.size_mb} МБ` : ""}` : "Не скачана — модель не станет мозгом, пока её не скачать"}
-            </span>
-          </span>
-          {#if m.installed}
-            <span class="row-item__value"><AppIcon name="check" size={15} /></span>
-          {:else if m.downloadable}
-            <button class="btn btn--secondary btn--sm" disabled={!!store.download} onclick={() => downloadModel(m.name)}>
-              Скачать
-            </button>
+      {#if qwenOpen && variantPicked("qwen")}
+        {#each qwenChoices as choice (choice.model)}
+          {#if hit(choice.title, choice.hint, "модель", "qwen")}
+            <div class="row-item qwen-row">
+              <button class="qwen-row__pick" onclick={() => void pickQwen(choice)}>
+                <span class="row-item__text">
+                  <span class="row-item__title">{choice.title}</span>
+                  <span class="row-item__hint">{choice.hint}</span>
+                </span>
+                {#if qwenPicked(choice)}
+                  <span class="row-item__value"><AppIcon name="check" size={15} /></span>
+                {/if}
+              </button>
+              {#if !qwenPicked(choice)}
+                <button class="btn btn--secondary btn--sm qwen-row__dl" disabled={!!store.download} onclick={() => downloadModel(choice.model)}>
+                  Скачать
+                </button>
+              {/if}
+            </div>
           {/if}
-        </div>
-      {/each}
+        {/each}
+        {#each manualModels.filter((m) => hit(m.name, "модель")) as m (m.name)}
+          <div class="row-item qwen-row">
+            <span class="row-item__text">
+              <span class="row-item__title">{m.name}</span>
+              <span class="row-item__hint">
+                {m.installed ? `Установлена${m.size_mb ? ` — ${m.size_mb} МБ` : ""}` : "Не скачана"}
+              </span>
+            </span>
+            {#if m.installed}
+              <span class="row-item__value"><AppIcon name="check" size={15} /></span>
+            {:else if m.downloadable}
+              <button class="btn btn--secondary btn--sm" disabled={!!store.download} onclick={() => downloadModel(m.name)}>
+                Скачать
+              </button>
+            {/if}
+          </div>
+        {/each}
+      {/if}
       {#if store.download}
         <div class="row-item">
           <span class="row-item__text">
@@ -531,21 +574,6 @@
           </span>
         </div>
       {/if}
-      {#each apiChoices as choice (choice.preset)}
-        {#if hit(choice.title, choice.hint, "модель", "облако", "api")}
-          <button class="row-item" onclick={() => pickApi(choice.preset)}>
-            <span class="row-item__text">
-              <span class="row-item__title">{choice.title}</span>
-              <span class="row-item__hint">{choice.hint}</span>
-            </span>
-            {#if apiPicked(choice.preset)}
-              <span class="row-item__value">
-                <AppIcon name="check" size={15} />
-              </span>
-            {/if}
-          </button>
-        {/if}
-      {/each}
       {#if apiActive && yandexActive}
         <div class="api-fields">
           <label class="api-field">
@@ -622,11 +650,11 @@
     </div>
   </section>
 
-  <!-- Система -->
+  <!-- Telegram -->
   <section class="settings-section" data-section="telegram" bind:this={sectionEls.telegram}>
     <h2 class="section-title">Telegram</h2>
     <div class="card card--flush">
-      {#if hit("телеграм", "telegram", "бот", "чат", "канал")}
+      {#if hit("телеграм", "telegram", "бот", "чат", "канал", "команды")}
         <div class="row-item">
           <span class="row-item__text">
             <span class="row-item__title">Канал в Telegram</span>
@@ -635,6 +663,12 @@
             </span>
           </span>
         </div>
+        <SwitchRow
+          checked={settings.telegram_execute}
+          title="Выполнять команды из Telegram"
+          hint="Бот исполняет тот же список команд, что и голосом: «открой ютуб», таймеры и другие. Выключено — только разговор."
+          onchange={(value) => void patchSettings({ telegram_execute: value })}
+        />
         <div class="api-fields">
           <label class="api-field">
             <span class="api-field__label">Токен бота</span>
@@ -660,41 +694,6 @@
       {/if}
     </div>
   </section>
-
-  <section class="settings-section" data-section="system" bind:this={sectionEls.system}>
-    <h2 class="section-title">Система</h2>
-    {#if autostartSupported}
-      <div class="card card--flush">
-        {#if hit("автозапуск", "вход", "запуск")}
-          <SwitchRow
-            checked={autostart}
-            title="Запускать при входе в систему"
-            hint="Джарвис будет ждать в строке меню сразу после включения Mac."
-            onchange={toggleAutostart}
-          />
-        {/if}
-      </div>
-    {/if}
-    {#if hit("fastconformer", "hugging", "hf", "репозиторий", "модель asr", "распознавание")}
-      <div class="card card--flush">
-        <div class="row-item" style="flex-direction: column; align-items: stretch; gap: 6px">
-          <span class="row-item__title">Репозиторий FastConformer на Hugging Face</span>
-          <span class="row-item__hint">
-            Формат username/repo; файлы model.safetensors, config.json, tokenizer.vocab.
-            Пусто — скачивание из стандартного релиза. Изменение применится после
-            удаления папки models/fastconformer.
-          </span>
-          <input
-            class="input"
-            type="text"
-            value={settings.asr_hf_repo}
-            placeholder="username/fastconformer-ru"
-            onchange={(e) => void patchSettings({ asr_hf_repo: e.currentTarget.value })}
-          />
-        </div>
-      </div>
-    {/if}
-  </section>
 </div>
 
 <style>
@@ -715,5 +714,26 @@
   .api-field__label {
     font-size: 12px;
     opacity: 0.7;
+  }
+
+  /* Версии Qwen внутри «Qwen 3.5»: сдвиг вправо — вложенность читается. */
+  .qwen-row {
+    padding-left: 18px;
+    border-top: 1px solid var(--border-soft, rgba(128, 128, 128, 0.12));
+  }
+
+  .qwen-row__pick {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    background: none;
+    border: none;
+    padding: 0;
+    text-align: left;
+    color: inherit;
+    cursor: pointer;
   }
 </style>

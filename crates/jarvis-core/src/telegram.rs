@@ -1,8 +1,11 @@
 //! Telegram-канал — по логике OpenJarvis: бот на Bot API long-polling,
-//! whitelist chat_id, сообщение → LLM → ответ в тот же чат. Токен и
-//! разрешённые чаты — в settings.toml (`telegram_bot_token`,
-//! `telegram_chat_ids` — список через запятую). Пустой токен — канал
-//! просто не запускается.
+//! whitelist chat_id, сообщение → действие или ответ модели в тот же чат.
+//! Действия — тот же исполнитель, что у голосового канала: команды из
+//! commands.toml и системные планы («открой ютуб», таймер). Разговорные
+//! вопросы идут в LLM без инструментов. Исполнение команд выключается
+//! настройкой `telegram_execute`. Токен и разрешённые чаты — в
+//! settings.toml (`telegram_bot_token`, `telegram_chat_ids` — список через
+//! запятую). Пустой токен — канал просто не запускается.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -64,6 +67,14 @@ fn allowed_chats() -> Vec<i64> {
         .unwrap_or_default()
 }
 
+/// Может ли Telegram исполнять команды Джарвиса. Читаем на каждое сообщение:
+/// переключение в настройках действует без перезапуска канала.
+fn can_execute() -> bool {
+    crate::settings::Settings::load(&crate::paths::settings_file())
+        .map(|s| s.telegram_execute)
+        .unwrap_or(true)
+}
+
 /// GET-вызов Bot API, ответ — сырой JSON.
 fn api(token: &str, method: &str, query: &str) -> Result<String> {
     let url = format!("https://api.telegram.org/bot{token}/{method}?{query}");
@@ -91,7 +102,15 @@ fn send_message(token: &str, chat_id: i64, text: &str) {
 
 /// Один цикл long-poll: ждём апдейты до 25 с, обрабатываем сообщения.
 /// true — были апдейты (сразу идём за следующими), false — пауза.
-fn poll_once(token: &str, allowed: &[i64], shared: &crate::llm::SharedLlm) -> bool {
+fn poll_once(
+    token: &str,
+    allowed: &[i64],
+    shared: &crate::llm::SharedLlm,
+    audio_tx: &std::sync::mpsc::Sender<crate::tts::AudioMessage>,
+    events: &crate::events::EventTx,
+    llm_cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    llm_history: &std::sync::Arc<std::sync::Mutex<Vec<crate::llm::ChatTurn>>>,
+) -> bool {
     let offset = OFFSET.load(Ordering::Relaxed);
     let query = format!("timeout=25&offset={offset}&allowed_updates=[\"message\"]");
     let body = match api(token, "getUpdates", &query) {
@@ -124,7 +143,13 @@ fn poll_once(token: &str, allowed: &[i64], shared: &crate::llm::SharedLlm) -> bo
         let Some(text) = message.text.clone() else {
             continue;
         };
-        let reply = answer(shared, &text);
+        // Сначала действие (команды, «открой …»), иначе — разговор с моделью.
+        let reply = if can_execute() {
+            act(&text, audio_tx, events, shared, llm_cancel, llm_history)
+                .unwrap_or_else(|| answer(shared, &text))
+        } else {
+            answer(shared, &text)
+        };
         send_message(token, chat_id, &reply);
     }
     !updates.result.is_empty()
@@ -133,8 +158,12 @@ fn poll_once(token: &str, allowed: &[i64], shared: &crate::llm::SharedLlm) -> bo
 /// Ответ на сообщение: разговорный промпт + память + дата. Изолированно,
 /// без инструментов — бот не должен трогать рабочий стол по чужому чату.
 fn answer(shared: &crate::llm::SharedLlm, text: &str) -> String {
+    let name = crate::settings::Settings::load(&crate::paths::settings_file())
+        .map(|s| s.assistant_name)
+        .unwrap_or_else(|_| "Джарвис".into());
     let system = format!(
-        "{}{}Сегодняшняя дата: {}.\nТы отвечаешь в Telegram: тот же краткий голос, без markdown.",
+        "Ты {}. {}{}Сегодняшняя дата: {}.\nТы отвечаешь в Telegram: тот же краткий голос, без markdown.",
+        name,
         crate::llm::CHAT_SYSTEM_PROMPT,
         crate::memory::prompt_block(),
         crate::text::today_russian()
@@ -147,9 +176,61 @@ fn answer(shared: &crate::llm::SharedLlm, text: &str) -> String {
     }
 }
 
+/// Пытаться исполнить текст как действие (как в голосовом канале):
+/// команда из commands.toml или системный план («открой ютуб», «поставь
+/// таймер на пять минут»). Some — действие исполнено и текст для чата готов,
+/// None — это не действие, дальше отвечает модель.
+fn act(
+    text: &str,
+    audio_tx: &std::sync::mpsc::Sender<crate::tts::AudioMessage>,
+    events: &crate::events::EventTx,
+    llm: &crate::llm::SharedLlm,
+    llm_cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    llm_history: &std::sync::Arc<std::sync::Mutex<Vec<crate::llm::ChatTurn>>>,
+) -> Option<String> {
+    // Пользовательские команды: тот же исполнитель, что в голосе — звуки
+    // подтверждения и действия идут в общий плеер движка.
+    let cfg = crate::commands::CommandsConfig::load(&crate::paths::commands_file()).ok()?;
+    let err_path = crate::paths::resolve_data_path(&cfg.global.reply_error)
+        .to_string_lossy()
+        .to_string();
+    if let Some(cmd) = cfg
+        .find_action_command(text)
+        .or_else(|| cfg.find_command(text))
+    {
+        let ok = crate::commands::execute_command(
+            &cmd,
+            text,
+            audio_tx,
+            events,
+            llm,
+            std::sync::Arc::clone(llm_cancel),
+            std::sync::Arc::clone(llm_history),
+            &err_path,
+        );
+        return Some(if ok {
+            format!("Готово — {}", cmd.name)
+        } else {
+            "Не получилось, посмотри экран Джарвиса".into()
+        });
+    }
+    // Системные планы: «открой …», «закрой …» — модель не нужна.
+    if let Some(call) = crate::router::plan_system_command(text) {
+        let outcome = crate::tools::execute(call, audio_tx, events);
+        return Some(outcome.speech);
+    }
+    None
+}
+
 /// Запустить канал в фоне, если задан токен. Тихий выход — иначе это
 /// не ошибка, а «канал не настроен».
-pub fn spawn(shared: crate::llm::SharedLlm) {
+pub fn spawn(
+    shared: crate::llm::SharedLlm,
+    audio_tx: std::sync::mpsc::Sender<crate::tts::AudioMessage>,
+    events: crate::events::EventTx,
+    llm_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    llm_history: std::sync::Arc<std::sync::Mutex<Vec<crate::llm::ChatTurn>>>,
+) {
     let token = settings_token();
     if token.trim().is_empty() {
         return;
@@ -166,7 +247,15 @@ pub fn spawn(shared: crate::llm::SharedLlm) {
         .name("telegram-channel".into())
         .spawn(move || {
             loop {
-                let went_busy = poll_once(&token, &allowed, &shared);
+                let went_busy = poll_once(
+                    &token,
+                    &allowed,
+                    &shared,
+                    &audio_tx,
+                    &events,
+                    &llm_cancel,
+                    &llm_history,
+                );
                 // Пустой poll = просто истёк long-poll — сразу за следующим.
                 if !went_busy {
                     std::thread::sleep(Duration::from_millis(300));

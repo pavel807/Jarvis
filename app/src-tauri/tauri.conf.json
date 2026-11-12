@@ -15,8 +15,8 @@
         "title": "J.A.R.V.I.S",
         "width": 520,
         "height": 920,
-        "minWidth": 420,
-        "minHeight": 720,
+        "minWidth": 380,
+        "minHeight": 640,
         "resizable": true,
         "visible": true
       }

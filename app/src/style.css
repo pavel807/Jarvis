@@ -19,8 +19,8 @@
   color-scheme: dark;
 
   /* Фон и поверхности — тёмная сталь */
-  --bg: #070b10;
-  --bg-2: #0b1119;
+  --bg: #0a1523;
+  --bg-2: #0e1c2e;
   --surface: #101923;
   --surface-2: #15212d;
   --surface-3: #1a2936;
@@ -147,7 +147,7 @@ body {
   isolation: isolate;
   /* Нейтральное затемнение к низу — глубина без цветных пятен. */
   background:
-    radial-gradient(140% 60% at 50% 118%, rgba(7, 11, 16, 0) 40%, #04070b 100%),
+    radial-gradient(140% 60% at 50% 118%, rgba(10, 21, 35, 0) 40%, #060f1b 100%),
     var(--bg);
 }
 
@@ -227,88 +227,6 @@ body {
   background: var(--cyan);
 }
 
-/* ---------- Полоса системного статуса ---------- */
-
-.sysstatus {
-  flex-shrink: 0;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1px;
-  margin: 10px 14px 0;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--border);
-  overflow: hidden;
-}
-
-.syscell {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 3px;
-  padding: 8px 4px 7px;
-  background: var(--surface);
-  transition: background 0.2s;
-}
-
-.syscell__top {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--text-3);
-}
-
-.syscell__name {
-  font-family: var(--mono);
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  color: var(--text-3);
-}
-
-.syscell__value {
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--text-2);
-  transition: color 0.25s;
-}
-
-/* Норма — спокойные значения, цветом горят только проблемы
-   и живая точка-LED. Так читается настоящая приборная панель. */
-.syscell.is-warn .syscell__value {
-  color: var(--warn);
-}
-
-.syscell.is-err .syscell__value {
-  color: var(--danger);
-}
-
-.syscell__led {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--text-3);
-  flex-shrink: 0;
-  transition: background 0.25s, box-shadow 0.25s;
-}
-
-.is-ok .syscell__led {
-  background: var(--ok);
-}
-
-.is-energy .syscell__led {
-  background: var(--cyan);
-}
-
-.is-warn .syscell__led {
-  background: var(--warn);
-}
-
-.is-err .syscell__led {
-  background: var(--danger);
-}
 
 /* ---------- Тело ---------- */
 
@@ -325,7 +243,7 @@ body {
 
 .page {
   width: 100%;
-  max-width: 560px;
+  max-width: 720px;
   margin: 0 auto;
   padding: 16px 16px 28px;
   flex: 1;
@@ -1197,7 +1115,6 @@ input[type="range"]:active::-webkit-slider-thumb {
 
 /* Каркас до розжига погашен и слегка смещён — входит снизу вверх. */
 .app[data-boot="true"] .header,
-.app[data-boot="true"] .sysstatus,
 .app[data-boot="true"] .nav {
   opacity: 0;
   transform: translateY(10px);
@@ -1206,9 +1123,7 @@ input[type="range"]:active::-webkit-slider-thumb {
 
 /* На главной во время сборки остаётся один реактор. */
 .app[data-boot="true"] .transmission,
-.app[data-boot="true"] .voice-zone,
-.app[data-boot="true"] .cmd-input,
-.app[data-boot="true"] .home-foot {
+.app[data-boot="true"] .voice-zone {
   opacity: 0;
   transform: translateY(8px);
   pointer-events: none;
@@ -1227,21 +1142,14 @@ input[type="range"]:active::-webkit-slider-thumb {
 /* Раскрытие: переходы вешаются только на «не загружаемся», чтобы не
    наследовать их на другие анимации каркаса. */
 .app[data-boot="false"] .header,
-.app[data-boot="false"] .sysstatus,
 .app[data-boot="false"] .nav,
 .app[data-boot="false"] .transmission,
 .app[data-boot="false"] .voice-zone,
-.app[data-boot="false"] .cmd-input,
-.app[data-boot="false"] .home-foot,
 .app[data-boot="false"] .reactor-stage::before,
 .app[data-boot="false"] .reactor-stage::after {
   transition:
     opacity 0.45s ease,
     transform 0.45s cubic-bezier(0.2, 0.7, 0.3, 1);
-}
-
-.app[data-boot="false"] .sysstatus {
-  transition-delay: 0.07s;
 }
 
 .app[data-boot="false"] .transmission {
@@ -1250,14 +1158,6 @@ input[type="range"]:active::-webkit-slider-thumb {
 
 .app[data-boot="false"] .voice-zone {
   transition-delay: 0.18s;
-}
-
-.app[data-boot="false"] .cmd-input {
-  transition-delay: 0.24s;
-}
-
-.app[data-boot="false"] .home-foot {
-  transition-delay: 0.3s;
 }
 
 .app[data-boot="false"] .nav {
@@ -1324,14 +1224,10 @@ input[type="range"]:active::-webkit-slider-thumb {
 @media (prefers-reduced-motion: reduce) {
   .home > .reactor-stage,
   .app[data-boot="false"] .header,
-  .app[data-boot="false"] .sysstatus,
   .app[data-boot="false"] .nav,
   .app[data-boot="false"] .transmission,
   .app[data-boot="false"] .voice-zone,
-  .app[data-boot="false"] .cmd-input,
-  .app[data-boot="false"] .home-foot {
-    transition-duration: 0.12s;
-  }
+
 
   .reactor-boot__label,
   .reactor-boot__fill {
@@ -1353,7 +1249,7 @@ input[type="range"]:active::-webkit-slider-thumb {
   display: flex;
   flex-direction: column;
   padding: 0 16px;
-  max-width: 560px;
+  max-width: 720px;
   margin: 0 auto;
   width: 100%;
 }
@@ -1505,81 +1401,10 @@ input[type="range"]:active::-webkit-slider-thumb {
 .voice-zone {
   flex-shrink: 0;
   display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 12px 2px;
-}
-
-/* Клавиша микрофона: физический тумблер панели. Слушает — клавиша нажата
-   и горит ровным цианом, пауза — отжата тёмная. Никаких пульсирующих колец:
-   живой уровень звука показывает осциллограмма рядом. */
-.mic-btn {
-  width: 52px;
-  height: 52px;
-  flex-shrink: 0;
-  border-radius: 12px;
-  border: 1px solid var(--border-strong);
-  background: var(--surface-2);
-  color: var(--text-2);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: background 0.18s, border-color 0.18s, color 0.18s,
-    transform 0.12s var(--ease-out);
-}
-
-.mic-btn:hover:not(:disabled) {
-  color: var(--text);
-  border-color: rgba(75, 203, 255, 0.45);
-}
-
-.mic-btn:active:not(:disabled) {
-  transform: scale(0.95);
-}
-
-.mic-btn:focus-visible {
-  outline: 2px solid var(--cyan);
-  outline-offset: 2px;
-}
-
-.mic-btn:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-/* Слушает: залипшая клавиша, ровный циан без свечения */
-.mic-btn.is-listening {
-  background: var(--cyan);
-  border-color: var(--cyan);
-  color: var(--on-accent);
-}
-
-.mic-btn.is-listening:hover:not(:disabled) {
-  background: #63d4ff;
-  border-color: #63d4ff;
-  color: var(--on-accent);
-}
-
-/* Пауза: клавиша отжата */
-.mic-btn.is-off {
-  color: var(--text-3);
-  background: var(--surface);
-}
-
-/* Нет доступа к микрофону: красный контур */
-.mic-btn.is-error {
-  color: var(--danger);
-  border-color: rgba(240, 107, 112, 0.5);
-}
-
-/* Голосовой центр: статус + волна */
-.voice-center {
-  flex: 1;
-  min-width: 0;
-  display: flex;
   flex-direction: column;
-  gap: 5px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 2px 6px;
 }
 
 .voice-status {
@@ -1612,72 +1437,28 @@ input[type="range"]:active::-webkit-slider-thumb {
 .wave {
   display: flex;
   align-items: center;
-  gap: 3px;
-  height: 26px;
+  gap: 2.5px;
+  height: 30px;
 }
 
+/* Мини-спектр: столбики с вертикальным градиентом и лёгким свечением. */
 .wave span {
   width: 3px;
   border-radius: 2px;
-  background: var(--cyan);
-  height: calc(3px + var(--h) * 20px);
-  transition: height 0.09s linear;
+  background: linear-gradient(180deg, #c9f1ff, var(--cyan) 72%);
+  box-shadow: 0 0 6px rgba(75, 203, 255, 0.3);
+  height: calc(3px + var(--h) * 26px);
+  transition: height 0.08s linear, opacity 0.2s;
 }
 
 /* Ожидание: спокойные статичные полоски — колебание без звука врёт. */
 .wave.is-idle span {
   background: var(--text-3);
+  box-shadow: none;
   height: 3px;
-  opacity: 0.55;
+  opacity: 0.5;
 }
 
-/* ---------- Командный ввод ---------- */
-
-.cmd-input {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 44px;
-  padding: 0 6px 0 14px;
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
-  margin-bottom: 12px;
-  transition: border-color 0.16s, box-shadow 0.16s;
-}
-
-.cmd-input:focus-within {
-  border-color: var(--cyan-ring);
-  box-shadow: 0 0 0 3px var(--cyan-soft);
-}
-
-.cmd-input__field {
-  flex: 1;
-  min-width: 0;
-  background: transparent;
-  border: none;
-  outline: none;
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-}
-
-.cmd-input__field::placeholder {
-  color: var(--text-3);
-}
-
-.cmd-input__send {
-  width: 32px;
-  height: 32px;
-  flex-shrink: 0;
-  padding: 0;
-  border-radius: 9px;
-}
-
-.cmd-input__send:disabled {
-  opacity: 0.35;
-}
 
 /* ---------- Нижняя навигация ---------- */
 
@@ -1686,7 +1467,7 @@ input[type="range"]:active::-webkit-slider-thumb {
   --nav-h: 62px;
   height: var(--nav-h);
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 2px;
   padding: 6px 10px calc(8px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--border);
@@ -2365,6 +2146,36 @@ input[type="range"]:active::-webkit-slider-thumb {
 @media (min-width: 560px) {
   .grid-2 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Низкое окно (ноутбук, узкий десктоп): меньше воздуха, компактнее каркас —
+   содержимое умещается без прокрутки там, где это возможно. */
+@media (max-height: 800px) {
+  .header {
+    padding: 8px 16px 6px;
+  }
+
+  .reactor-stage {
+    min-height: clamp(170px, 26vh, 320px);
+  }
+
+  .voice-zone {
+    padding: 8px 2px;
+  }
+
+  .nav {
+    --nav-h: 54px;
+    padding: 4px 10px calc(6px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* Узкое окно: поля страницы и главного экрана уже. */
+@media (max-width: 460px) {
+  .page,
+  .home {
+    padding-left: 12px;
+    padding-right: 12px;
   }
 }
 

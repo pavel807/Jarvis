@@ -4,6 +4,8 @@
   import AppIcon from "../components/AppIcon.svelte";
   import VoiceTraining from "../components/VoiceTraining.svelte";
 
+  const name = $derived(settings.assistant_name || "Джарвис");
+
   /**
    * Мастер первого запуска: (1) ждём загрузку основных моделей,
    * (2) выбор мозга — локальная модель или облако с ключом,
@@ -122,7 +124,7 @@
   }
 </script>
 
-<div class="ob-overlay" role="dialog" aria-label="Первый запуск Джарвиса">
+<div class="ob-overlay" role="dialog" aria-label="Первый запуск {name}">
   <div class="ob-card">
     <div class="ob-steps" aria-hidden="true">
       {#each ["Загрузка", "Модель", "Голос"] as label, i (label)}
@@ -133,7 +135,7 @@
     </div>
 
     {#if step === 0}
-      <h1 class="ob-title">Джарвис просыпается</h1>
+      <h1 class="ob-title">{name} просыпается</h1>
       <p class="ob-sub">Загружаются основные модели — это занимает до минуты.</p>
       <div class="card card--flush ob-status">
         <div class="ob-row">
@@ -278,7 +280,7 @@
     {:else if step === 2}
       <h1 class="ob-title">Познакомься с моим голосом</h1>
       <p class="ob-sub">
-        Прочитай фразу с экрана — Джарвис запомнит, как звучит твой голос, и
+        Прочитай фразу с экрана — {name} запомнит, как звучит твой голос, и
         будет отсекать посторонних. Можно пропустить: он честно предупредит,
         что фильтр пока не работает.
       </p>

@@ -4,11 +4,9 @@
   import { store, go, initEvents, toast, settings, NAV_PAGES, SUB_PAGES } from "./store.svelte";
   import { INTRO_DURATION } from "./lib/reactor/intro";
   import Header from "./components/Header.svelte";
-  import SystemStatus from "./components/SystemStatus.svelte";
   import AppIcon from "./components/AppIcon.svelte";
   import Home from "./pages/Home.svelte";
   import Memory from "./pages/Memory.svelte";
-  import SystemPage from "./pages/SystemPage.svelte";
   import SettingsPage from "./pages/SettingsPage.svelte";
   import Commands from "./pages/Commands.svelte";
   import Voice from "./pages/Voice.svelte";
@@ -26,7 +24,6 @@
   const NAV = [
     { key: "home", label: "Главная", icon: "core" },
     { key: "memory", label: "Память", icon: "memory" },
-    { key: "system", label: "Система", icon: "activity" },
     { key: "settings", label: "Настройки", icon: "gear" },
   ] as const;
 
@@ -86,15 +83,12 @@
 
 <div class="app" data-boot={store.booting ? "true" : "false"}>
   <Header />
-  <SystemStatus />
 
   <div class="app-body">
     {#if store.page === "home"}
       <Home />
     {:else if store.page === "memory"}
       <Memory />
-    {:else if store.page === "system"}
-      <SystemPage />
     {:else if store.page === "settings"}
       <SettingsPage />
     {:else if store.page === "commands"}

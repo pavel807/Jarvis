@@ -16,6 +16,11 @@
 //! `▁ком|п|ью|тер`), а текстовый токенизатор — своими
 //! (`▁Ко|м|п|ью|тер`). Сравнение по тексту переживает любую сегментацию.
 //!
+//! Сопоставление нечёткое (выравнивание Селлерса): живая речь декодируется
+//! с фонетическими ошибками («Джарвис» → «Джавис», «Джалис»), дословный
+//! поиск терял половину произнесений. Ошибки стоят штрафа в единицах
+//! лог-постера, поэтому счёт остаётся на той же шкале, что и раньше.
+//!
 //! Горячий путь (окно раз в ~160 мс) почти не аллоцирует:
 //! - `log_softmax` и `argmax` считаются на стороне модели (`candle-nn`), в
 //!   Rust приходит только строка argmax-токенов и их лог-постеры — вместо
@@ -48,7 +53,7 @@ pub struct CtcFrames {
 /// Буферы, переиспользуемые между окнами: в горячем пути аллокаций нет.
 #[derive(Default)]
 pub struct CtcScratch {
-    /// Результат декода模型: argmax-токены кадров.
+    /// Результат декода модели: argmax-токены кадров.
     pub frames: CtcFrames,
     /// Поток greedy-декода: (токен, лог-постер, кадр).
     pub stream: Vec<(usize, f32, usize)>,
@@ -58,6 +63,16 @@ pub struct CtcScratch {
     pub chars: Vec<(usize, f32)>,
     /// id для декодирования текста.
     pub decode_ids: Vec<usize>,
+    /// Символы декода (для выравнивания).
+    pub hay: Vec<char>,
+    /// Символы фразы (для выравнивания).
+    pub pat: Vec<char>,
+    /// Два слоя таблицы выравнивания (цены).
+    pub dp_a: Vec<f32>,
+    pub dp_b: Vec<f32>,
+    /// Два слоя таблицы выравнивания (начала вхождений).
+    pub st_a: Vec<usize>,
+    pub st_b: Vec<usize>,
 }
 
 /// Посчитать argmax-токены и их лог-постеры для окна 16 кГц mono.
@@ -117,32 +132,74 @@ pub fn normalize(text: &str) -> String {
 }
 
 /// Дописать в `out` нормализованные символы `text` — без промежуточного `String`.
+///
+/// «ё» приравнивается к «е»: декод модели и фраза пользователя могут
+/// использовать любой вариант, а по звуку это один и тот же гласный.
 fn push_normalized(out: &mut String, text: &str) {
     for c in text.chars() {
         if c.is_alphanumeric() {
             for lc in c.to_lowercase() {
-                out.push(lc);
+                out.push(if lc == 'ё' { 'е' } else { lc });
             }
         }
     }
 }
 
-/// Найденное вхождение слова: средний лог-постер на токен и кадровый размах.
+/// Поднять уровень окна до целевого RMS (модель обучена на речи с RMS ~0.09).
+///
+/// Масштабирует только вверх: громкую речь не трогаем — иначе изменились бы
+/// измерения на обучающем корпусе. Усиление ограничено `max_gain`, чтобы шум
+/// не раздувался до уровня речи.
+pub fn normalize_level(src: &[f32], dst: &mut Vec<f32>, target_rms: f32, max_gain: f32) {
+    dst.clear();
+    dst.extend_from_slice(src);
+    if target_rms <= 0.0 || dst.is_empty() {
+        return;
+    }
+    let rms = (dst.iter().map(|x| x * x).sum::<f32>() / dst.len() as f32).sqrt();
+    if rms <= 0.0 || rms >= target_rms {
+        return;
+    }
+    let gain = (target_rms / rms).min(max_gain);
+    if gain <= 1.0 {
+        return;
+    }
+    for x in dst.iter_mut() {
+        *x *= gain;
+    }
+}
+
+/// Найденное вхождение слова: средний лог-постер на символ и кадровый размах.
 pub struct WordMatch {
-    /// Средний лог-постер по токенам вхождения (меньше — хуже).
+    /// Средний лог-постер по символам фразы (меньше — хуже).
     pub score: f32,
     /// Число кадров, которые заняло вхождение.
     pub span_frames: usize,
-    /// Сколько токенов входит во вхождение.
+    /// Сколько уникальных кадров входит во вхождение.
     pub tokens: usize,
 }
 
-/// Найти вхождение фразы в декоде CTC по тексту.
+/// Штрафы нечёткого сопоставления в единицах лог-постера (за ошибку, не за
+/// символ; прибавляются к положительной цене выравнивания). Реальный голос
+/// почти всегда декодируется с 1–2 фонетическими ошибками («Джарвис» →
+/// «Джавис», «Джалис»): дословный поиск их терял. Штрафы подобраны так, что
+/// совпадение с одной ошибкой теряет ~0.05–0.1 на символ — много меньше
+/// разрыва до мусорных выравниваний (см. порог).
+const SUB_PENALTY: f32 = 0.35;
+const DEL_PENALTY: f32 = 0.5;
+const INS_PENALTY: f32 = 0.15;
+
+/// Найти вхождение фразы в декоде CTC по тексту, нечётко.
 ///
-/// Возвращает None, если модель не услышала фразу в этом окне. Счёт —
-/// средний лог-постер по токенам вхождения: близко к 0 означает, что модель
-/// была уверена в каждом токене (вероятность ≈ 1), сильно ниже — что
-/// услышала, но неуверенно.
+/// Выравнивание Селлерса: фраза обязана войти целиком, а декод вокруг и
+/// между её символами — любой (CTC вставляет мусор между звуками).
+/// Цена совпадения символа — минус его лог-постер (≈ 0.01 при уверенности),
+/// замена — постер + [`SUB_PENALTY`], пропуск символа фразы —
+/// [`DEL_PENALTY`], мусор между символами — [`INS_PENALTY`].
+///
+/// Счёт = минус минимальная цена / длина фразы: близко к 0 — модель была
+/// уверена в каждом символе, заметно ниже — услышала с ошибками или
+/// неуверенно. None — декода нет вовсе.
 pub fn match_word_text(
     stt: &Arc<Mutex<Stt>>,
     scratch: &mut CtcScratch,
@@ -176,35 +233,180 @@ pub fn match_word_text(
     if scratch.text.is_empty() {
         return None;
     }
-    let hay: Vec<char> = scratch.text.chars().collect();
-    let pat: Vec<char> = needle.chars().collect();
-    if hay.len() < pat.len() {
+    // Символы декода и фразы — в переиспользуемые буферы.
+    scratch.hay.clear();
+    scratch.hay.extend(scratch.text.chars());
+    scratch.pat.clear();
+    scratch.pat.extend(needle.chars());
+    let Some((cost, start, end)) = fuzzy_align(
+        &scratch.hay,
+        &scratch.pat,
+        &scratch.chars,
+        &mut scratch.dp_a,
+        &mut scratch.dp_b,
+        &mut scratch.st_a,
+        &mut scratch.st_b,
+    ) else {
         return None;
-    }
-    // Ищем подстроку (буквы и цифры нормализованы, границы слов не важны).
-    for start in 0..=hay.len() - pat.len() {
-        if hay[start..start + pat.len()] != pat[..] {
-            continue;
+    };
+    // Среднее по уникальным кадрам выравнивания: символы одного кадра делят
+    // один постер, а мусор между символами не должен размывать счёт.
+    let seg = &scratch.chars[start..end];
+    let mut seen: Vec<(usize, f32)> = Vec::new();
+    for (frame, lp) in seg {
+        if seen.last().map(|(f, _)| *f) != Some(*frame) {
+            seen.push((*frame, *lp));
         }
-        let seg = &scratch.chars[start..start + pat.len()];
-        // Среднее по токенам: у каждого кадра одна и та же вероятность на
-        // все его символы, поэтому усредняем по уникальным кадрам.
-        let mut seen: Vec<(usize, f32)> = Vec::new();
-        for (frame, lp) in seg {
-            if seen.last().map(|(f, _)| *f) != Some(*frame) {
-                seen.push((*frame, *lp));
+    }
+    let score = -cost / scratch.pat.len() as f32;
+    let first = seen.first().map(|(f, _)| *f).unwrap_or(0);
+    let last = seen.last().map(|(f, _)| *f).unwrap_or(0);
+    Some(WordMatch {
+        score,
+        span_frames: last.saturating_sub(first) + 1,
+        tokens: seen.len(),
+    })
+}
+
+/// Нечёткое выравнивание фразы `pat` на декоде `hay` — алгоритм Селлерса
+/// с бюджетом правок: фраза обязана войти целиком, декод вокруг и между её
+/// символами — любой.
+///
+/// Бюджет правок: сколько символов фразы может быть услышано с ошибкой
+/// (замена, пропуск) или разделено мусором. Без бюджета нечёткость
+/// сопоставляет фразе вообще чужие слова: «анфиса» выравнивалась на
+/// «джарвис» двумя пропусками и двумя заменами. Бюджет = треть длины,
+/// короткие фразы (до 5 символов) — только дословно. Право на совпадение
+/// получает только выравнивание, уложившееся в бюджет: случайно рассыпанных
+/// по декоду символов для этого не хватает.
+///
+/// Возвращает (цена, начало, конец) лучшего куска декода; None — если ни
+/// одно выравнивание не уложилось в бюджет. `dp_*`/`st_*` — переиспользуемые
+/// буферы таблицы.
+fn fuzzy_align(
+    hay: &[char],
+    pat: &[char],
+    chars: &[(usize, f32)],
+    dp_a: &mut Vec<f32>,
+    dp_b: &mut Vec<f32>,
+    st_a: &mut Vec<usize>,
+    st_b: &mut Vec<usize>,
+) -> Option<(f32, usize, usize)> {
+    let (n, m) = (pat.len(), hay.len());
+    // Короткие фразы (до 7 символов) — только дословно: одна правка на
+    // 5–6 символах — это до 20% слова, и «робот» ловил «работ» из обычной
+    // речи со счётом −0.07. Дословный поиск короткое слово тоже найдёт в
+    // мусоре редко — совпадение по 5+ символам подряд само по себе специфично.
+    let max_edits = if n < 7 { 0 } else { (n / 3).clamp(1, 3) };
+    let layer = (max_edits + 1) * (m + 1);
+    dp_a.clear();
+    dp_a.resize(layer, f32::INFINITY);
+    st_a.clear();
+    st_a.resize(layer, 0);
+    dp_b.clear();
+    dp_b.resize(layer, f32::INFINITY);
+    st_b.clear();
+    st_b.resize(layer, 0);
+    // Слой i = 0: пустая фраза совпадает с любым куском декода бесплатно,
+    // вхождение может начинаться где угодно.
+    for e in 0..=max_edits {
+        let base = e * (m + 1);
+        for j in 0..=m {
+            dp_a[base + j] = 0.0;
+            st_a[base + j] = j;
+        }
+    }
+    // Слои чередуются: слой i-1 в одном буфере, слой i пишется в другой.
+    let mut prev_in_a = true;
+    for i in 1..=n {
+        let (prev_d, prev_s, cur_d, cur_s): (&[f32], &[usize], &mut [f32], &mut [usize]) =
+            if prev_in_a {
+                (dp_a.as_slice(), st_a.as_slice(), dp_b, st_b)
+            } else {
+                (dp_b.as_slice(), st_b.as_slice(), dp_a, st_a)
+            };
+        cur_d.fill(f32::INFINITY);
+        cur_s.fill(0);
+        for e in 0..=max_edits {
+            let base = e * (m + 1);
+            // Слой e-1 в предыдущей строке; при e = 0 чтений оттуда нет.
+            let pbase1 = e.saturating_sub(1) * (m + 1);
+            // Слой e-1 в текущей строке (мусор между символами): заполнен
+            // раньше в этом же проходе.
+            let cbase = e.saturating_sub(1) * (m + 1);
+            // j = 0: префикс фразы выровнен только пропусками символов.
+            cur_d[base] = if e >= 1 {
+                prev_d[pbase1] + DEL_PENALTY
+            } else {
+                f32::INFINITY
+            };
+            cur_s[base] = if e >= 1 { prev_s[pbase1] } else { 0 };
+            for j in 1..=m {
+                let (_, lp) = chars[j - 1];
+                let matched = hay[j - 1] == pat[i - 1];
+                let mut best = f32::INFINITY;
+                let mut bstart = 0usize;
+                // Пропуск символа фразы.
+                if e >= 1 {
+                    let c = prev_d[pbase1 + j] + DEL_PENALTY;
+                    if c < best {
+                        best = c;
+                        bstart = prev_s[pbase1 + j];
+                    }
+                    // Мусор между символами фразы.
+                    let c = cur_d[cbase + j - 1] + INS_PENALTY;
+                    if c < best {
+                        best = c;
+                        bstart = cur_s[cbase + j - 1];
+                    }
+                }
+                // Потребление символа декода: совпадение (бесплатно от правок)
+                // или замена (расходует одну правку).
+                let c = if matched {
+                    prev_d[base + j - 1] - lp
+                } else if e >= 1 {
+                    prev_d[pbase1 + j - 1] - lp + SUB_PENALTY
+                } else {
+                    f32::INFINITY
+                };
+                let s = if matched {
+                    prev_s[base + j - 1]
+                } else {
+                    prev_s[pbase1 + j - 1]
+                };
+                if c < best {
+                    best = c;
+                    bstart = s;
+                }
+                cur_d[base + j] = best;
+                cur_s[base + j] = bstart;
             }
         }
-        let score = seen.iter().map(|(_, lp)| *lp).sum::<f32>() / seen.len() as f32;
-        let first = seen.first().map(|(f, _)| *f).unwrap_or(0);
-        let last = seen.last().map(|(f, _)| *f).unwrap_or(0);
-        return Some(WordMatch {
-            score,
-            span_frames: last.saturating_sub(first) + 1,
-            tokens: seen.len(),
-        });
+        prev_in_a = !prev_in_a;
     }
-    None
+    // Фраза вошла целиком (в бюджет правок), кусок может кончаться где угодно.
+    let (final_d, final_s) = if prev_in_a {
+        (dp_a.as_slice(), st_a.as_slice())
+    } else {
+        (dp_b.as_slice(), st_b.as_slice())
+    };
+    let mut best_cost = f32::INFINITY;
+    let mut best_j = 0usize;
+    let mut best_start = 0usize;
+    for e in 0..=max_edits {
+        let base = e * (m + 1);
+        for j in 0..=m {
+            if final_d[base + j] < best_cost {
+                best_cost = final_d[base + j];
+                best_j = j;
+                best_start = final_s[base + j];
+            }
+        }
+    }
+    if best_j <= best_start || !best_cost.is_finite() {
+        return None;
+    }
+    Some((best_cost, best_start, best_j))
 }
 
 /// Нормализовать фразу-активацию (для сопоставления с декодом).
@@ -240,6 +442,11 @@ pub struct CtcConfig {
     pub hangover_ms: usize,
     /// Порог среднего лог-постера: 0 — модель уверена на 100%.
     pub threshold: f32,
+    /// Целевой RMS окна для модели: ниже этого модель не декодирует слова.
+    /// 0 — не нормализовать.
+    pub norm_target_rms: f32,
+    /// Максимальное усиление при нормализации (защита от усиления шума).
+    pub norm_max_gain: f32,
 }
 
 impl Default for CtcConfig {
@@ -253,7 +460,10 @@ impl Default for CtcConfig {
             cooldown_ms: 2500,
             smoothing: 3,
             min_hits: 2,
-            vad_rms: 0.004,
+            // Абсолютный порог VAD низкий: гарнитура/ноутбук дают речь в
+            // 20–30 раз тише обучающих записей (RMS 0.09). Отсекает шум
+            // относительный порог (vad_ratio) от адаптивного шумового пола.
+            vad_rms: 0.0006,
             vad_ratio: 3.0,
             hangover_ms: 1200,
             // Порог с большим запасом: на синтетическом корпусе худший
@@ -262,6 +472,12 @@ impl Default for CtcConfig {
             // неуверенных совпадений; основную защиту даёт требование,
             // чтобы фраза реально прозвучала в декоде.
             threshold: -0.5,
+            // Модель обучена на речи с RMS ~0.09. Микрофон может дать в 30
+            // раз тише — тогда CTC не декодирует ничего, и слово не слышно
+            // никогда. Окно поднимается до целевого уровня (только вверх:
+            // громкую речь не трогаем, лишние искажения не нужны).
+            norm_target_rms: 0.08,
+            norm_max_gain: 30.0,
         }
     }
 }
@@ -320,6 +536,8 @@ pub struct CtcWakeEngine {
     hangover_samples: usize,
     /// Переиспользуемые буферы горячего пути.
     scratch: CtcScratch,
+    /// Окно с нормализованным уровнем (копия: кольцевой буфер не трогаем).
+    window: Vec<f32>,
 }
 
 impl CtcWakeEngine {
@@ -347,6 +565,7 @@ impl CtcWakeEngine {
             cooldown_samples,
             hangover_samples,
             scratch: CtcScratch::default(),
+            window: Vec::with_capacity(samples_per_window),
         }
     }
 
@@ -441,12 +660,22 @@ impl CtcWakeEngine {
         self.since_embed = 0;
         diag.encoder_ran = true;
 
-        // Окно без копии: буфер кольцевой, `make_contiguous` даёт срез.
-        let window = self.buffer.make_contiguous();
-        if ctc_frames(&self.stt, window, &mut self.scratch).is_none() {
+        // Окно копируется в переиспользуемый буфер и нормализуется по уровню:
+        // кольцевой буфер не трогаем (иначе масштабирование накапливалось бы).
+        let src = self.buffer.make_contiguous();
+        normalize_level(
+            src,
+            &mut self.window,
+            self.config.norm_target_rms,
+            self.config.norm_max_gain,
+        );
+        if ctc_frames(&self.stt, &self.window, &mut self.scratch).is_none() {
             self.last_diag = Some(diag);
             return None;
         }
+        // Поток ТЕКУЩЕГО окна: раньше он заполнялся только внутри
+        // match_word_text, и декод в диагностике отставал на одно окно.
+        greedy_stream(&self.scratch.frames, &mut self.scratch.stream);
         {
             let Ok(guard) = self.stt.lock() else {
                 self.last_diag = Some(diag);
@@ -505,5 +734,88 @@ impl CtcWakeEngine {
         let decoded = diag.decoded.clone();
         self.last_diag = Some(diag);
         Some(CtcDetection { score: best, decoded })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Декод: каждый символ — свой кадр с постером `lp` (уверенный = -0.02).
+    fn chars_of(text: &str, lp: f32) -> Vec<(usize, f32)> {
+        text.chars().enumerate().map(|(i, _)| (i, lp)).collect()
+    }
+
+    fn align(hay: &str, pat: &str, lp: f32) -> Option<f32> {
+        let chars = chars_of(hay, lp);
+        let hay: Vec<char> = hay.chars().collect();
+        // Боевой путь нормализует фразу до выравнивания (match_word_text).
+        let pat: Vec<char> = normalize(pat).chars().collect();
+        fuzzy_align(
+            &hay,
+            &pat,
+            &chars,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .map(|(cost, _, _)| -cost / pat.len() as f32)
+    }
+
+    #[test]
+    fn дословное_совпадение_уверенно() {
+        // Джарвис внутри длинного декода: счёт = постер символов.
+        let s = align("вот джарвис слушает", "джарвис", -0.02).expect("должно совпасть");
+        assert!((s + 0.02).abs() < 1e-4, "счёт {s}");
+    }
+
+    #[test]
+    fn одна_замена_как_джалис() {
+        // Реальный промах калибровки: в→л (замена) — счёт заметно хуже
+        // дословного, но в пределах боевого порога -0.5.
+        let s = align("джалис", "джарвис", -0.1).expect("замена в бюджете");
+        // 5 совпадений (д ж а и с), замена л→р (0.1 + 0.35), пропуск в (0.5).
+        let expected = -(5.0 * 0.1 + 0.45 + 0.5) / 7.0;
+        assert!((s - expected).abs() < 1e-4, "счёт {s} ≠ {expected}");
+        assert!(s > -0.5, "счёт {s} должен проходить порог");
+    }
+
+    #[test]
+    fn чужая_фраза_анфиса_отклонена() {
+        // «анфиса» не содержит р и в: минимум 4 правки на 7 символов —
+        // за бюджетом (2), как в калибровке на корпусе-приманке.
+        assert_eq!(align("анфиса", "джарвис", -0.02), None);
+    }
+
+    #[test]
+    fn рассыпанные_символы_не_совпадают() {
+        // Символы фразы, разбросанные по посторонней речи, бюджет не набирают.
+        assert_eq!(align("джаз нос ветка исло", "джарвис", -0.02), None);
+    }
+
+    #[test]
+    fn короткая_фраза_только_дословно() {
+        // До 7 символов бюджет правок нулевой: одна замена уже отклонение.
+        assert!(align("дом", "дом", -0.02).is_some());
+        assert_eq!(align("дым", "дом", -0.02), None);
+        // Реальный случай калибровки: «робот» из речи ловил «работ» с
+        // нечёткостью в одну замену — теперь короткие слова строги.
+        assert!(align("робот", "робот", -0.02).is_some());
+        assert_eq!(align("работ", "робот", -0.02), None);
+    }
+
+    #[test]
+    fn отсутствующая_фраза_нет_совпадения() {
+        assert_eq!(align("полная тишина без слов", "джарвис", -0.02), None);
+        assert_eq!(align("", "джарвис", -0.02), None);
+    }
+
+    #[test]
+    fn ё_приравнивается_к_е() {
+        // Фраза с «ё» совпадает с декодом через «е» и наоборот.
+        assert_eq!(normalize("ёжик"), "ежик");
+        let s = align("ежик", "ёжик", -0.02).expect("ё → е");
+        assert!((s + 0.02).abs() < 1e-4, "счёт {s}");
     }
 }

@@ -428,7 +428,7 @@ pub fn spawn_audio_player(
     is_speaking: Arc<AtomicBool>,
     stop_audio_flag: Arc<AtomicBool>,
     llm_shared: SharedLlm,
-    settings: Arc<RwLock<Settings>>,
+    _settings: Arc<RwLock<Settings>>,
 ) -> Sender<AudioMessage> {
     let (tx, rx) = channel::<AudioMessage>();
 
@@ -528,16 +528,12 @@ pub fn spawn_audio_player(
                     // Полный конвейер устной речи: Markdown-структура →
                     // произношения названий/аббревиатур → числа и единицы.
                     let mut text = crate::tts_normalizer::normalize(&raw_text);
-                    let nn_enabled = settings
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .llm_normalize;
                     // Нейросетевую нормализацию зовём только если после
                     // правил в тексте остались цифры/символы, которые синтез
                     // прочитает не по-русски. Иначе это лишний проход LLM
                     // (около секунды) прямо перед озвучкой, да ещё и в одном
                     // потоке с плеером.
-                    if nn_enabled && needs_neural_normalize(&text) {
+                    if needs_neural_normalize(&text) {
                         let final_text = match normalize_cache.get(&text) {
                             Some(cached) => Some(cached),
                             None => llm::try_normalize(&llm_shared, &text)

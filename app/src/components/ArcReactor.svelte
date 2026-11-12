@@ -31,11 +31,9 @@
     scene?.setState(reactorState);
   });
 
-  /** Строка в журнал интерфейса: диагностика рендера видна без DevTools. */
+  /** Диагностика рендера — в консоль DevTools: журнал из интерфейса убран. */
   function report(message: string) {
-    const stamp = new Date().toLocaleTimeString("ru-RU", { hour12: false });
-    store.logs.unshift(`${stamp}  ${message}`);
-    if (store.logs.length > 300) store.logs.length = 300;
+    console.log(message);
   }
 
   /** Розжиг снимает оба флага: интерфейс открывается после сборки. */
@@ -69,9 +67,8 @@
         // WebGPU-контракт: асинхронная инициализация обязательна до первого
         // кадра. WebGPURenderer сам падает на WebGL2, если WebGPU недоступен.
         const backend = await scene.init();
-        console.info(`Реактор: рендер через ${backend}`);
         scene.onError = report;
-        report(`Реактор: отрисовка через ${backend}`);
+        console.info(`Реактор: рендер через ${backend}`);
         // Сцена создана позже первых $effect: синхронизируем актуальное
         // состояние и уровень звука, иначе реактор стартует в idle.
         scene.setState(reactorState);

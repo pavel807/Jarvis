@@ -169,6 +169,24 @@
   const triggerSummary = (cmd: Command) =>
     cmd.trigger_words.slice(0, 3).join(" · ") + (cmd.trigger_words.length > 3 ? " · …" : "");
 
+  /**
+   * Команды по разделам — по типу действия. Порядок внутри раздела — общий
+   * приоритет (или алфавит, если выбрано), разделы — в порядке ACTION_ORDER.
+   */
+  const grouped = $derived.by(() => {
+    const groups: { type: string; rows: { cmd: Command; index: number }[] }[] = [];
+    for (const row of filtered) {
+      const g = groups.find((x) => x.type === row.cmd.action_type);
+      if (g) g.rows.push(row);
+      else groups.push({ type: row.cmd.action_type, rows: [row] });
+    }
+    return groups.sort(
+      (a, b) =>
+        ACTION_ORDER.indexOf(a.type) - ACTION_ORDER.indexOf(b.type) ||
+        a.type.localeCompare(b.type),
+    );
+  });
+
   async function refresh() {
     config = await invoke<Config>("get_commands");
   }
@@ -330,8 +348,10 @@
   {#if !config}
     <div class="card card--outline"><div class="empty"><span class="spinner"></span>Загружаю команды…</div></div>
   {:else if filtered.length}
-    <div class="cmd-group">
-      {#each filtered as row (row.cmd.name)}
+    {#each grouped as group (group.type)}
+      <div class="section-title cmd-section">{meta(group.type).label}</div>
+      <div class="cmd-group">
+      {#each group.rows as row (row.cmd.name)}
         {@const cmd = row.cmd}
         {@const index = row.index}
         <div
@@ -412,7 +432,8 @@
           </span>
         </div>
       {/each}
-    </div>
+      </div>
+    {/each}
   {:else if config.commands.length}
     <div class="card card--outline">
       <div class="empty">
@@ -561,5 +582,14 @@
   .commands-sub {
     margin: -6px 0 14px;
     padding-left: 44px;
+  }
+
+  /* Раздел по типу действия: между группами больше воздуха, чем между строками. */
+  .cmd-section {
+    margin-top: 18px;
+  }
+
+  .cmd-section:first-of-type {
+    margin-top: 0;
   }
 </style>

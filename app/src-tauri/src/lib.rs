@@ -4,22 +4,18 @@
 use jarvis_core::commands::{CommandsConfig, spawn_config_watcher};
 use jarvis_core::engine::{EngineHandles, run_engine};
 use jarvis_core::events::JarvisEvent;
-use jarvis_core::llm::{self, ChatTurn, SharedLlmState, spawn_llm_loader};
+use jarvis_core::llm::{ChatTurn, SharedLlmState, spawn_llm_loader};
 use jarvis_core::paths;
 use jarvis_core::settings::{Settings, spawn_settings_watcher_with};
 use jarvis_core::stt::Stt;
 use jarvis_core::tts::{self, AudioMessage, SharedTtsState};
 use jarvis_core::wake_train;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
-
-/// Сколько последних записей журнала держим для UI.
-const LOG_CAPACITY: usize = 400;
 
 pub struct Shared {
     pub commands: Arc<RwLock<CommandsConfig>>,
@@ -33,8 +29,6 @@ pub struct Shared {
     pub wakeword_reload: Arc<AtomicBool>,
     /// Отмена голосовой генерации LLM (команда «замолчи»).
     pub llm_cancel: Arc<AtomicBool>,
-    /// Токен отмены текущего запроса из чата UI.
-    pub chat_cancel: Mutex<Option<Arc<AtomicBool>>>,
     /// История диалога чата UI.
     pub chat_history: Arc<Mutex<Vec<ChatTurn>>>,
     pub record_cancel: Arc<AtomicBool>,
@@ -50,7 +44,6 @@ pub struct Shared {
     pub audio_tx: std::sync::mpsc::Sender<AudioMessage>,
     /// Канал событий движка: нужен хабу таймеров для окна «Утилиты».
     pub utils_events: Mutex<Option<std::sync::mpsc::Sender<JarvisEvent>>>,
-    logs: Mutex<VecDeque<String>>,
 }
 
 impl Shared {
@@ -81,7 +74,6 @@ impl Shared {
             paused: Arc::new(AtomicBool::new(false)),
             wakeword_reload: Arc::new(AtomicBool::new(false)),
             llm_cancel: Arc::new(AtomicBool::new(false)),
-            chat_cancel: Mutex::new(None),
             chat_history: Arc::new(Mutex::new(Vec::new())),
             record_cancel: Arc::new(AtomicBool::new(false)),
             engine_running: Arc::new(AtomicBool::new(false)),
@@ -91,25 +83,7 @@ impl Shared {
             train_stt: Mutex::new(None),
             audio_tx,
             utils_events: Mutex::new(None),
-            logs: Mutex::new(VecDeque::with_capacity(LOG_CAPACITY)),
         }
-    }
-
-    fn push_log(&self, line: String) {
-        let mut logs = self.logs.lock().unwrap_or_else(|e| e.into_inner());
-        if logs.len() >= LOG_CAPACITY {
-            logs.pop_front();
-        }
-        logs.push_back(line);
-    }
-
-    fn logs(&self) -> Vec<String> {
-        self.logs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .cloned()
-            .collect()
     }
 
     fn llm_status(&self) -> String {
@@ -363,8 +337,11 @@ fn dir_size_mb(dir: &Path) -> u64 {
 /// Каталог моделей для UI: качаемый из релиза Qwen3.5-0.8B (candle) плюс
 /// всё, что пользователь опустил в models/ вручную (candle-совместимое:
 /// config.json + tokenizer.json).
+///
+/// Асинхронная: рекурсивный обход каталога моделей (гигабайты) на главном
+/// потоке замораживал интерфейс, пока не посчитаются размеры.
 #[tauri::command]
-fn llm_models_status() -> Vec<LlmModelInfo> {
+async fn llm_models_status() -> Vec<LlmModelInfo> {
     let models_dir = paths::models_dir();
     let mut out = Vec::new();
 
@@ -580,11 +557,6 @@ fn save_settings(shared: State<'_, Arc<Shared>>, settings: Settings) -> Result<(
     Ok(())
 }
 
-#[tauri::command]
-fn get_logs(shared: State<'_, Arc<Shared>>) -> Vec<String> {
-    shared.logs()
-}
-
 // ---------- Задачник (экран «Память») ----------
 
 /// Задача из задачника для UI.
@@ -784,116 +756,14 @@ fn utils_close(app: AppHandle) {
 /// Проверка облачной модели минимальным запросом — для кнопки «Проверить».
 /// Конфиг берётся из статиков, которые `Settings::apply` уже обновил
 /// (кнопка живёт после сохранения настроек).
+///
+/// Асинхронная: сетевой запрос на главном потоке подвешивал интерфейс
+/// на весь таймаут.
 #[tauri::command]
-fn llm_api_test() -> Result<String, String> {
+async fn llm_api_test() -> Result<String, String> {
     let (tx, _rx) = channel::<JarvisEvent>();
     let engine = jarvis_core::llm::api_backend::ApiEngine::load(&tx).map_err(|e| format!("{e:#}"))?;
     engine.check_connection().map_err(|e| format!("{e:#}"))
-}
-
-#[tauri::command]
-fn llm_ask(shared: State<'_, Arc<Shared>>, app: AppHandle, prompt: String) {    // Номер обращения: фоновый веб-поиск проверит его перед озвучкой.
-    let req_id = jarvis_core::llm::new_request();
-    // События этого вопроса уходят и в UI, и в общий мост событий движка.
-    let (tx, rx) = channel::<JarvisEvent>();
-    std::thread::spawn(move || {
-        for ev in rx {
-            // Текстовый чат минует мост движка: окно утилит открываем здесь,
-            // иначе «открой утилиты» с клавиатуры только скажет о команде.
-            match &ev {
-                JarvisEvent::OpenUtils { tab } => show_utils_window(&app, Some(tab)),
-                JarvisEvent::CloseUtils => {
-                    if let Some(window) = app.get_webview_window("utils") {
-                        let _ = window.hide();
-                    }
-                }
-                _ => {}
-            }
-            let _ = app.emit("engine-event", &ev);
-        }
-    });
-
-    // Свежий токен на каждый запрос: «Стоп» отменяет текущий вопрос,
-    // и гонки с обнулением флага внутри генерации нет.
-    let cancel = Arc::new(AtomicBool::new(false));
-    *shared.chat_cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&cancel));
-
-    // Свежие данные (погода, курсы, «кто такой X») — тот же веб-флоу, что и
-    // в голосовом движке: голос этот путь проходит до ask, текстовый чат
-    // приходит напрямую, поэтому проверяем здесь.
-    let web_search_auto = shared
-        .settings
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .web_search_auto;
-    let explicit_web = jarvis_core::router::explicit_web_request(&prompt);
-    let fresh_info = jarvis_core::web::looks_like_fresh_info(&prompt)
-        && !jarvis_core::router::calendar_question(&prompt);
-    if explicit_web || (fresh_info && web_search_auto) {
-        let query = jarvis_core::router::web_query_from(&prompt)
-            .or_else(jarvis_core::topic::last_question)
-            .unwrap_or_else(|| prompt.clone());
-        println!("🌐 Текстовый чат: ищу в интернете: \"{query}\"");
-        let llm = Arc::clone(&shared.shared_llm);
-        let history = Arc::clone(&shared.chat_history);
-        let audio_tx = shared.audio_tx.clone();
-        std::thread::spawn(move || match jarvis_core::web::search(&query, 5) {
-            Ok(hits) => {
-                if !jarvis_core::llm::is_current_request(req_id)
-                    || cancel.load(Ordering::SeqCst)
-                {
-                    println!("🚫 Поиск устарел — отвечаю молча");
-                    return;
-                }
-                if let Some(web_prompt) = jarvis_core::web::build_summary_prompt(&query, &hits) {
-                    llm::ask(
-                        llm,
-                        llm::WEB_SYSTEM_PROMPT,
-                        web_prompt,
-                        history,
-                        audio_tx,
-                        tx,
-                        cancel,
-                    );
-                }
-            }
-            Err(e) => eprintln!("⚠️ Веб-поиск не удался: {e}"),
-        });
-        return;
-    }
-
-    // `CHAT_SYSTEM_PROMPT` — базовый разговорный промпт. Внутри `ask`
-    // роутер сам подменит его на короткий tool-промпт, если запрос
-    // требует действия (таймер, приложение и т.п.).
-    llm::ask(
-        Arc::clone(&shared.shared_llm),
-        llm::CHAT_SYSTEM_PROMPT,
-        prompt,
-        Arc::clone(&shared.chat_history),
-        shared.audio_tx.clone(),
-        tx,
-        cancel,
-    );
-}
-
-#[tauri::command]
-fn llm_cancel(shared: State<'_, Arc<Shared>>) {
-    // Тот же порядок, что и у голосовой команды «замолчи» (engine.rs):
-    // флаг останавливает уже играющий кусок (плеер — один поток и внутри
-    // play_wav/wait_drain не читает очередь, поэтому без флага Stop лежит
-    // в очереди до конца фразы), llm_cancel рвёт генерацию и голосового,
-    // и текстового пути, chat_cancel — токен текущего чат-запроса.
-    shared.stop_audio_flag.store(true, Ordering::SeqCst);
-    shared.llm_cancel.store(true, Ordering::SeqCst);
-    if let Some(cancel) = shared
-        .chat_cancel
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    {
-        cancel.store(true, Ordering::SeqCst);
-    }
-    let _ = shared.audio_tx.send(AudioMessage::Stop);
 }
 
 #[derive(serde::Serialize)]
@@ -1021,8 +891,13 @@ fn ww_delete(path: String, shared: State<'_, Arc<Shared>>) -> Result<(), String>
 
 /// Синтезировать фразу разными дикторами Silero и проверить, слышит ли её
 /// модель: сколько вариантов произнесения распознано буквально.
+///
+/// Асинхронная: загрузка ASR и 24 синтеза считаются секундами — на главном
+/// потоке они замораживали интерфейс на всё время проверки фразы.
 #[tauri::command]
-fn wake_phrase_generate(phrase: String) -> Result<jarvis_core::wake_phrase::PhraseReport, String> {
+async fn wake_phrase_generate(
+    phrase: String,
+) -> Result<jarvis_core::wake_phrase::PhraseReport, String> {
     // Отдельный экземпляр ASR: веса в mmap, второй экземпляр дёшев.
     let stt = jarvis_core::stt::Stt::load(&paths::models_dir()).map_err(|e| e.to_string())?;
     let stt = std::sync::Arc::new(std::sync::Mutex::new(stt));
@@ -1217,8 +1092,9 @@ fn ww_apply(shared: State<'_, Arc<Shared>>, path: Option<String>) -> Result<(), 
     Ok(())
 }
 
+/// Асинхронная: тест поднимает модель и гоняет DTW — не на главном потоке.
 #[tauri::command]
-fn ww_test(shared: State<'_, Arc<Shared>>, path: String) -> Result<f32, String> {
+async fn ww_test(shared: State<'_, Arc<Shared>>, path: String) -> Result<f32, String> {
     let wav = ensure_under_dir(Path::new(&path), &paths::train_dir())?;
     let active = {
         let s = shared.settings.read().unwrap_or_else(|e| e.into_inner());
@@ -1369,12 +1245,10 @@ pub fn run() {
             ));
             app.manage(Arc::clone(&shared));
 
-            // 5. Мост событий движка в UI + журнал.
-            let shared_events = Arc::clone(&shared);
+            // 5. Мост событий движка в UI.
             let bridge = handle.clone();
             std::thread::spawn(move || {
                 for ev in events_rx {
-                    shared_events.push_log(format!("{ev:?}"));
                     // Таймеры и утилиты живут в отдельном окне: создаём/показываем.
                     match &ev {
                         JarvisEvent::TimerStarted { .. } | JarvisEvent::TimerStopped { .. } => {
@@ -1465,7 +1339,6 @@ pub fn run() {
             voice_record_stop,
             get_settings,
             save_settings,
-            get_logs,
             tasks_list,
             tasks_add,
             tasks_set_done,
@@ -1474,8 +1347,6 @@ pub fn run() {
             tts_voices,
             tts_test,
             open_external,
-            llm_ask,
-            llm_cancel,
             llm_models_status,
             llm_download_model,
             llm_reload,

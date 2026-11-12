@@ -1,5 +1,7 @@
 import * as THREE from "three/webgpu";
-import { WebGPURenderer } from "three/webgpu";
+import { PostProcessing, WebGPURenderer } from "three/webgpu";
+import { pass, vec4 } from "three/tsl";
+import { bloom } from "three/examples/jsm/tsl/display/BloomNode.js";
 import {
   chamferCenters,
   channelGeometry,
@@ -182,6 +184,8 @@ interface OrbitSpec {
 export class ReactorScene {
   private canvas: HTMLCanvasElement;
   private renderer: WebGPURenderer | null = null;
+  /** Пост-обработка со свечением: null — рисуем без bloom (старый путь). */
+  private post: PostProcessing | null = null;
   private scene = new THREE.Scene();
   private camera: THREE.PerspectiveCamera;
   private m: ReactorMaterials;
@@ -199,7 +203,7 @@ export class ReactorScene {
   private chamber = new THREE.Group();
 
   private crystal!: THREE.Mesh<THREE.IcosahedronGeometry, THREE.MeshPhysicalMaterial>;
-  private crystalEdges!: THREE.LineSegments<THREE.EdgesGeometry, THREE.LineBasicMaterial>;
+  private coreRing: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial> | null = null;
   private innerCore!: THREE.Mesh<THREE.OctahedronGeometry, THREE.MeshBasicMaterial>;
   private heart!: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   private halo!: THREE.Sprite;
@@ -329,6 +333,26 @@ export class ReactorScene {
     this.scene.environment = this.buildEnvironment();
     this.scene.environmentIntensity = 0.9;
 
+    // Свечение: каналы, кристалл и ореол светятся по-настоящему, а не
+    // «нарисованы яркими». Порог высокий — bloom берёт только энергию,
+    // титан остаётся металлом. Не завёлся — рисуем как раньше.
+    try {
+      const scenePass = pass(this.scene, this.camera);
+      const sceneColor = scenePass.getTextureNode();
+      const post = new PostProcessing(renderer);
+      // Прозрачность обязана дожить до экрана: холст лежит ПОД панелями и
+      // за ним — фон интерфейса. Прямое add(bloom) теряет альфу и закрашивает
+      // всё под реактором непрозрачным чёрным.
+      post.outputNode = vec4(
+        sceneColor.rgb.add(bloom(sceneColor, 0.55, 0.5, 0.7).rgb),
+        sceneColor.a,
+      );
+      this.post = post;
+    } catch (e) {
+      console.warn("Реактор: bloom не завёлся — рисую без свечения", e);
+      this.post = null;
+    }
+
     this.resize();
     this.clock.getDelta();
     renderer.setAnimationLoop((time) => void this.frame(time));
@@ -357,7 +381,7 @@ export class ReactorScene {
     sky.addColorStop(0, "#16242f");
     sky.addColorStop(0.45, "#1d3d52");
     sky.addColorStop(0.55, "#0e2231");
-    sky.addColorStop(1, "#04070b");
+    sky.addColorStop(1, "#081522");
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, w, h);
 
@@ -740,19 +764,20 @@ export class ReactorScene {
     this.halo.position.z = -0.175;
     this.chamber.add(this.halo);
 
-    // Кристалл ядра: фасеточный, вращается, светится изнутри.
-    this.crystal = new THREE.Mesh(new THREE.IcosahedronGeometry(0.125 * S, 0), this.m.crystal);
+    // Ядро: гладкая выпуклая линза, светится изнутри — сердце арк-реактора,
+    // а не драгоценный камень: огранка на малом размере читалась шумом.
+    this.crystal = new THREE.Mesh(new THREE.IcosahedronGeometry(0.125 * S, 3), this.m.crystal);
     this.crystal.position.z = -0.15;
     this.chamber.add(this.crystal);
 
-    // Рёбра кристалла: без них на маленьком размере огранка читается
-    // как белое пятно, а не как кристалл.
-    this.crystalEdges = new THREE.LineSegments(
-      new THREE.EdgesGeometry(this.crystal.geometry, 1),
-      this.m.crystalEdge,
+    // Кольцо ядра: тонкая яркая окружность вокруг линзы — узнаваемый силуэт
+    // арк-реактора. Стоит на месте, ядро дышит внутри него.
+    this.coreRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.175 * S, 0.005 * S, 8, 96),
+      this.m.fieldNode,
     );
-    this.crystalEdges.position.copy(this.crystal.position);
-    this.chamber.add(this.crystalEdges);
+    this.coreRing.position.z = -0.148;
+    this.chamber.add(this.coreRing);
 
     // Внутренний контр-октаэдр: вращается навстречу кристаллу,
     // виден сквозь прозрачные грани.
@@ -1471,20 +1496,15 @@ export class ReactorScene {
       emitter.bolt.scale.setScalar(0.018 + beamPower * 0.03 + charge * 0.006);
     }
 
-    // Гироскопические дуги: контр-вращение, в обработке ускоряются.
-    const gyroSpeed = 0.5 + STATE_FLOW[this.state] * 0.9;
-    for (const [i, arc] of this.gyroA.entries()) {
-      const direction = i % 2 === 0 ? 1 : -0.7;
-      arc.rotation.z += dt * gyroSpeed * direction * (1 + i * 0.1) * motion;
+    // Гироскопические дуги: неподвижны, живут только цветом и свечением.
+    for (const arc of this.gyroA) {
       const mat = arc.material as THREE.MeshBasicMaterial;
       mat.color.lerp(targetMain, Math.min(1, dt * 5));
       mat.opacity = isOff ? 0.06 : Math.min(0.7, 0.2 + this.energy * 0.35 + this.level * 0.25);
     }
 
-    // Контейнмент-каркас: медленно вращается навстречу кристаллу и
-    // сжимается, когда энергия растёт — ядро «держат» силовые линии.
-    this.coreCage.rotation.y += dt * (isOff ? 0.04 : 0.16 + this.energy * 0.14) * motion;
-    this.coreCage.rotation.x = Math.sin(t * 0.35) * 0.2 * motion;
+    // Контейнмент-каркас: стоит на месте, сжимается, когда энергия
+    // растёт — ядро «держат» силовые линии.
     this.coreCage.scale.setScalar(0.94 + this.energy * 0.08 + this.level * 0.08);
     this.m.field.color.lerp(targetMain, Math.min(1, dt * 5));
     this.m.field.opacity = isOff
@@ -1495,26 +1515,19 @@ export class ReactorScene {
       ? 0.08
       : Math.min(0.9, 0.35 + this.energy * 0.3 + this.level * 0.2);
 
-    // Кристалл: дыхание + аудио + покачивание; контр-октаэдр навстречу.
+    // Кристалл: дыхание + аудио, без вращения.
     const breathe = 0.94 + Math.sin(t * (isError ? 2.6 : 1.5) * motion) * 0.05;
-    this.crystal.rotation.y += dt * (isOff ? 0.08 : 0.4) * motion;
-    this.crystal.rotation.x = Math.sin(t * 0.4) * 0.15 * motion;
     this.crystal.position.y = Math.sin(t * 1.1) * 0.008 * motion;
     const pulse = isOff ? breathe : breathe + this.level * 0.3;
     const s = pulse * (0.9 + this.energy * 0.18);
     this.crystal.scale.set(s, s, s * 0.62);
 
-    // Рёбра кристалла живут вместе с ним и подчёркивают огранку.
-    this.crystalEdges.position.copy(this.crystal.position);
-    this.crystalEdges.rotation.copy(this.crystal.rotation);
-    this.crystalEdges.scale.copy(this.crystal.scale);
-    this.m.crystalEdge.color.lerp(targetBright, Math.min(1, dt * 5));
-    this.m.crystalEdge.opacity = isOff
-      ? 0.08
-      : Math.min(0.8, 0.25 + this.energy * 0.35 + this.level * 0.25);
+    // Кольцо ядра: чуть дышит вместе с энергией, стоит неподвижно.
+    if (this.coreRing) {
+      const ringS = 0.97 + this.energy * 0.05 + this.level * 0.06;
+      this.coreRing.scale.setScalar(ringS);
+    }
 
-    this.innerCore.rotation.y -= dt * (isOff ? 0.1 : 0.9) * motion;
-    this.innerCore.rotation.z += dt * 0.5 * motion;
     this.innerCore.scale.setScalar(s * 0.9);
     const innerMat = this.innerCore.material as THREE.MeshBasicMaterial;
     innerMat.color.lerp(targetBright, Math.min(1, dt * 5));
@@ -1614,6 +1627,10 @@ export class ReactorScene {
       if (this.introTime >= INTRO_DURATION) this.finishIntro();
     }
 
-    await renderer.renderAsync(this.scene, this.camera);
+    if (this.post) {
+      await this.post.renderAsync();
+    } else {
+      await renderer.renderAsync(this.scene, this.camera);
+    }
   }
 }

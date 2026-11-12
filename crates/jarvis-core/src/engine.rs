@@ -160,7 +160,7 @@ pub fn spawn_stt_worker(
     (tx, out_rx)
 }
 
-fn match_quick_social_response(text: &str) -> Option<&'static str> {
+fn match_quick_social_response(text: &str, name: &str) -> Option<String> {
     use crate::text::clean_text;
 
     let cleaned = clean_text(text);
@@ -170,24 +170,24 @@ fn match_quick_social_response(text: &str) -> Option<&'static str> {
         .iter()
         .any(|&w| matches!(w, "спасибо" | "спасибочки" | "благодарю" | "спс" | "мерси"))
     {
-        Some("Пожалуйста! Рад помочь.")
+        Some("Пожалуйста! Рад помочь.".into())
     } else if words.iter().any(|&w| {
         matches!(
             w,
             "привет" | "здравствуй" | "здорово" | "приветствую" | "хай"
         )
     }) {
-        Some("Привет! Чем могу помочь?")
+        Some("Привет! Чем могу помочь?".into())
     } else if words
         .iter()
         .any(|&w| matches!(w, "пока" | "прощай" | "отключись"))
         || cleaned.contains("до свидания")
     {
-        Some("До связи!")
+        Some("До связи!".into())
     } else if cleaned.contains("как дела") || cleaned.contains("как ты") {
-        Some("Всё отлично, готов к работе!")
+        Some("Всё отлично, готов к работе!".into())
     } else if cleaned.contains("кто ты") || cleaned.contains("как тебя зовут") {
-        Some("Я Джарвис, твой персональный голосовой ассистент.")
+        Some(format!("Я {name}, твой персональный голосовой ассистент."))
     } else {
         None
     }
@@ -333,7 +333,13 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     // Каналы и планировщик (по логике OpenJarvis): Telegram-бот и задачи
     // по расписанию живут в фоновых потоках движка и молчат, если не
     // настроены (токен/[[mcp_servers]] в settings.toml).
-    crate::telegram::spawn(Arc::clone(&h.llm));
+    crate::telegram::spawn(
+        Arc::clone(&h.llm),
+        h.audio_tx.clone(),
+        h.events.clone(),
+        Arc::clone(&h.llm_cancel),
+        Arc::clone(&h.llm_history),
+    );
     crate::schedule::spawn(
         Arc::clone(&h.llm),
         h.audio_tx.clone(),
@@ -1555,20 +1561,10 @@ fn handle_task_confirmation(
 /// нужного места и не начинает тему заново. Если возвращаться не к чему,
 /// честно говорим об этом, а не выдумываем продолжение.
 fn resume_topic(spoken: &str, h: &EngineHandles) -> Outcome {
-    let topic_memory = h
-        .settings
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .topic_memory;
-
-    let resume = topic_memory.then(topic::resume).flatten();
+    let resume = topic::resume();
 
     let Some(resume) = resume else {
-        let reply = if topic_memory {
-            "Не помню, о чём мы говорили. Напомни тему."
-        } else {
-            "Память тем выключена в настройках."
-        };
+        let reply = "Не помню, о чём мы говорили. Напомни тему.";
         println!("🧠 Возврат к теме: нечего вспоминать");
         let _ = h.events.send(JarvisEvent::Log {
             message: "Просьба вернуться к теме, но память тем пуста".into(),
@@ -1642,11 +1638,16 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
         return resume_topic(&spoken, h);
     }
 
-    if let Some(social_reply) = match_quick_social_response(text) {
+    // Имя ассистента: из настроек — «кто ты» отвечает настроенным именем.
+    let name = h
+        .settings
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .assistant_name
+        .clone();
+    if let Some(social_reply) = match_quick_social_response(text, &name) {
         println!("⚡ Социальный ответ: \"{}\"", social_reply);
-        let _ = h
-            .audio_tx
-            .send(AudioMessage::SynthesizeAndPlay(social_reply.to_string()));
+        let _ = h.audio_tx.send(AudioMessage::SynthesizeAndPlay(social_reply));
         return Outcome::Followup;
     }
 
@@ -1776,19 +1777,14 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
         // сейчас дипсик») не должны перехватываться, даже если в тексте есть
         // «сейчас», «цена» и т.п.
         let intent = router::classify(&prompt);
-        let web_search_auto = {
-            let st = h.settings.read().unwrap_or_else(|e| e.into_inner());
-            st.web_search_auto
-        };
-        // Явная просьба «посмотри в интернете» — прямая команда, работает
-        // всегда, даже с выключенным авто-поиском.
+        // Явная просьба «посмотри в интернете» — прямая команда.
         let explicit_web = intent == router::Intent::Chat && router::explicit_web_request(&prompt);
         let fresh_info = intent == router::Intent::Chat
             && crate::web::looks_like_fresh_info(&prompt)
             // «Какой сегодня день недели» вычисляется из даты в промпте —
             // поиск был бы тратой пары секунд.
             && !router::calendar_question(&prompt);
-        let web_auto = (fresh_info && web_search_auto) || explicit_web;
+        let web_auto = fresh_info || explicit_web;
 
         if web_auto && crate::weather::is_weather_question(&prompt) {
             // Погода — данные, а не рассуждение: детерминированный ответ из

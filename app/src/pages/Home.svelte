@@ -1,11 +1,9 @@
 <script lang="ts">
-  import { store, clearHistory, go } from "../store.svelte";
+  import { store, settings, clearHistory, go } from "../store.svelte";
   import { getAssistant, voiceStatusLabel } from "../assistant";
-  import { settings } from "../store.svelte";
   import ArcReactor from "../components/ArcReactor.svelte";
   import MicControl from "../components/MicControl.svelte";
   import Waveform from "../components/Waveform.svelte";
-  import CommandInput from "../components/CommandInput.svelte";
   import AppIcon from "../components/AppIcon.svelte";
 
   /**
@@ -37,11 +35,8 @@
 
   const busy = $derived(store.chat.busy);
 
-  const modelLabel = $derived(
-    settings.llm_backend === "uzu" ? "UZU · Metal" : "candle",
-  );
-
   const hasExchange = $derived(Boolean(lastUser || lastReply));
+  const wakeWord = $derived(settings.wake_word || "Джарвис");
 </script>
 
 <div class="home">
@@ -53,7 +48,7 @@
   <div class="transmission" class:is-empty={!hasExchange}>
     {#if !hasExchange}
       <span class="transmission__text dim">
-        Скажите «Джарвис» и говорите команду — или наберите её ниже.
+        Скажите «{wakeWord}» и говорите команду.
       </span>
     {:else}
       {#if lastUser}
@@ -85,43 +80,42 @@
     {/if}
   </div>
 
-  <!-- Голосовое управление -->
+  <!-- Голосовой пульт: статус, кнопка с уровнем звука, спектр -->
   <div class="voice-zone">
+    <span class="voice-status" class:is-live={assistant.tone === "live"} class:is-busy={busy} class:is-off={store.status.paused} class:is-err={assistant.tone === "error"}>
+      {statusLabel}
+    </span>
     <MicControl />
-    <div class="voice-center">
-      <span class="voice-status" class:is-live={assistant.tone === "live"} class:is-busy={busy} class:is-off={store.status.paused} class:is-err={assistant.tone === "error"}>
-        {statusLabel}
-      </span>
-      <Waveform />
-      {#if store.history.length}
+    <Waveform />
+    {#if store.history.length}
+      <div class="voice-links">
         <button class="link-btn" onclick={() => go("memory")}>
           Полная история — в разделе «Память»
           <AppIcon name="chevronRight" size={11} />
         </button>
-      {/if}
-    </div>
-    {#if store.history.length}
-      <button
-        class="icon-btn"
-        title="Очистить журнал диалога"
-        aria-label="Очистить журнал диалога"
-        onclick={clearHistory}
-      >
-        <AppIcon name="eraser" size={15} />
-      </button>
+        <button
+          class="icon-btn"
+          title="Очистить журнал диалога"
+          aria-label="Очистить журнал диалога"
+          onclick={clearHistory}
+        >
+          <AppIcon name="eraser" size={15} />
+        </button>
+      </div>
     {/if}
   </div>
-
-  <CommandInput />
-
-  <p class="home-foot tech-label">
-    {modelLabel} · локально · {settings.wakeword_model ? "wake word активен" : "wake word выключен"}
-  </p>
 </div>
 
 <style>
   .transmission.is-empty {
     justify-content: center;
+  }
+
+  .voice-links {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
   }
 
   .link-btn {
@@ -142,8 +136,4 @@
     color: var(--cyan);
   }
 
-  .home-foot {
-    text-align: center;
-    margin: 0 0 8px;
-  }
 </style>

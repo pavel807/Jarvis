@@ -50,7 +50,6 @@ pub struct Settings {
     pub asr_dict: bool,
 
     // --- LLM ---
-    pub llm_enabled: bool,
     /// Бэкенд LLM: "uzu" — движок Mirai на Metal (только macOS, модель
     /// скачивается сама) или "candle" — собственные реализации на candle.
     /// Применяется при следующем запуске движка.
@@ -61,10 +60,6 @@ pub struct Settings {
     /// (4-бит), "qwen3.5-2b-mirai-l" (8-бит) и т.д.
     /// Применяется при следующем запуске движка.
     pub llm_model: String,
-    /// Автоматически искать в интернете, когда вопрос про свежие данные.
-    pub web_search_auto: bool,
-    /// Нейро-нормализация текста перед озвучкой (числа и единицы через LLM).
-    pub llm_normalize: bool,
     pub llm_temperature: f64,
     /// Страховочный лимит длины ответа LLM в токенах. `0` — без лимита:
     /// ответы и команды досказываются до конца, обрывы держат только защита
@@ -88,11 +83,6 @@ pub struct Settings {
     /// Идентификатор каталога Яндекс.Облака (только для пресета "yandex"):
     /// из него собирается URI модели `gpt://<каталог>/<модель>/latest`.
     pub api_folder_id: String,
-    /// HF-репозиторий с FastConformer пользователя (`username/repo`): при
-    /// первом запуске модель качается оттуда, а не из GitHub-релиза. Файлы
-    /// в репозитории: model.safetensors, config.json, tokenizer.vocab.
-    /// Пусто — источник по умолчанию (релиз).
-    pub asr_hf_repo: String,
     /// Город погоды по умолчанию («какая погода» без города). Названный в
     /// вопросе город всегда сильнее настройки.
     pub weather_city: String,
@@ -112,10 +102,12 @@ pub struct Settings {
     /// в интерфейсе не дублируется.
     pub barge_in: bool,
 
+    // --- Личность ---
+    /// Имя ассистента: как он представляется в интерфейсе и разговоре.
+    /// Фраза-активация (`wake_word`) независима — её меняют отдельно.
+    pub assistant_name: String,
+
     // --- Память ---
-    /// Помнить темы между сессиями и возвращаться к ушедшей по просьбе
-    /// («мы это забыли»).
-    pub topic_memory: bool,
     /// Фильтр говорящего: в LLM-цепочку идёт только голос владельца.
     pub speaker_filter: bool,
     /// Порог косинусного сходства с голосовым профилем владельца (0..1).
@@ -126,6 +118,9 @@ pub struct Settings {
     pub telegram_bot_token: String,
     /// Разрешённые chat_id через запятую: кому бот отвечает.
     pub telegram_chat_ids: String,
+    /// Telegram может выполнять команды Джарвиса (весь список из
+    /// commands.toml и системные планы). false — только разговор.
+    pub telegram_execute: bool,
     /// Внешние MCP-серверы: [[mcp_servers]] name/cmd/args в settings.toml.
     pub mcp_servers: Vec<McpServerConfig>,
 }
@@ -159,7 +154,6 @@ impl Default for Settings {
             asr_decoder: "rnnt".to_string(),
             asr_beam_width: 8,
             asr_dict: true,
-            llm_enabled: true,
             llm_backend: if cfg!(target_os = "macos") {
                 "uzu".to_string()
             } else {
@@ -175,8 +169,6 @@ impl Default for Settings {
             } else {
                 crate::llm::qwen35::LOCAL_DIR_NAME.to_string()
             },
-            web_search_auto: true,
-            llm_normalize: true,
             llm_temperature: 0.6,
             // 0 — без искусственного лимита (длинные ответы не обрываются).
             llm_max_tokens: 0,
@@ -187,21 +179,19 @@ impl Default for Settings {
             api_key: String::new(),
             api_model: "yandexgpt-lite".to_string(),
             api_folder_id: String::new(),
-            // Пусто — FastConformer качается из GitHub-релиза; впиши свой
-            // HF-репозиторий (username/repo), когда выложишь конверсию.
-            asr_hf_repo: String::new(),
             weather_city: "Москва".to_string(),
             tts_voice: "ru_eduard".to_string(),
             tts_speed: 1.0,
             ack_before_llm: false,
             barge_in: true,
-            topic_memory: true,
             // Фильтр включён по умолчанию: если профиль ещё не построен,
+            assistant_name: "Джарвис".to_string(),
             // он просто пропускает всё и ни на что не влияет.
             speaker_filter: true,
             speaker_threshold: 0.6,
             telegram_bot_token: String::new(),
             telegram_chat_ids: String::new(),
+            telegram_execute: true,
             mcp_servers: Vec::new(),
         }
     }

@@ -54,8 +54,6 @@ export interface ReactorMaterials {
   charge: THREE.MeshBasicMaterial;
   /** Вспышка на дуле. */
   flash: THREE.SpriteMaterial;
-  /** Фасеточные рёбра кристалла: читают огранку на свету. */
-  crystalEdge: THREE.LineBasicMaterial;
   /** Свечение вент-пазов (тепло). */
   ventGlow: THREE.MeshBasicMaterial;
   /** Тонкая кромка по контуру шасси. */
@@ -119,15 +117,14 @@ export function createMaterials(): ReactorMaterials {
   const crystal = new THREE.MeshPhysicalMaterial({
     color: 0x9fe8ff,
     metalness: 0,
-    roughness: 0.1,
+    roughness: 0.08,
     transparent: true,
-    opacity: 0.78,
-    transmission: 0.62,
+    opacity: 0.82,
+    transmission: 0.6,
     thickness: 0.42,
     ior: 1.45,
     emissive: 0x9fe8ff,
-    emissiveIntensity: 0.4,
-    flatShading: true,
+    emissiveIntensity: 0.6,
     toneMapped: false,
   });
 
@@ -259,14 +256,6 @@ export function createMaterials(): ReactorMaterials {
     toneMapped: false,
   });
 
-  const crystalEdge = new THREE.LineBasicMaterial({
-    color: 0xd6f4ff,
-    transparent: true,
-    opacity: 0.45,
-    blending: THREE.AdditiveBlending,
-    toneMapped: false,
-  });
-
   const ventGlow = new THREE.MeshBasicMaterial({
     color: 0x2ea8dd,
     transparent: true,
@@ -308,7 +297,6 @@ export function createMaterials(): ReactorMaterials {
     beamGlow,
     charge,
     flash,
-    crystalEdge,
     ventGlow,
     edgeLine,
     coreLight,

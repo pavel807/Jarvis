@@ -48,12 +48,12 @@ export interface Settings {
   wake_window_ms: number;
   // Ответы
   llm_enabled: boolean;
+  /** Имя ассистента (в интерфейсе и разговоре); фраза-активация отдельно. */
+  assistant_name: string;
   /** Бэкенд LLM: "uzu" (Metal, модели каталога Mirai) или "candle". */
   llm_backend: string;
   /** Модель LLM (имя меняет смысл в зависимости от бэкенда). */
   llm_model: string;
-  web_search_auto: boolean;
-  llm_normalize: boolean;
   llm_temperature: number;
   /** Страховочный лимит длины ответа в токенах; 0 — без лимита. */
   llm_max_tokens: number;
@@ -64,8 +64,6 @@ export interface Settings {
   ack_before_llm: boolean;
   /** Перебивание: микрофон слушает, пока Джарвис говорит. */
   barge_in: boolean;
-  /** Помнить темы, от которых разговор ушёл в сторону. */
-  topic_memory: boolean;
   /** Фильтр говорящего: в ответы идёт только голос владельца. */
   speaker_filter: boolean;
   /** Порог косинусного сходства с голосовым профилем владельца. */
@@ -75,6 +73,8 @@ export interface Settings {
   telegram_bot_token: string;
   /** Чаты: id через запятую (группа — с минусом). */
   telegram_chat_ids: string;
+  /** Telegram может выполнять команды Джарвиса. */
+  telegram_execute: boolean;
 
   // --- Облачные модели (OpenAI-совместимый API) ---
   /** Мастер первого запуска пройден (иначе показывается онбординг). */
@@ -89,8 +89,6 @@ export interface Settings {
   api_model: string;
   /** Идентификатор каталога (только Яндекс). */
   api_folder_id: string;
-  /** HF-репозиторий FastConformer пользователя (username/repo), пусто — релиз. */
-  asr_hf_repo: string;
 }
 
 export interface Toast {
@@ -111,10 +109,6 @@ export interface Turn {
   streaming?: boolean;
   /** Неудача: ошибка движка вместо ответа. */
   error?: boolean;
-}
-
-function now(): string {
-  return new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
 }
 
 let ids = 0;
@@ -196,8 +190,6 @@ export const store = $state({
    * true — получено (меню закрывается), null — вопросов нет.
    */
   micPermission: null as boolean | null,
-  /** Технический журнал — целиком показывается только в «Помощи». */
-  logs: [] as string[],
   toasts: [] as Toast[],
 });
 
@@ -214,7 +206,7 @@ export function toast(text: string, kind: Toast["kind"] = "info", ms = 2800) {
 export const SUB_PAGES = ["commands", "voice", "voicetrain", "wakeword", "help"];
 
 /** Четыре раздела нижней навигации. */
-export const NAV_PAGES = ["home", "memory", "system", "settings"];
+export const NAV_PAGES = ["home", "memory", "settings"];
 
 export function go(page: string) {
   // Запоминаем раздел, откуда ушли, чтобы «назад» вела именно туда.
@@ -277,28 +269,26 @@ export const settings = $state<Settings>({
   wake_word: "Джарвис",
   wake_window_ms: 1200,
   llm_enabled: true,
+  assistant_name: "Джарвис",
   llm_backend: "uzu",
   llm_model: "qwen3.5-2b-mirai-m",
-  web_search_auto: true,
-  llm_normalize: true,
   llm_temperature: 0.6,
   llm_max_tokens: 0,
   tts_voice: "ru_dmitriy",
   tts_speed: 1.0,
   ack_before_llm: false,
   barge_in: true,
-  topic_memory: true,
   speaker_filter: true,
   speaker_threshold: 0.6,
   telegram_bot_token: "",
   telegram_chat_ids: "",
+  telegram_execute: true,
   setup_done: false,
   api_preset: "yandex",
   api_base_url: "https://llm.api.cloud.yandex.net/v1",
   api_key: "",
   api_model: "yandexgpt-lite",
   api_folder_id: "",
-  asr_hf_repo: "",
 });
 
 export async function loadSettings() {
@@ -352,14 +342,7 @@ export async function initEvents() {
         break;
       case "topic_resumed":
         noteTurn(`Вернулись к теме: ${((ev.topic as string) ?? "").trim()}`);
-        store.logs.unshift(`${now()}  🧠 Возврат к теме: ${ev.topic}`);
         break;
-      case "action_started": {
-        const summary = ((ev.summary as string) ?? "").slice(0, 120);
-        store.logs.unshift(`${now()}  🔧 ${(ev.tool as string) ?? ""} ${summary}`);
-        if (store.logs.length > 300) store.logs.length = 300;
-        break;
-      }
       case "action_result": {
         const summary = ((ev.summary as string) ?? "").slice(0, 300);
         store.matchedCommand = "";
@@ -367,8 +350,6 @@ export async function initEvents() {
         if (summary) {
           pushTurn({ role: "assistant", text: summary, source: "action" });
         }
-        store.logs.unshift(`${now()}  ${(ev.ok as boolean) ? "✅" : "❗"} ${summary}`);
-        if (store.logs.length > 300) store.logs.length = 300;
         break;
       }
       case "command_matched":
@@ -376,10 +357,6 @@ export async function initEvents() {
         // молча проигнорировал просьбу.
         store.matchedCommand = (ev.name as string) ?? "";
         noteTurn(`Команда «${store.matchedCommand}»`);
-        store.logs.unshift(`${now()}  ⚡ Команда: ${store.matchedCommand}`);
-        break;
-      case "command_not_found":
-        store.logs.unshift(`${now()}  ❓ Команда не найдена: ${(ev.text as string) ?? ""}`);
         break;
       case "reactor_intro":
         // Реактор живёт только на главной: без возврата просьба осталась бы
@@ -457,10 +434,6 @@ export async function initEvents() {
         store.micPermission = (ev.granted as boolean) ?? false;
         if (store.micPermission) toast("Микрофон подключён", "ok");
         break;
-      case "log":
-        store.logs.unshift(`${now()}  ${(ev.message as string) ?? ""}`);
-        if (store.logs.length > 300) store.logs.length = 300;
-        break;
       case "error": {
         const message = (ev.message as string) ?? "Неизвестная ошибка";
         const wasChatPending = store.chat.busy || Boolean(store.chat.question);
@@ -480,7 +453,6 @@ export async function initEvents() {
         if (wasChatPending) {
           pushTurn({ role: "assistant", text: `Не получилось: ${message}`, source: "text", error: true });
         }
-        store.logs.unshift(`${now()}  ❗ ${message}`);
         toast(message, "err", 5000);
         break;
       }
