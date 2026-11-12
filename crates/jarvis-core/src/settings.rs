@@ -29,6 +29,12 @@ pub struct Settings {
     pub wake_threshold: f32,
     /// Имя файла активной модели wake word внутри `models/`.
     pub wakeword_model: String,
+    /// Детектор wake word: "ctc" — по CTC-постерам ASR-модели (любое
+    /// слово-активация, дикторонезависимо, эталон не нужен),
+    /// "metric" — метрический, по облаку эмбеддингов (эталон .jref).
+    pub wake_detector: String,
+    /// Слово-активация для CTC-детектора (в любом регистре).
+    pub wake_word: String,
 
     // --- STT (FastConformer) ---
     /// Декодер ASR: "rnnt" — транзьюсер жадно (по умолчанию, точнее),
@@ -144,6 +150,8 @@ impl Default for Settings {
             followup_window_secs: 8,
             wake_threshold: 0.6,
             wakeword_model: "jarvis_model_2.rpw".to_string(),
+            wake_detector: "ctc".to_string(),
+            wake_word: "Джарвис".to_string(),
             asr_decoder: "rnnt".to_string(),
             asr_beam_width: 8,
             asr_dict: true,

@@ -402,24 +402,29 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
         Arc::clone(&h.commands),
     );
 
-    let ww_model = {
+    // Модель вакворда нужна только метрическому пути: CTC-детектор работает
+    // по слову-активации и эталона не требует. .rpw (DTW) из пути
+    // распознавания выведен — качать его незачем (в релизе его нет).
+    {
         let s = h.settings.read().unwrap_or_else(|e| e.into_inner());
-        s.wakeword_model.clone()
-    };
-    // Дефолтные модели вакворда качаются из релиза (.jref — дикторонезависимый,
-    // .rpw — обученный на голосе владельца); нет ни одной — движок не падает,
-    // а ждёт: модель появится после обучения в приложении.
-    let _ = crate::model_fetch::ensure_wakeword(&ww_model);
-    let _ = crate::model_fetch::ensure_wakeword(wake::EMBEDDING_REFERENCE);
+        if !s.wake_detector.eq_ignore_ascii_case("ctc") {
+            let _ = crate::model_fetch::ensure_wakeword(wake::EMBEDDING_REFERENCE);
+        }
+    }
     let mut first_wait = true;
     let mut det = loop {
         // Настройки перечитываем на каждом круге: обучение в приложении
         // (ww_apply) меняет имя модели и порог — подхватываем без перезапуска.
-        let (ww_name, threshold) = {
+        let (ww_name, threshold, mode, word) = {
             let s = h.settings.read().unwrap_or_else(|e| e.into_inner());
-            (s.wakeword_model.clone(), s.wake_threshold)
+            (
+                s.wakeword_model.clone(),
+                s.wake_threshold,
+                s.wake_detector.clone(),
+                s.wake_word.clone(),
+            )
         };
-        match wake::create_engine(&stt, &ww_name, threshold) {
+        match wake::create_engine(&stt, &ww_name, threshold, &mode, &word) {
             Ok(det) => break det,
             Err(e) => {
                 let text = format!("{e:#}");
@@ -513,7 +518,13 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
         if h.wakeword_reload.load(Ordering::SeqCst) && state == AppState::WaitingForWakeWord {
             h.wakeword_reload.store(false, Ordering::SeqCst);
             let snap = h.settings.read().unwrap_or_else(|e| e.into_inner()).clone();
-            match wake::create_engine(&stt, &snap.wakeword_model, snap.wake_threshold) {
+            match wake::create_engine(
+                &stt,
+                &snap.wakeword_model,
+                snap.wake_threshold,
+                &snap.wake_detector,
+                &snap.wake_word,
+            ) {
                 Ok(d) => {
                     det = d;
                     println!("🔄 Модель wake word обновлена");

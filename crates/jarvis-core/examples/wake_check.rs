@@ -18,14 +18,20 @@ fn main() -> Result<()> {
         .map(|s| s.wakeword_model)
         .unwrap_or_default();
 
-    jarvis_core::wake::create_engine(&stt, &ww, threshold)?;
+    let (mode, word) = jarvis_core::settings::Settings::load(&jarvis_core::paths::settings_file())
+        .map(|s| (s.wake_detector, s.wake_word))
+        .unwrap_or_else(|_| ("ctc".to_string(), "Джарвис".to_string()));
+    jarvis_core::wake::create_engine(&stt, &ww, threshold, &mode, &word)?;
     println!("✅ Движок wake word создан");
 
     // Эталонные записи из train-каталога: позитивы должны давать счёт выше
     // порога эталона, негативы — ниже.
     let (train_dir, _) = jarvis_core::wake_train::sample_dirs();
     if !train_dir.exists() {
-        println!("ℹ️ Записей для самопроверки нет ({}) — запиши сэмплы в приложении", train_dir.display());
+        println!(
+            "ℹ️ Записей для самопроверки нет ({}) — запиши сэмплы в приложении",
+            train_dir.display()
+        );
         return Ok(());
     }
     let read_window = |path: &std::path::Path| -> Result<Vec<f32>> {
@@ -42,15 +48,26 @@ fn main() -> Result<()> {
                 .map(|c| c.iter().sum::<f32>() / spec.channels as f32)
                 .collect()
         };
-        Ok(jarvis_core::audio::resample_audio(&mono, spec.sample_rate as usize, 16_000))
+        Ok(jarvis_core::audio::resample_audio(
+            &mono,
+            spec.sample_rate as usize,
+            16_000,
+        ))
     };
 
     for entry in std::fs::read_dir(&train_dir)?.flatten() {
         let path = entry.path();
-        if path.extension().is_none_or(|e| !e.eq_ignore_ascii_case("wav")) {
+        if path
+            .extension()
+            .is_none_or(|e| !e.eq_ignore_ascii_case("wav"))
+        {
             continue;
         }
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let label = jarvis_core::tts::label_of_sample(&name);
         let mut audio = read_window(&path).with_context(|| name.clone())?;
         // Окно 1.2 с, идемпотентно (см. wake_verify): файл уже окно — как есть.

@@ -92,9 +92,9 @@ impl rustpotter::FrameEmbedder for FastConformerEmbedder {
     }
 }
 
-/// Детектор вакворда для главного цикла движка: кусок 16 кГц на входе —
-/// срабатывание на выходе. Единственная реализация — метрическая.
-pub struct WakeEngine {
+/// Метрический детектор (эталон .jref) — прежний путь: окно сравнивается с
+/// облаком эмбеддингов, набранным из синтетических голосов.
+pub struct MetricWakeEngine {
     det: rustpotter::EmbeddingDetector<FastConformerEmbedder>,
 }
 
@@ -103,7 +103,60 @@ pub struct WakeHit {
     pub score: f32,
 }
 
+/// Детектор wake word движка.
+///
+/// `Ctc` — по CTC-постерам ASR-модели: эталон это слово-активация, а не
+/// облако аудио, поэтому слово любое и голос не важен; срабатывание
+/// означает, что модель услышала слово в декоде. `Metric` — прежний
+/// метрический путь по эталону `.jref`.
+pub enum WakeEngine {
+    Ctc(crate::wake_ctc::CtcWakeEngine),
+    Metric(MetricWakeEngine),
+}
+
 impl WakeEngine {
+    pub fn process_16k(&mut self, chunk: &[f32]) -> Option<WakeHit> {
+        match self {
+            WakeEngine::Ctc(d) => d.process(chunk).map(|c| WakeHit {
+                name: d.word().to_string(),
+                score: c.score,
+            }),
+            WakeEngine::Metric(d) => d.process_16k(chunk),
+        }
+    }
+
+    /// Сброс потокового состояния (после срабатывания/паузы).
+    pub fn reset(&mut self) {
+        match self {
+            WakeEngine::Ctc(d) => d.reset(),
+            WakeEngine::Metric(d) => d.reset(),
+        }
+    }
+
+    /// Счёт последнего окна (тюнение порога в UI/журнале).
+    pub fn last_score(&self) -> Option<f32> {
+        match self {
+            WakeEngine::Ctc(d) => d.last_score(),
+            WakeEngine::Metric(d) => d.last_score(),
+        }
+    }
+
+    /// Человекочитаемая диагностика последнего окна — в журнал.
+    pub fn describe(&self) -> String {
+        match self {
+            WakeEngine::Ctc(d) => match d.last_diag() {
+                Some(diag) => format!(
+                    "rms {:.4}, пол {:.4}, голос {}, декод «{}», счёт {:?}, попаданий {}/{}",
+                    diag.rms, diag.noise_floor, diag.voiced, diag.decoded, diag.score, diag.hits, 0
+                ),
+                None => "нет диагностики".to_string(),
+            },
+            WakeEngine::Metric(d) => format!("метрический, счёт {:?}", d.last_score()),
+        }
+    }
+}
+
+impl MetricWakeEngine {
     pub fn process_16k(&mut self, chunk: &[f32]) -> Option<WakeHit> {
         self.det.process(chunk).map(|d| WakeHit {
             name: "jarvis".to_string(),
@@ -171,7 +224,24 @@ pub fn create_engine(
     stt: &Arc<Mutex<crate::stt::Stt>>,
     _rpw_name: &str,
     threshold_setting: f32,
+    mode: &str,
+    word: &str,
 ) -> Result<WakeEngine> {
+    // CTC-детектор: эталон — слово текстом, поэтому файл .jref не нужен
+    // и новое активационное слово не требует пересборки модели.
+    if mode.eq_ignore_ascii_case("ctc") {
+        let w = crate::wake_ctc::normalize_word(word);
+        if w.is_empty() {
+            bail!("Пустое слово-активация: задайте wake_word в настройках");
+        }
+        let engine = crate::wake_ctc::CtcWakeEngine::new(
+            Arc::clone(stt),
+            &w,
+            crate::wake_ctc::CtcConfig::default(),
+        );
+        println!("🎯 Wake word: CTC-детектор, слово «{w}» (эталон не нужен)");
+        return Ok(WakeEngine::Ctc(engine));
+    }
     let jref = crate::paths::models_dir().join(EMBEDDING_REFERENCE);
     if !jref.exists() {
         anyhow::bail!(
@@ -203,5 +273,5 @@ pub fn create_engine(
         "🎯 Wake word: метрический детектор ({} — дикторонезависимый, порог {calibrated:.4})",
         EMBEDDING_REFERENCE
     );
-    Ok(WakeEngine { det })
+    Ok(WakeEngine::Metric(MetricWakeEngine { det }))
 }

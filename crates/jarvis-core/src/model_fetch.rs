@@ -288,6 +288,30 @@ fn download(url: &str, dest: &Path, expected: u64, progress: &mut dyn FnMut(u8))
 /// Размер ассета в релизе через `Content-Length` (0, если не удалось узнать).
 fn remote_size(url: &str) -> u64 {
     let out = std::process::Command::new(curl_bin())
+        .args([
+            "-sIL",
+            "--connect-timeout",
+            "20",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+        ])
+        .arg(url)
+        .output();
+    let Ok(out) = out else {
+        return 0;
+    };
+    let status = String::from_utf8_lossy(&out.stdout);
+    // Ассета может не быть в релизе (например, .rpw давно не выкладывается):
+    // это не ошибка, а отсутствие опционального файла. Без проверки кода
+    // curl отдавал бы длину страницы 404, движок пробовал скачать её и
+    // печатал «curl: (22) ... 404» при каждом старте.
+    if status.trim() != "200" {
+        return 0;
+    }
+    // Content-Length берём вторым запросом: -o /dev/null съел заголовки.
+    let out = std::process::Command::new(curl_bin())
         .args(["-sIL", "--connect-timeout", "20"])
         .arg(url)
         .output();
