@@ -1,0 +1,31 @@
+# Сборка проекта через compose: один сервис, воспроизводимый контейнер,
+# артефакты на хосте в ./dist-out. Нативный путь — ./install.sh.
+#
+#   docker compose run --rm build          # собрать релиз
+#   docker compose run --rm test           # прогнать тесты воркспейса
+#
+services:
+  build:
+    build: .
+    image: jarvis-build:latest
+    volumes:
+      - .:/src
+      - cargo-registry:/usr/local/cargo/registry
+      - target-cache:/src/target
+    # OUT_DIR — куда сложить артефакты на хосте (по умолчанию dist-out).
+    environment:
+      - HOME=/root
+    command: ["bash", "-lc", "bun install --frozen-lockfile && bun tauri build && mkdir -p /src/${OUT_DIR:-dist-out} && cp -v src-tauri/target/release/jarvis-app /src/${OUT_DIR:-dist-out}/ && cp -rv src-tauri/target/release/bundle/* /src/${OUT_DIR:-dist-out}/ 2>/dev/null || true"]
+
+  test:
+    build: .
+    image: jarvis-build:latest
+    volumes:
+      - .:/src
+      - cargo-registry:/usr/local/cargo/registry
+      - target-cache:/src/target
+    command: ["bash", "-lc", "cargo test --workspace --quiet && bun install --frozen-lockfile && bunx svelte-check --quiet"]
+
+volumes:
+  cargo-registry:
+  target-cache:

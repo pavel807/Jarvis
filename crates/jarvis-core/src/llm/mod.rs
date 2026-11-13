@@ -60,6 +60,18 @@ pub fn request_snapshot() -> u64 {
     REQUEST_GEN.load(Ordering::SeqCst)
 }
 
+/// Сколько обработок просьб завершилось: одноразовые режимы (CLI `--say`)
+/// по приросту этого счётчика ждут конца действия, не выходя посреди.
+static ASK_DONE: AtomicU64 = AtomicU64::new(0);
+
+pub fn asks_completed() -> u64 {
+    ASK_DONE.load(Ordering::SeqCst)
+}
+
+fn ask_done() {
+    ASK_DONE.fetch_add(1, Ordering::SeqCst);
+}
+
 /// Промпт для ответов по результатам веб-поиска.
 /// Глубокое исследование (по логике OpenJarvis deep-research): модель сама
 /// делает несколько поисков с разными формулировками и синтезирует ответ
@@ -427,6 +439,9 @@ fn wait_for_engine(
     }
 }
 /// Задать вопрос LLM. Не блокирует: генерация идёт в фоне.
+/// Запустить обработку просьбы в фоне. Возвращает поток обработки, чтобы
+/// одноразовые режимы (CLI `--say`) могли дождаться конца действия;
+/// обычный голосовой цикл поток не ждёт и просто игнорирует возврат.
 pub fn ask(
     shared: SharedLlm,
     system: &'static str,
@@ -435,7 +450,7 @@ pub fn ask(
     audio_tx: Sender<AudioMessage>,
     events: EventTx,
     cancel: Arc<AtomicBool>,
-) {
+) -> Option<std::thread::JoinHandle<()>> {
     // Детерминированный план системной команды: «открой Max», «сверни окно
     // голосового помощника», «закрой телеграм». Считаем ДО кэша сайтов,
     // иначе установленное приложение проигрывает запомненному домену.
@@ -472,10 +487,11 @@ pub fn ask(
         let _ = events.send(JarvisEvent::LlmDone {
             text: outcome.speech,
         });
-        return;
+        ask_done();
+        return None;
     }
 
-    std::thread::spawn(move || {
+    Some(std::thread::spawn(move || {
         let _ = events.send(JarvisEvent::LlmStatus {
             status: "thinking".into(),
         });
@@ -960,7 +976,8 @@ pub fn ask(
         // (логика OpenJarvis) — не тормозит диалог, ошибки молча деградируют.
         crate::memory::extract_async(Arc::clone(&shared), prompt.clone(), text.clone());
         let _ = events.send(JarvisEvent::LlmDone { text });
-    });
+        ask_done();
+    }))
 }
 
 /// Сколько раз за одну фразу агент может вызвать инструмент.

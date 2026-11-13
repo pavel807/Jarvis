@@ -1,0 +1,10 @@
+# плагин: батарея
+# описание: состояние батареи и заряда ноутбука
+# аргументы: нет
+
+cap = run("cat /sys/class/power_supply/BAT0/capacity")
+status = run("cat /sys/class/power_supply/BAT0/status")
+if cap == "":
+    say("Батарею не нашёл — похоже, это стационарный компьютер")
+else:
+    say("Заряд " + cap + " процентов, " + status)

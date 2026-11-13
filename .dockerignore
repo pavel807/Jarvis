@@ -1,0 +1,7 @@
+target
+dist-out
+node_modules
+.git
+*.log
+app/node_modules
+app/dist

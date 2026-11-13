@@ -392,6 +392,16 @@ fn window_count_for(display: &str, probe: &str) -> usize {
 /// `None` — такого приложения нет: подменять его файлом или сайтом нельзя.
 /// Каталог установленных приложений для контекста агента: модель выбирает
 /// из реального списка, а не выдумывает имена («Finder» на Linux).
+/// Записи базы приложений: (имя, бинарь из Exec, id .desktop). Это и есть
+/// «база данных приложений»: сканируется при старте, отдаётся модели в
+/// промпт и пишется в JSON — быстро и без повторного обхода каталогов.
+pub fn app_db_entries() -> Vec<(String, String, String)> {
+    desktop_apps()
+        .into_iter()
+        .map(|a| (a.name, a.exec_bin.clone(), a.id))
+        .collect()
+}
+
 pub fn app_catalog() -> Vec<String> {
     let mut names: Vec<String> = desktop_apps()
         .into_iter()

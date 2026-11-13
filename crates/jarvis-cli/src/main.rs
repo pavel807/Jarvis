@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 fn main() -> Result<()> {
     jarvis_core::init_tuning();
+    // База приложений и плагины прогреваются в фоне, не блокируя запуск.
+    jarvis_core::warm_startup();
 
     println!("🎙️ Запуск Jarvis CLI ...");
 
@@ -168,6 +170,14 @@ fn main() -> Result<()> {
         jarvis_core::llm::reload_llm(&shared_for_watcher, &events_for_watcher);
     });
 
+    // Режим `--say "фраза"`: одноразовая обработка фразы без микрофона —
+    // тот же путь handle_transcript (роутер → LLM → инструменты → озвучка).
+    let say_phrase: Option<String> = std::env::args()
+        .skip_while(|a| a != "--say")
+        .nth(1)
+        .map(|p| p.trim_matches('"').to_string());
+    let say_mode = say_phrase.is_some();
+
     let shared_tts: Arc<SharedTtsState> = Arc::new(SharedTtsState::new());
     let tts_failed = Arc::new(AtomicBool::new(false));
     let tts_voice = settings
@@ -191,8 +201,13 @@ fn main() -> Result<()> {
     // LLM: фоновая загрузка Qwen3.
     spawn_llm_loader(&shared_llm, &events_tx);
 
-    println!("📥 Загрузка FastConformer (ASR)...");
-    let model = Stt::load(&models_dir)?;
+    // В режиме --say ASR не нужен: экономим загрузку модели и старт.
+    let model = if say_mode {
+        None
+    } else {
+        println!("📥 Загрузка FastConformer (ASR)...");
+        Some(Stt::load(&models_dir)?)
+    };
 
     // Фильтр говорящего: как в Tauri-приложении; профиль строим сразу.
     let speaker_gate = jarvis_core::speaker::load_gate(&events_tx);
@@ -220,5 +235,17 @@ fn main() -> Result<()> {
         speaker_rx,
     };
 
-    run_engine(model, handles)
+    match (say_phrase, model) {
+        // Одноразовая фраза: проговорили — вышли. Плагины грузим прямо
+        // здесь: фоновый прогрев может не успеть к первой фразе.
+        (Some(phrase), _) => {
+            let (ready, broken) = jarvis_core::plugins::load_all();
+            println!("🔌 Плагины: {ready} готово, {broken} сломано");
+            jarvis_core::engine::say_once(&phrase, &handles);
+            println!("✅ Фраза обработана");
+            Ok(())
+        }
+        (None, Some(model)) => run_engine(model, handles),
+        (None, None) => unreachable!("без --say модель ASR обязательна"),
+    }
 }

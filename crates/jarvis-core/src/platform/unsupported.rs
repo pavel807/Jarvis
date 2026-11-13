@@ -101,6 +101,11 @@ pub fn music_status() -> Option<String> {
     None
 }
 
+/// Записи базы приложений: на этой платформе пока каталог не собирается.
+pub fn app_db_entries() -> Vec<(String, String, String)> {
+    Vec::new()
+}
+
 pub fn app_catalog() -> Vec<String> {
     Vec::new()
 }

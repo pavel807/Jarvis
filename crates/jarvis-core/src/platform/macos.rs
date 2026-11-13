@@ -200,6 +200,11 @@ fn bundle_names() -> Vec<String> {
 /// `None` — такого приложения нет: вызывающий код не должен подменять его
 /// файлом, папкой или сайтом.
 /// Каталог установленных приложений для контекста агента.
+/// Записи базы приложений: на этой платформе пока каталог не собирается.
+pub fn app_db_entries() -> Vec<(String, String, String)> {
+    Vec::new()
+}
+
 pub fn app_catalog() -> Vec<String> {
     let mut names = bundle_names();
     names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));

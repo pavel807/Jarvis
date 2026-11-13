@@ -39,6 +39,58 @@ pub mod paths;
 pub mod permissions;
 pub mod platform;
 pub mod plugins;
+
+/// Текущее время в RFC3339 без внешних зависимостей: дата из `date +%F`,
+/// время посекундно из системного вызова — точности снимка достаточно.
+fn time_now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86400;
+    // Гражданская дата (алгоритм Ховарда Хиннанта): без chrono.
+    let z = (days + 719_468) as i64;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    let rem = secs % 86400;
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, (rem % 3600) / 60, rem % 60)
+}
+
+/// Стартовый прогрев «знания о системе»: сканирование установленных
+/// приложений в базу (память + JSON на диске) и компиляция плагинов в
+/// фоне. Вызывается один раз при запуске ассистента — модель получает
+/// готовый каталог мгновенно, а не после первого обхода каталогов.
+pub fn warm_startup() {
+    std::thread::spawn(|| {
+        // База приложений: список в памяти уже прогрет ленивым кэшем
+        // платформенного слоя, на диск пишем снимок для наблюдаемости.
+        let apps = platform::app_db_entries();
+        let file = paths::app_data_dir().join("app_db.json");
+        let db = serde_json::json!({
+            "обновлено": time_now_rfc3339(),
+            "приложений": apps.len(),
+            "приложения": apps.iter().map(|(name, exec, id)| serde_json::json!({
+                "имя": name, "бинарь": exec, "id": id,
+            })).collect::<Vec<_>>(),
+        });
+        match serde_json::to_string_pretty(&db)
+            .ok()
+            .and_then(|s| std::fs::write(&file, s).ok())
+        {
+            Some(()) => println!("📚 База приложений: {} записей — {}", apps.len(), file.display()),
+            None => eprintln!("⚠️ Не записал базу приложений в {}", file.display()),
+        }
+    });
+    // Плагины на Spark: скан каталогов, компиляция с кэшем — в своём потоке.
+    plugins::warm();
+}
 pub mod prompt_budget;
 pub mod router;
 pub mod schedule;

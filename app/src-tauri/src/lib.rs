@@ -1201,6 +1201,7 @@ fn app_data_dir() -> PathBuf {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     jarvis_core::init_tuning();
+    jarvis_core::warm_startup();
 
     if std::env::var_os("JARVIS_HOME").is_none() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

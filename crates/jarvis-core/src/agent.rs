@@ -130,6 +130,10 @@ const THIRTY_SECONDS: Duration = Duration::from_secs(30);
 /// Спецификация по каноническому имени. `None` — имя вне реестра: вызов
 /// отклоняется до выполнения.
 pub fn spec_for(name: &str) -> Option<ToolSpec> {
+    // Плагины-автоматизации: спецификация из их реестра, тот же контракт.
+    if crate::plugins::is_plugin_tool(name) {
+        return crate::plugins::spec(name);
+    }
     // Спецификация выдаётся только для канонических имён реестра: parse
     // нормализует алиасы до вызова, так что сюда приходят именно они.
     if !KNOWN_NAMES.contains(&name) {

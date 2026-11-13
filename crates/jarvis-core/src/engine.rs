@@ -325,6 +325,50 @@ fn wait_for_verdict(rx: &Receiver<SpeakerReply>, expected_id: u64, timeout: Dura
     }
 }
 
+/// Однократная обработка фразы без микрофона (CLI `--say`): тот же путь
+/// `handle_transcript`, что после распознавания речи, — роутер, LLM,
+/// инструменты, озвучка. Ждёт готовность LLM, чтобы действие не ушло
+/// в ложный отказ.
+pub fn say_once(text: &str, h: &EngineHandles) {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut guard = h
+        .llm
+        .engine
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    while guard.is_none()
+        && !h.llm.failed.load(Ordering::SeqCst)
+        && Instant::now() < deadline
+    {
+        let (g, _) = h
+            .llm
+            .condvar
+            .wait_timeout(guard, Duration::from_millis(500))
+            .unwrap_or_else(|e| e.into_inner());
+        guard = g;
+    }
+    let llm_ready = guard.is_some();
+    drop(guard);
+    if !llm_ready {
+        // Движка нет: фраза всё равно пройдёт свой путь и честно откажется.
+        println!("⚠️ LLM не готова — фраза пойдёт без неё");
+    }
+    let mut rng = rand::thread_rng();
+    handle_transcript(text, h, &mut rng);
+    // ask() ведёт действие в фоне: ждём его конца — иначе CLI выйдет
+    // посреди действия и эффект не случится.
+    let done_deadline = Instant::now() + Duration::from_secs(180);
+    let before = llm::asks_completed();
+    while Instant::now() < done_deadline && llm::asks_completed() <= before {
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    // Даём озвучке доиграть: синтез и проигрывание идут в потоке плеера.
+    let spoken_deadline = Instant::now() + Duration::from_secs(60);
+    while h.is_speaking.load(Ordering::SeqCst) && Instant::now() < spoken_deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
     // Прогреваем соединение с поисковиком заранее: тогда первый запрос
     // пользователя не платит за DNS и TLS-рукопожатие.

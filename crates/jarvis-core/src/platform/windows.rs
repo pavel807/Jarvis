@@ -256,6 +256,11 @@ $hit=@($procs | Where-Object { $p=$_; $pn=$p.ProcessName.ToLower(); @($tokens | 
 /// Настоящее установленное приложение из меню «Пуск». `None` — такого
 /// приложения нет: подменять его файлом или сайтом нельзя.
 /// Каталог установленных приложений для контекста агента.
+/// Записи базы приложений: на этой платформе пока каталог не собирается.
+pub fn app_db_entries() -> Vec<(String, String, String)> {
+    Vec::new()
+}
+
 pub fn app_catalog() -> Vec<String> {
     let mut names: Vec<String> = start_apps().into_iter().map(|(n, _)| n).collect();
     names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));

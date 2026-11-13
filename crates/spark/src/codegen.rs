@@ -1,7 +1,7 @@
 use crate::ast::{Expr, Stmt};
 use std::collections::HashSet;
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tempfile::Builder;
 
 /// Системная прелюдия для плагинов-автоматизаций: аргументы командной
@@ -18,11 +18,51 @@ fn spark_env(name: impl AsRef<str>) -> String {
 }
 #[allow(dead_code)]
 fn spark_run(cmd: impl AsRef<str>) -> String {
-    let out = std::process::Command::new("sh").arg("-c").arg(cmd.as_ref()).output();
-    match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        Err(_) => String::new(),
+    // Вывод пишем во временный ФАЙЛ, а не в пайп: команда вида
+    // `gtk-launch …` заменяет себя запускаемым приложением, которое живёт
+    // долго — пайп никогда не закроется и чтение зависнет навсегда.
+    let tmp = std::env::temp_dir().join(format!("spark-run-{}", std::process::id()));
+    if let Ok(f) = fs::File::create(&tmp) {
+        let child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd.as_ref())
+            .stdout(Stdio::from(f))
+            .stderr(Stdio::null())
+            .stdin(Stdio::null())
+            .spawn();
+        if let Ok(mut child) = child {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => {
+                        let out = fs::read_to_string(&tmp).unwrap_or_default();
+                        let _ = fs::remove_file(&tmp);
+                        return out.trim().to_string();
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                    Err(_) => break,
+                }
+            }
+            // Не завершилась за 10 с — не убиваем: процесс мог стать
+            // запущенным приложением. Честно сообщаем об этом.
+            let _ = fs::remove_file(&tmp);
+            return String::new();
+        }
     }
+    String::new()
+}
+/// Запустить команду без ожидания: для открытия приложений
+/// (`launch("gtk-launch org.gnome.Calculator")`).
+#[allow(dead_code)]
+fn spark_launch(cmd: impl AsRef<str>) -> String {
+    let _ = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd.as_ref())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .spawn();
+    "ok".to_string()
 }
 #[allow(dead_code)]
 fn spark_read(path: impl AsRef<str>) -> String {
@@ -69,7 +109,7 @@ pub struct Ctx {
 
 pub fn compile_to_string(ast: Vec<Stmt>) -> String {
 
-    let mut rust_code = String::from("use std::io::{Read, Write};\nuse std::fs;\n\n");
+    let mut rust_code = String::from("use std::io::{Read, Write};\nuse std::fs;\nuse std::process::Stdio;\n\n");
 
     let mut funcs = Vec::new();
     let mut classes = Vec::new();
@@ -402,6 +442,7 @@ fn builtin(fname: &str, args: &[String]) -> Option<String> {
         "arg" | "аргумент" => Some(call("spark_arg")),
         "env" | "переменная" => Some(call("spark_env")),
         "run" | "выполнить" => Some(call("spark_run")),
+        "launch" | "запустить" => Some(call("spark_launch")),
         "read_file" | "прочитать" => Some(call("spark_read")),
         "write_file" | "записать" => Some(call("spark_write")),
         "notify" | "уведомить" => Some(call("spark_notify")),

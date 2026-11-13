@@ -222,6 +222,12 @@ pub enum ToolCall {
         tool: String,
         args: Value,
     },
+    /// Плагин-автоматизация на Spark (`plugin_<имя>`): внешний .sk-файл,
+    /// скомпилированный в бинарник. Аргументы — как пришли от модели.
+    PluginRun {
+        tool: String,
+        args: Value,
+    },
 }
 
 /// Блокируем только реально разрушительные команды. Всё остальное — на
@@ -801,13 +807,20 @@ fn arg_seconds(args: &Value) -> Option<u64> {
 }
 
 /// Определяет канонический инструмент по имени и аргументам.
-fn resolve_tool(name: &str, args: &Value) -> Option<&'static str> {
+fn resolve_tool(name: &str, args: &Value) -> Option<String> {
     let norm = normalize_name(name);
     if norm.is_empty() {
         return None;
     }
+    // Плагины — динамические имена: знает только реестр плагинов.
+    if crate::plugins::is_plugin_tool(&norm) {
+        if crate::plugins::find(&norm).is_some() {
+            return Some(norm);
+        }
+        return None;
+    }
     if let Some(canonical) = lookup_alias(&norm) {
-        return Some(canonical);
+        return Some(canonical.to_string());
     }
     if !GENERIC_NAMES.contains(&norm.as_str()) {
         return None;
@@ -818,25 +831,25 @@ fn resolve_tool(name: &str, args: &Value) -> Option<&'static str> {
     )
     .is_some()
     {
-        Some("open_url")
+        Some("open_url".into())
     } else if arg_str(
         args,
         &["cmd", "command", "shell", "shell_command", "команда"],
     )
     .is_some()
     {
-        Some("shell")
+        Some("shell".into())
     } else if arg_str(
         args,
         &["app", "app_name", "application", "программа", "приложение"],
     )
     .is_some()
     {
-        Some("open_app")
+        Some("open_app".into())
     } else if arg_str(args, &["path", "folder", "dir", "directory", "папка"]).is_some() {
-        Some("open_path")
+        Some("open_path".into())
     } else if arg_str(args, &["name", "title", "имя"]).is_some() {
-        Some("open_app")
+        Some("open_app".into())
     } else {
         None
     }
@@ -900,7 +913,7 @@ pub fn parse(text: &str) -> ToolParse {
         }
     }
 
-    match build_call(name, &args) {
+    match build_call(&name, &args) {
         Some(Ok(call)) => ToolParse::Call(call),
         Some(Err(reason)) => {
             ToolParse::Failed(format!("инструмент {name}: {reason}, args: {shown}"))
@@ -1109,6 +1122,17 @@ pub fn strip_tool_blocks(text: &str) -> String {
 /// Строит `ToolCall` по каноническому имени. `None` — имени нет в движке,
 /// `Some(Err)` — имя есть, но аргументы не распознаны.
 fn build_call(name: &str, args: &Value) -> Option<Result<ToolCall, String>> {
+    // Плагины — динамическая часть реестра: имя вида plugin_<имя>,
+    // состав известен только загрузчику плагинов.
+    if crate::plugins::is_plugin_tool(name) {
+        if crate::plugins::find(name).is_none() {
+            return None;
+        }
+        return Some(Ok(ToolCall::PluginRun {
+            tool: name.to_string(),
+            args: args.clone(),
+        }));
+    }
     if !crate::agent::KNOWN_NAMES.contains(&name) {
         return None;
     }
@@ -1700,66 +1724,70 @@ impl ToolOutcome {
 }
 
 /// Короткое имя инструмента для события ActionStarted.
-fn tool_name(call: &ToolCall) -> &'static str {
+fn tool_name(call: &ToolCall) -> String {
+    if let ToolCall::PluginRun { tool, .. } = call {
+        return tool.clone();
+    }
     match call {
-        ToolCall::Shell { .. } => "shell",
-        ToolCall::OpenApp { .. } => "open_app",
-        ToolCall::QuitApp { .. } => "quit_app",
-        ToolCall::OpenUrl { .. } => "open_url",
-        ToolCall::OpenPath { .. } => "open_path",
-        ToolCall::WebSearch { .. } => "web_search",
-        ToolCall::Remember { .. } => "remember",
-        ToolCall::ScheduleAdd { .. } => "schedule_add",
-        ToolCall::ScheduleList => "schedule_list",
-        ToolCall::ScheduleRemove { .. } => "schedule_remove",
-        ToolCall::McpCall { .. } => "mcp_call",
-        ToolCall::TimerStop => "timer_stop",
-        ToolCall::AlarmStop => "alarm_stop",
-        ToolCall::OpenUtils { .. } => "open_utils",
-        ToolCall::CloseUtils => "close_utils",
-        ToolCall::PlayReactorIntro => "play_reactor_intro",
-        ToolCall::SetTimer { .. } => "set_timer",
-        ToolCall::SetAlarm { .. } => "set_alarm",
-        ToolCall::SetVolume { .. } => "set_volume",
-        ToolCall::SetBrightness { .. } => "set_brightness",
-        ToolCall::Screenshot => "screenshot",
-        ToolCall::LockScreen => "lock_screen",
-        ToolCall::Sleep => "sleep",
-        ToolCall::Notify { .. } => "notify",
-        ToolCall::ClipboardRead => "clipboard_read",
-        ToolCall::ClipboardWrite { .. } => "clipboard_write",
-        ToolCall::AppleScript { .. } => "applescript",
-        ToolCall::SystemInfo => "system_info",
-        ToolCall::Window { .. } => "window",
-        ToolCall::DesktopInput { .. } => "desktop_input",
-        ToolCall::Wait { .. } => "wait",
-        ToolCall::FileRead { .. } => "file_read",
-        ToolCall::FileWrite { .. } => "file_write",
-        ToolCall::FileAppend { .. } => "file_append",
-        ToolCall::FileEdit { .. } => "file_edit",
-        ToolCall::FileList { .. } => "file_list",
-        ToolCall::FileSearch { .. } => "file_search",
-        ToolCall::FileGlob { .. } => "file_glob",
-        ToolCall::TaskAdd { .. } => "task_add",
-        ToolCall::TaskList => "task_list",
-        ToolCall::TaskDone { .. } => "task_done",
-        ToolCall::TaskRemove { .. } => "task_remove",
-        ToolCall::TaskRun { .. } => "task_run",
-        ToolCall::TaskOpen => "task_open",
-        ToolCall::RunCommand { .. } => "run_command",
-        ToolCall::SendMessage { .. } => "send_message",
-        ToolCall::AddNote { .. } => "add_note",
-        ToolCall::CreateEvent { .. } => "create_event",
-        ToolCall::MusicControl { .. } => "music_control",
-        ToolCall::UiRead => "ui_read",
-        ToolCall::UiClick { .. } => "ui_click",
-        ToolCall::UiType { .. } => "ui_type",
-        ToolCall::UiMenu { .. } => "ui_menu",
+        ToolCall::PluginRun { tool, .. } => tool.clone(),
+        ToolCall::Shell { .. } => "shell".to_string(),
+        ToolCall::OpenApp { .. } => "open_app".to_string(),
+        ToolCall::QuitApp { .. } => "quit_app".to_string(),
+        ToolCall::OpenUrl { .. } => "open_url".to_string(),
+        ToolCall::OpenPath { .. } => "open_path".to_string(),
+        ToolCall::WebSearch { .. } => "web_search".to_string(),
+        ToolCall::Remember { .. } => "remember".to_string(),
+        ToolCall::ScheduleAdd { .. } => "schedule_add".to_string(),
+        ToolCall::ScheduleList => "schedule_list".to_string(),
+        ToolCall::ScheduleRemove { .. } => "schedule_remove".to_string(),
+        ToolCall::McpCall { .. } => "mcp_call".to_string(),
+        ToolCall::TimerStop => "timer_stop".to_string(),
+        ToolCall::AlarmStop => "alarm_stop".to_string(),
+        ToolCall::OpenUtils { .. } => "open_utils".to_string(),
+        ToolCall::CloseUtils => "close_utils".to_string(),
+        ToolCall::PlayReactorIntro => "play_reactor_intro".to_string(),
+        ToolCall::SetTimer { .. } => "set_timer".to_string(),
+        ToolCall::SetAlarm { .. } => "set_alarm".to_string(),
+        ToolCall::SetVolume { .. } => "set_volume".to_string(),
+        ToolCall::SetBrightness { .. } => "set_brightness".to_string(),
+        ToolCall::Screenshot => "screenshot".to_string(),
+        ToolCall::LockScreen => "lock_screen".to_string(),
+        ToolCall::Sleep => "sleep".to_string(),
+        ToolCall::Notify { .. } => "notify".to_string(),
+        ToolCall::ClipboardRead => "clipboard_read".to_string(),
+        ToolCall::ClipboardWrite { .. } => "clipboard_write".to_string(),
+        ToolCall::AppleScript { .. } => "applescript".to_string(),
+        ToolCall::SystemInfo => "system_info".to_string(),
+        ToolCall::Window { .. } => "window".to_string(),
+        ToolCall::DesktopInput { .. } => "desktop_input".to_string(),
+        ToolCall::Wait { .. } => "wait".to_string(),
+        ToolCall::FileRead { .. } => "file_read".to_string(),
+        ToolCall::FileWrite { .. } => "file_write".to_string(),
+        ToolCall::FileAppend { .. } => "file_append".to_string(),
+        ToolCall::FileEdit { .. } => "file_edit".to_string(),
+        ToolCall::FileList { .. } => "file_list".to_string(),
+        ToolCall::FileSearch { .. } => "file_search".to_string(),
+        ToolCall::FileGlob { .. } => "file_glob".to_string(),
+        ToolCall::TaskAdd { .. } => "task_add".to_string(),
+        ToolCall::TaskList => "task_list".to_string(),
+        ToolCall::TaskDone { .. } => "task_done".to_string(),
+        ToolCall::TaskRemove { .. } => "task_remove".to_string(),
+        ToolCall::TaskRun { .. } => "task_run".to_string(),
+        ToolCall::TaskOpen => "task_open".to_string(),
+        ToolCall::RunCommand { .. } => "run_command".to_string(),
+        ToolCall::SendMessage { .. } => "send_message".to_string(),
+        ToolCall::AddNote { .. } => "add_note".to_string(),
+        ToolCall::CreateEvent { .. } => "create_event".to_string(),
+        ToolCall::MusicControl { .. } => "music_control".to_string(),
+        ToolCall::UiRead => "ui_read".to_string(),
+        ToolCall::UiClick { .. } => "ui_click".to_string(),
+        ToolCall::UiType { .. } => "ui_type".to_string(),
+        ToolCall::UiMenu { .. } => "ui_menu".to_string(),
     }
 }
 
 /// Каноническое имя вызова для диагностики цикла (публичная обёртка).
-pub fn tool_name_public(call: &ToolCall) -> &'static str {
+pub fn tool_name_public(call: &ToolCall) -> String {
     tool_name(call)
 }
 
@@ -1772,6 +1800,7 @@ fn tool_summary(call: &ToolCall) -> String {
         ToolCall::ScheduleList => String::new(),
         ToolCall::ScheduleRemove { id } => format!("№{id}"),
         ToolCall::McpCall { server, tool, .. } => format!("{server}/{tool}"),
+        ToolCall::PluginRun { tool, .. } => tool.clone(),
         ToolCall::OpenApp { name } => name.clone(),
         ToolCall::QuitApp { name } => name.clone(),
         ToolCall::OpenUrl { url, .. } => url.chars().take(120).collect(),
@@ -1936,11 +1965,11 @@ pub fn execute(call: ToolCall, audio_tx: &Sender<AudioMessage>, events: &EventTx
     };
 
     let _ = events.send(JarvisEvent::ActionStarted {
-        tool: tool_name(&call).into(),
+        tool: tool_name(&call),
         summary: tool_summary(&call),
     });
 
-    let spec = crate::agent::spec_for(tool_name(&call));
+    let spec = crate::agent::spec_for(&tool_name(&call));
     let outcome = execute_inner(call.clone(), audio_tx, events, &log);
     // Verification Engine: постусловие инструмента проверяется до того,
     // как результат уйдёт пользователю. Успех без подтверждения — запрещён.
@@ -2387,6 +2416,45 @@ fn execute_inner(
                 ),
                 Err(e) => ToolOutcome::fail(format!("{server}/{tool} не удался: {e:#}")),
             }
+        }
+        ToolCall::PluginRun { tool, args } => {
+            let name = tool.strip_prefix(crate::plugins::TOOL_PREFIX).unwrap_or(&tool);
+            println!("🔌 plugin: {name}");
+            log(format!("🔌 Плагин: {name}"));
+            let run = crate::plugins::execute(&tool, &args);
+            // Контракт плагина: код выхода проверен исполнителем, строки
+            // «SAY:» — речь плагина. Успех подтверждён exit-кодом, не словом.
+            let mut outcome = if run.timed_out {
+                ToolOutcome::with_detail(
+                    "Плагин не уложился в таймаут — остановил",
+                    run.detail,
+                )
+            } else if run.ok {
+                let speech = run.speech.clone().unwrap_or_else(|| {
+                    format!("Готово — «{name}» отработал")
+                });
+                ToolOutcome::with_detail(speech, run.detail)
+            } else {
+                let speech = run
+                    .speech
+                    .clone()
+                    .unwrap_or_else(|| format!("Плагин «{name}» завершился с ошибкой"));
+                ToolOutcome::with_detail(speech, run.detail)
+            };
+            outcome.ok = run.ok;
+            outcome.status = if run.timed_out {
+                crate::agent::ExecutionStatus::TimedOut
+            } else if run.ok {
+                crate::agent::ExecutionStatus::Succeeded
+            } else {
+                crate::agent::ExecutionStatus::Failed
+            };
+            outcome.evidence = Some(if run.ok {
+                "код выхода 0".to_string()
+            } else {
+                "ненулевой код выхода".to_string()
+            });
+            outcome
         }
         ToolCall::SetVolume { percent } => {
             println!("🔧 set_volume: {percent}");

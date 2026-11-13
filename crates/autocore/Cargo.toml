@@ -1,0 +1,24 @@
+[package]
+name = "autocore"
+version = "0.1.0"
+edition = "2024"
+description = "Ядро автопилота десктопа: наблюдает интерфейс через accessibility-API, действует как человек, проверяет результат. Без LLM и скриншотов в основном цикле."
+license = "MIT"
+
+[dependencies]
+xa11y = { version = "0.16", default-features = false, features = ["test-support"] }
+unicode-normalization = "0.1"
+thiserror = "2"
+tracing = "0.1"
+blake3 = "1.8.7"
+
+[dev-dependencies]
+criterion = "0.7"
+
+[[bench]]
+name = "est"
+harness = false
+
+[[bin]]
+name = "autocore"
+path = "src/bin/autocore.rs"

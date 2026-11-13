@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/spark", "crates/jarvis-core", "crates/jarvis-cli", "app/src-tauri"]
+members = ["crates/spark", "crates/autocore", "crates/jarvis-core", "crates/jarvis-cli", "app/src-tauri"]
 
 [workspace.package]
 version = "0.2.0"
