@@ -139,10 +139,14 @@ pub enum ToolCall {
         query: String,
     },
     TimerStop,
-    /// Управление окнами приложений: развернуть, свернуть, закрыть, список.
+    /// Управление окнами приложений: развернуть, свернуть, закрыть, список,
+    /// а также столы (воркспейсы) и геометрия: desktop/movetodesktop +
+    /// desktop — номер стола, minimizeall, half_left/half_right.
     Window {
         action: String,
         app: Option<String>,
+        /// Номер стола для desktop и movetodesktop («3»).
+        desktop: Option<String>,
     },
     /// Ввод текста, клавиатурные сочетания и мышь в активном приложении.
     DesktopInput { action: crate::platform::desktop::DesktopAction },
@@ -732,6 +736,41 @@ fn arg_str<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
         .and_then(|x| x.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
+}
+
+/// Номер стола, разбросанный моделью по аргументам desktop_input: ключ
+/// desktop/workspace или значение вроде «стол 2», «table_2», «workspace:3».
+/// Возвращает строку-номер для ToolCall::Window.desktop.
+fn desktop_arg_from_args(args: &Value) -> Option<String> {
+    let Some(map) = args.as_object() else {
+        return None;
+    };
+    let bases = ["стол", "table", "воркспейс", "workspace", "desktop"];
+    for (key, value) in map {
+        let Some(text) = value.as_str() else {
+            // Число прямо в ключе desktop/workspace.
+            if bases.iter().any(|b| key.to_lowercase().contains(b))
+                && let Some(n) = value.as_u64()
+            {
+                return Some(n.to_string());
+            }
+            continue;
+        };
+        let low = format!("{key} {}", text.to_lowercase());
+        if !bases.iter().any(|b| low.contains(b)) {
+            continue;
+        }
+        // Первое чисто цифровое слово в значении: «table_2» → «2».
+        let digits: String = text
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() {
+            return Some(digits);
+        }
+    }
+    None
 }
 
 /// Число из числа или из строки-числа (`"50"` → 50).
@@ -1384,6 +1423,8 @@ fn build(name: &str, args: &Value) -> Result<ToolCall, String> {
                 ],
             )
             .map(fix_lookalikes),
+            desktop: arg_str(args, &["desktop", "workspace", "стол", "воркспейс"])
+                .map(str::to_string),
         },
         "desktop_input" => {
             use crate::platform::desktop::{DesktopAction, MouseButton, ScrollDirection};
@@ -1431,10 +1472,43 @@ fn build(name: &str, args: &Value) -> Result<ToolCall, String> {
                     let count = if action == "double_click" { 2 } else { arg_u64(args, &["count", "clicks", "раз"]).unwrap_or(1).try_into().unwrap_or(255) };
                     DesktopAction::Click { x, y, button, count }
                 }
-                "move" | "move_mouse" | "переместить_курсор" => DesktopAction::Move {
-                    x: arg_i32(args, &["x", "горизонталь"]).ok_or("для перемещения укажи x")?,
-                    y: arg_i32(args, &["y", "вертикаль"]).ok_or("для перемещения укажи y")?,
-                },
+                "move" | "move_mouse" | "переместить_курсор" => {
+                    // Модель упорно вызывает desktop_input.move для «перенеси
+                    // окно на стол» (живой случай: {"action":"move",
+                    // "target":"table_2"}). Курсор стол не двигает: если в
+                    // аргументах назван стол/воркспейс — это window.
+                    if let Some(desktop) = desktop_arg_from_args(args) {
+                        // target вроде «терминал» — это приложение; но
+                        // target вроде «table_2» — сам стол, его в app не
+                        // берём.
+                        let app = arg_str(
+                            args,
+                            &["app", "name", "application", "window", "окно", "приложение"],
+                        )
+                        .map(fix_lookalikes)
+                        .or_else(|| {
+                            arg_str(args, &["target"])
+                                .filter(|t| {
+                                    let low = t.to_lowercase();
+                                    !["стол", "table", "воркспейс", "workspace", "desktop"]
+                                        .iter()
+                                        .any(|b| low.contains(b))
+                                })
+                                .map(fix_lookalikes)
+                        });
+                        return Ok(ToolCall::Window {
+                            action: "movetodesktop".to_string(),
+                            app: Some(app.unwrap_or_else(|| "активное".to_string())),
+                            desktop: Some(desktop),
+                        });
+                    }
+                    DesktopAction::Move {
+                        x: arg_i32(args, &["x", "горизонталь"]).ok_or(
+                            "desktop_input.move двигает только курсор мыши: укажи x и y. Окна и столы — инструментом window (movetodesktop, half_left, half_right), не desktop_input",
+                        )?,
+                        y: arg_i32(args, &["y", "вертикаль"]).ok_or("для перемещения укажи y")?,
+                    }
+                }
                 "scroll" | "wheel" | "прокрутить" => {
                     let direction = match get_str(&["direction", "dir", "направление"])?.to_lowercase().as_str() {
                         "up" | "вверх" => ScrollDirection::Up,
@@ -1834,7 +1908,7 @@ fn tool_summary(call: &ToolCall) -> String {
         ToolCall::ClipboardRead => String::new(),
         ToolCall::ClipboardWrite { text } => text.chars().take(120).collect(),
         ToolCall::AppleScript { script } => script.chars().take(120).collect(),
-        ToolCall::Window { action, app } => app
+        ToolCall::Window { action, app, .. } => app
             .as_deref()
             .map(|a| format!("{action} {a}"))
             .unwrap_or_else(|| action.clone()),
@@ -1926,6 +2000,11 @@ fn window_text_failed(text: &str) -> bool {
         "не закрылось",
         "не свернулось",
         "не вернулось",
+        "не доехало",
+        "не встало",
+        "не переключился",
+        "не все окна",
+        "не понял, на какой стол",
     ]
     .iter()
     .any(|p| lower.contains(p))
@@ -1948,13 +2027,16 @@ fn window_target_label(target: &crate::platform::WindowTarget) -> String {
 
 /// Глагол для вопроса «какое окно …?».
 fn window_action_verb(action: &str) -> &'static str {
-    match action {
+    let verb = action.split_whitespace().next().unwrap_or(action);
+    match verb {
         "minimize" => "свернуть",
         "close" => "закрыть",
         "maximize" => "развернуть",
         "fullscreen" => "открыть на весь экран",
         "restore" => "вернуть",
         "focus" => "выбрать",
+        "movetodesktop" => "перенести",
+        "half_left" | "half_right" => "разместить",
         _ => "выбрать",
     }
 }
@@ -2682,7 +2764,13 @@ fn execute_inner(
             ToolOutcome::ok(format!("Подождал {seconds} с"))
         }
 
-        ToolCall::Window { action, app } => {
+        ToolCall::Window { action, app, desktop } => {
+            // Номер стола уходит на платформу внутри строки действия:
+            // «desktop 3» — платформа сама разбирает глагол и номер.
+            let action = match desktop.as_deref() {
+                Some(n) if !n.trim().is_empty() => format!("{action} {}", n.trim()),
+                _ => action.clone(),
+            };
             println!(
                 "🔧 window: {action} {}",
                 app.as_deref().unwrap_or("(активное)")
@@ -3240,6 +3328,94 @@ pub fn utils_tab_for_prompt(prompt: &str) -> Option<&'static str> {
 /// «Сafari» кириллицей, то копирует пример из промпта и подставляет чужое
 /// имя). Возвращает (действие, приложение) или None — пусть решает LLM.
 ///
+/// «Сверни все окна», «покажи рабочий стол» — свернуть ВСЁ, а не своё окно.
+/// Без этого правило бы выбрано своё окно (app=None) — реальная жалоба.
+pub fn minimize_all_from_prompt(prompt: &str) -> Option<String> {
+    let t = prompt.to_lowercase();
+    let hide_verb = ["сверни", "свернуть", "минимизируй", "убери", "скрой", "спрячь"]
+        .iter()
+        .any(|v| t.contains(v));
+    let all_windows = (t.contains("все") || t.contains("всё")) && t.contains("окн");
+    let show_desktop = (t.contains("покажи") || t.contains("очисти"))
+        && (t.contains("рабочий стол") || t.contains("пустой стол"));
+    if (hide_verb && all_windows) || show_desktop {
+        return Some("minimizeall".to_string());
+    }
+    None
+}
+
+/// «Открой стол 3», «перейди на второй стол» — номер стола для desktop.
+/// Только явные глаголы переключения: «перенеси окно на стол 2» — это
+/// movetodesktop, его ведёт модель.
+pub fn desktop_number_from_prompt(prompt: &str) -> Option<String> {
+    let t = prompt.to_lowercase();
+    let switch_verb = ["открой", "открыть", "перейди", "перейти", "переключись", "включи"]
+        .iter()
+        .any(|v| t.contains(v));
+    if !switch_verb || !(t.contains("стол") || t.contains("воркспейс") || t.contains("десктоп")) {
+        return None;
+    }
+    let words: Vec<&str> = t.split_whitespace().collect();
+    // Цифра рядом со «стол».
+    for (i, w) in words.iter().enumerate() {
+        let digits = w.trim_matches(|c: char| !c.is_ascii_digit());
+        if !digits.is_empty() && (i > 0 && words[i - 1].starts_with("стол") || i + 1 < words.len() && words[i + 1].starts_with("стол")) {
+            return Some(digits.trim_end_matches(|c: char| !c.is_ascii_digit()).to_string());
+        }
+    }
+    // Число словами: «второй стол», «стол три». Ординалы проверяем раньше
+    // кардиналов: «третий» начинается не с «три», и наивный префиксный
+    // поиск даёт «13».
+    for bases in [
+        &["перв", "втор", "трет", "четверт", "пят", "шест", "седьм", "восьм", "девят", "десят"][..],
+        &["один", "два", "три", "четыре", "пять", "шесть", "семь", "восемь", "девять", "десять"][..],
+    ] {
+        for (i, w) in words.iter().enumerate() {
+            if let Some(n) = bases.iter().position(|base| w.starts_with(base))
+                && (words.get(i.wrapping_sub(1)).is_some_and(|p| p.starts_with("стол"))
+                    || words.get(i + 1).is_some_and(|p| p.starts_with("стол")))
+            {
+                return Some((n + 1).to_string());
+            }
+        }
+    }
+    None
+}
+
+/// «Во весь левый край», «терминал на правую половину» — детерминированный
+/// план геометрии. Модель в этой ветке стабильно тянет desktop_input.move
+/// (курсор), а не window: фраза простая, разбираем сами. Без названного
+/// приложения цель — активное окно.
+pub fn window_half_from_prompt(
+    prompt: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<ToolCall> {
+    let t = prompt.to_lowercase();
+    let side_marker =
+        |stem: &str| t.contains(stem) && (t.contains("край") || t.contains("половин"));
+    let left = side_marker("лев");
+    let right = side_marker("прав");
+    // Обе стороны сразу («между левым и правым краем») — не угадываем.
+    if left == right {
+        return None;
+    }
+    const STOP: &[&str] = &[
+        "во", "весь", "всю", "на", "окно", "окна", "экран", "экрана", "экране", "половину",
+        "половине", "край", "джарвис", "пожалуйста", "сделай", "помести", "размести", "поставь",
+        "открой", "окошко", "приложение", "программу",
+    ];
+    let app = t
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty() && !STOP.contains(w))
+        .find_map(|w| lookup(w));
+    Some(ToolCall::Window {
+        action: if left { "half_left" } else { "half_right" }.to_string(),
+        app: Some(app.unwrap_or_else(|| "активное".to_string())),
+        desktop: None,
+    })
+}
+
 /// Закрытие окна и выход приложения здесь строго различаются: «закрой окно
 /// сафари» — window close, «закрой приложение сафари» — не окно, а quit_app.
 pub fn window_request_from_prompt(prompt: &str) -> Option<(String, Option<String>)> {
@@ -4370,7 +4546,7 @@ mod tests {
         let text =
             r#"<tool>{"name":"окно","args":{"action":"развернуть","app":"терминал"}}</tool>"#;
         match call(text) {
-            Some(ToolCall::Window { action, app }) => {
+            Some(ToolCall::Window { action, app, .. }) => {
                 assert_eq!(action, "maximize");
                 assert_eq!(app.as_deref(), Some("терминал"));
             }
@@ -4379,10 +4555,66 @@ mod tests {
     }
 
     #[test]
+    fn window_half_from_prompt_sides_and_apps() {
+        let fake_lookup = |name: &str| (name == "терминал").then(|| "Foot".to_string());
+        match window_half_from_prompt("во весь левый край", fake_lookup) {
+            Some(ToolCall::Window { action, app, desktop }) => {
+                assert_eq!(action, "half_left");
+                assert_eq!(app.as_deref(), Some("активное"));
+                assert!(desktop.is_none());
+            }
+            other => panic!("ждали half_left, получили {other:?}"),
+        }
+        match window_half_from_prompt("терминал на правую половину экрана", fake_lookup) {
+            Some(ToolCall::Window { action, app, .. }) => {
+                assert_eq!(action, "half_right");
+                assert_eq!(app.as_deref(), Some("Foot"));
+            }
+            other => panic!("ждали half_right, получили {other:?}"),
+        }
+        // Не геометрия — не наша.
+        assert!(window_half_from_prompt("двинь мышь направо", fake_lookup).is_none());
+        assert!(window_half_from_prompt("на левую часть стола", fake_lookup).is_none());
+    }
+
+    #[test]
+    fn model_misroutes_window_move_to_desktop_input() {
+        // Живой случай (YandexGPT): «перенеси окно терминала на стол 2»
+        // приходило как desktop_input {"action":"move","target":"table_2"}.
+        // Курсор стол не двигает — разворачиваем в window movetodesktop.
+        for (json, want_app) in [
+            (
+                r#"{"action":"move","target":"table_2"}"#,
+                "активное",
+            ),
+            (
+                r#"{"action":"move","target":"терминал","desktop":2}"#,
+                "терминал",
+            ),
+        ] {
+            let text = format!(r#"<tool>{{"name":"desktop_input","args":{json}}}</tool>"#);
+            match call(&text) {
+                Some(ToolCall::Window { action, app, desktop }) => {
+                    assert_eq!(action, "movetodesktop", "{json}");
+                    assert_eq!(app.as_deref(), Some(want_app), "{json}");
+                    assert_eq!(desktop.as_deref(), Some("2"), "{json}");
+                }
+                other => panic!("{json}: ждали Window movetodesktop, получили {other:?}"),
+            }
+        }
+        // Курсорное перемещение без стола остаётся курсорным.
+        let cursor = r#"<tool>{"name":"desktop_input","args":{"action":"move","x":100,"y":50}}</tool>"#;
+        assert!(matches!(
+            call(cursor),
+            Some(ToolCall::DesktopInput { .. })
+        ));
+    }
+
+    #[test]
     fn parse_window_no_app_means_active() {
         let text = r#"<tool>{"name":"window","args":{"action":"свернуть"}}</tool>"#;
         match call(text) {
-            Some(ToolCall::Window { action, app }) => {
+            Some(ToolCall::Window { action, app, .. }) => {
                 assert_eq!(action, "minimize");
                 assert!(app.is_none());
             }
@@ -5026,6 +5258,34 @@ mod tests {
     }
 
     #[test]
+    fn minimize_all_and_desktop_number_from_prompt() {
+        assert_eq!(
+            minimize_all_from_prompt("сверни все окна"),
+            Some("minimizeall".to_string())
+        );
+        assert_eq!(
+            minimize_all_from_prompt("покажи рабочий стол"),
+            Some("minimizeall".to_string())
+        );
+        // Обычное «сверни окно» — не «свернуть всё».
+        assert_eq!(minimize_all_from_prompt("сверни окно"), None);
+        assert_eq!(minimize_all_from_prompt("открой стол 2"), None);
+
+        assert_eq!(
+            desktop_number_from_prompt("открой стол 2"),
+            Some("2".to_string())
+        );
+        assert_eq!(
+            desktop_number_from_prompt("перейди на третий стол"),
+            Some("3".to_string())
+        );
+        // Перенос окна — не переключение стола.
+        assert_eq!(desktop_number_from_prompt("перенеси окно на стол 2"), None);
+        // «Сверни окно на столе 2» — не переключение стола.
+        assert_eq!(desktop_number_from_prompt("сверни окно на столе 2"), None);
+    }
+
+    #[test]
     fn parse_quit_app_aliases_and_arguments() {
         for (text, want) in [
             (
@@ -5058,7 +5318,7 @@ mod tests {
         // Оконный инструмент закрывает окно, а не приложение.
         assert!(matches!(
             call(r#"<tool>{"name":"window","args":{"action":"закрыть"}}</tool>"#),
-            Some(ToolCall::Window { action, app })
+            Some(ToolCall::Window { action, app, .. })
                 if action == "close" && app.is_none()
         ));
     }

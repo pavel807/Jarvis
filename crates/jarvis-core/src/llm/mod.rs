@@ -811,6 +811,7 @@ pub fn ask(
             && text.trim_start().starts_with("<tool>")
         {
             println!("↩️ Вопрос отвечен tool-блоком — переспрашиваю текстом");
+            println!("🧩 Не разобранный tool-блок: {text}");
             let mut nudge_history = history_snapshot.clone();
             nudge_history.push((prompt.clone(), text.clone()));
             if let Ok(second) = engine.generate_streaming_with_params(

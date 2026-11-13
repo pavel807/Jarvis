@@ -429,6 +429,17 @@ pub fn window_control_checked(
         return WindowControlOutcome::Done(window_list());
     }
 
+    // Столы и точная геометрия — пока только Hyprland на Linux.
+    let (verb, _) = action.trim().split_once(' ').unwrap_or((action.trim(), ""));
+    if matches!(
+        verb,
+        "desktop" | "minimizeall" | "movetodesktop" | "half_left" | "half_right"
+    ) {
+        return WindowControlOutcome::Done(
+            "Столы и раскладку окон я пока умею только на Hyprland (Linux)".to_string(),
+        );
+    }
+
     let (process, display) = match app {
         // «Сверни окно голосового помощника» — это моё окно, а не чужой
         // процесс с именем «голосовой помощник».

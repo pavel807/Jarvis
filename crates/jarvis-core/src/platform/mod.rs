@@ -101,6 +101,57 @@ pub const COMMON_ALIASES: &[(&str, &str)] = &[
     ("дэвинсинк", "DaVinci Resolve"),
 ];
 
+/// Просьба открыть терминал («терминал», «консоль», «командная строка»).
+/// Терминал нельзя маппить на одно имя приложения: на разных системах
+/// это foot, kitty, alacritty, Terminal… Поэтому просьба — категория,
+/// а приложение резолвится по установленным эмуляторам (см.
+/// `terminal_app_name`).
+pub fn is_terminal_request(name: &str) -> bool {
+    let c = crate::text::compact_name(name);
+    ["терминал", "терминалл", "консоль", "команднаястрока", "shell", "шэл"]
+        .iter()
+        .any(|k| c.contains(k))
+}
+
+/// Первый установленный эмулятор терминала из известного списка. Порядок —
+/// от современных к дедовским; возврат — каноничное имя .desktop.
+pub fn terminal_app_name(installed: &[String]) -> Option<String> {
+    const CANDIDATES: &[&str] = &[
+        "foot", "footclient", "ghostty", "kitty", "alacritty", "wezterm",
+        "konsole", "gnome-terminal", "gnome-terminal-server", "xfce4-terminal",
+        "tilix", "terminator", "qterminal", "lxterminal", "xterm", "st", "urxvt",
+    ];
+    // Демоны и службы — не то, что видит пользователь: «Foot Server»
+    // открывает фоновый процесс без окна, а просили терминал.
+    let is_daemon = |n: &str| {
+        let l = n.to_lowercase();
+        l.contains("server") || l.contains("daemon")
+    };
+    // Нормализация для сравнения: «GNOME Terminal» и «gnome-terminal» —
+    // одно и то же, дефисы и пробелы не различаем.
+    let norm = |n: &str| n.to_lowercase().replace(['-', '_'], " ");
+    // Первый проход: точное имя («Foot» == foot). Второй: подстрока
+    // («GNOME Terminal» содержит gnome terminal), но не демон.
+    for cand in CANDIDATES {
+        if let Some(hit) = installed
+            .iter()
+            .find(|n| !is_daemon(n) && norm(n) == *cand)
+        {
+            return Some(hit.clone());
+        }
+    }
+    for cand in CANDIDATES {
+        let cand = cand.replace('-', " ");
+        if let Some(hit) = installed
+            .iter()
+            .find(|n| !is_daemon(n) && norm(n).contains(&cand))
+        {
+            return Some(hit.clone());
+        }
+    }
+    None
+}
+
 /// Окно самого Джарвиса: пользователь называет его «Jarvis», «Джарвис»,
 /// «голосовой помощник», «ассистент». Такие цели нельзя отправлять в
 /// `find_process` как имя чужого приложения: процесс называется `jarvis-app`,
@@ -572,5 +623,42 @@ mod fuzzy_tests {
         // Два кандидата почти одинаково близки — честнее не угадывать.
         let apps = vec!["Foxit Reader".to_string(), "Foxmail".to_string()];
         assert_eq!(fuzzy_app_match("фокс", &apps), None);
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_request_recognized() {
+        assert!(is_terminal_request("терминал"));
+        assert!(is_terminal_request("открой консоль"));
+        assert!(is_terminal_request("командная строка"));
+        assert!(!is_terminal_request("термометр"));
+        assert!(!is_terminal_request("докер"));
+    }
+
+    #[test]
+    fn terminal_resolves_to_installed_emulator() {
+        // Каталог этой машины: foot. Резолвер обязан выбрать эмулятор,
+        // а не первый попавшийся (Docker не входит в кандидаты).
+        let installed = vec![
+            "Docker".to_string(),
+            "Foot Server".to_string(),
+            "Foot".to_string(),
+            "Zed".to_string(),
+        ];
+        assert_eq!(
+            terminal_app_name(&installed),
+            Some("Foot".to_string()),
+            "демон Foot Server не терминал"
+        );
+        // Без точного — подстрока: «GNOME Terminal» подходит.
+        let installed = vec!["GNOME Terminal".to_string(), "Docker".to_string()];
+        assert_eq!(terminal_app_name(&installed), Some("GNOME Terminal".to_string()));
+        // Без терминалов в каталоге — честный None, никакого выдуманного.
+        let installed = vec!["Docker".to_string(), "Zed".to_string()];
+        assert_eq!(terminal_app_name(&installed), None);
     }
 }

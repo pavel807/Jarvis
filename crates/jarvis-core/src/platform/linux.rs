@@ -160,6 +160,22 @@ fn parse_desktop(path: &Path, id: &str) -> Option<DesktopApp> {
         return None;
     }
     let name = name_ru.or(name)?;
+    // Служебные записи без собственного окна (foot --server) в каталог
+    // не попадают: модель выбирает из списка и «Foot Server» для неё —
+    // правдоподобный терминал, но окна он не создаёт (реальный случай).
+    let exec_low = exec.as_deref().unwrap_or_default().to_lowercase();
+    let name_low = name.to_lowercase();
+    let bin_low = exec_low.split_whitespace().next().unwrap_or_default();
+    if exec_low.contains("--server")
+        || exec_low.contains("--daemon")
+        || bin_low.ends_with("-server")
+        || bin_low.ends_with("-daemon")
+        || name_low
+            .split_whitespace()
+            .any(|w| w == "server" || w == "daemon" || w == "сервер")
+    {
+        return None;
+    }
     let exec_bin = exec.as_deref().and_then(exec_binary).unwrap_or_default();
     Some(DesktopApp {
         id: id.to_string(),
@@ -224,6 +240,18 @@ fn desktop_apps() -> Vec<DesktopApp> {
 /// сопоставление с транслитерацией, потом словарь, потом нечётко по смыслу.
 fn find_desktop_app(want: &str) -> Option<DesktopApp> {
     let apps = desktop_apps();
+    // Терминал — категория, а не имя: «открой терминал» резолвится по
+    // установленным эмуляторам. Без этого модель в каталоге видит Foot,
+    // не связывает его с «терминалом» и выбирает правдоподобный мусор
+    // (реальный случай: вместо терминала открывался Docker).
+    if crate::platform::is_terminal_request(want) {
+        let names: Vec<String> = apps.iter().map(|a| a.name.clone()).collect();
+        if let Some(name) = crate::platform::terminal_app_name(&names) {
+            if let Some(app) = apps.iter().find(|a| a.name == name) {
+                return Some(app.clone());
+            }
+        }
+    }
     let exact = |pred: &dyn Fn(&DesktopApp) -> bool| apps.iter().find(|a| pred(a)).cloned();
     for variant in crate::platform::name_variants(want) {
         let hit = exact(&|a| a.name.eq_ignore_ascii_case(&variant))
@@ -567,8 +595,12 @@ fn window_matches(window: &LinuxWindow, want: &str) -> bool {
 /// Some(ответ) для обработанных действий, None — пусть идёт старый путь.
 fn hyprland_window_control(action: &str, app: Option<&str>) -> Option<String> {
     let action = action.trim().to_lowercase();
-    match action.as_str() {
-        "close" | "minimize" | "maximize" | "fullscreen" | "restore" | "focus" => {}
+    // У movetodesktop номер стола в конце строки действия — оставляем его:
+    // выбор окна идёт по глаголу, номер нужен самому действию.
+    let verb = action.split_whitespace().next().unwrap_or("");
+    match verb {
+        "close" | "minimize" | "maximize" | "fullscreen" | "restore" | "focus"
+        | "movetodesktop" | "half_left" | "half_right" => {}
         _ => return None,
     }
     let is_self = app.is_some() && crate::platform::is_self_window_target(app.unwrap_or(""));
@@ -620,7 +652,9 @@ fn hyprland_window_action(window: &LinuxWindow, action: &str) -> String {
     };
     let sel = format!("address:{addr}");
 
-    match action.as_str() {
+    // Матч по глаголу: у movetodesktop номер стола в конце строки действия.
+    let verb = action.split_whitespace().next().unwrap_or("");
+    match verb {
         "close" => {
             let ok = run_ok(
                 "hyprctl",
@@ -746,8 +780,244 @@ fn hyprland_window_action(window: &LinuxWindow, action: &str) -> String {
                 format!("Окно {title} не вышло на передний план")
             }
         }
+        "movetodesktop" => {
+            // Номер стола приходит в строке действия: «movetodesktop 3».
+            match action.split_whitespace().nth(1).and_then(desktop_number) {
+                Some(target) => {
+                    run_ok(
+                        "hyprctl",
+                        &["dispatch",
+                          &format!("hl.dsp.window.move({{ workspace = \"{target}\", window = \"{sel}\" }})")],
+                    );
+                    // Верификация: окно обязано оказаться на столе N.
+                    for _ in 0..6 {
+                        if let Some((true, ws, _)) = hypr_window_state(&addr)
+                            && ws == target.to_string()
+                        {
+                            return format!("Перенёс окно {title} на стол {target}");
+                        }
+                        std::thread::sleep(Duration::from_millis(300));
+                    }
+                    format!("Окно {title} не доехало до стола {target}")
+                }
+                None => "Не понял, на какой стол перенести — назови номер".to_string(),
+            }
+        }
+        "half_left" | "half_right" => hypr_window_half(&addr, &title, action == "half_left"),
         other => format!("Не могу выполнить действие с окном: {other}"),
     }
+}
+
+/// Номер стола из аргумента: «3», «стол 3», «3:рабочий» — берём первый
+/// чисто цифровой токен.
+fn desktop_number(arg: &str) -> Option<u32> {
+    arg.split_whitespace()
+        .find(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()))
+        .and_then(|t| t.parse().ok())
+}
+
+/// Разбор строки действия «глагол номер»: номер приезжает на платформу
+/// внутри действия («desktop 3»).
+fn split_action_number(action: &str) -> (&str, Option<&str>) {
+    match action.trim().split_once(' ') {
+        Some((verb, rest)) => (verb, Some(rest.trim())),
+        None => (action.trim(), None),
+    }
+}
+
+/// «Открой стол N»: hl.dsp.focus сам создаёт стол, если его ещё нет.
+fn hypr_desktop_switch(number: Option<&str>) -> String {
+    let Some(target) = number.and_then(desktop_number) else {
+        return "Не понял, на какой стол перейти — назови номер".to_string();
+    };
+    run_ok(
+        "hyprctl",
+        &["dispatch", &format!("hl.dsp.focus({{ workspace = {target} }})")],
+    );
+    for _ in 0..5 {
+        let active = run("hyprctl", &["-j", "activeworkspace"])
+            .ok()
+            .and_then(|out| serde_json::from_str::<serde_json::Value>(&out).ok())
+            .and_then(|v| v.get("id")?.as_i64());
+        if active == Some(target as i64) {
+            return format!("Переключился на стол {target}");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    format!("Не переключился на стол {target}")
+}
+
+/// «Сверни все окна»: каждое видимое окно уезжает в special:hidden —
+/// тот же приём, что и одиночное «сверни», но по всем окнам разом.
+fn hypr_minimize_all() -> String {
+    let v = match run("hyprctl", &["-j", "clients"])
+        .ok()
+        .and_then(|out| serde_json::from_str::<serde_json::Value>(&out).ok())
+        .and_then(|v| v.as_array().map(|a| a.clone()))
+    {
+        Some(v) => v,
+        None => return "Не смог прочитать список окон".to_string(),
+    };
+    let visible: Vec<String> = v
+        .iter()
+        .filter_map(|w| {
+            let id = w.get("workspace")?.get("id")?.as_i64()?;
+            if id < 1 {
+                return None;
+            }
+            w.get("address")?.as_str().map(|a| a.to_string())
+        })
+        .collect();
+    if visible.is_empty() {
+        return "Все окна уже свернуты — рабочий стол чист".to_string();
+    }
+    let count = visible.len();
+    for addr in &visible {
+        run_ok(
+            "hyprctl",
+            &["dispatch",
+              &format!("hl.dsp.window.move({{ workspace = \"special:hidden\", window = \"address:{addr}\" }})")],
+        );
+    }
+    for _ in 0..5 {
+        if hypr_visible_windows() == 0 {
+            return format!("Свернул все окна ({count}) — рабочий стол чист");
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    "Не все окна свернулись".to_string()
+}
+
+/// Сколько окон сейчас на обычных столах (специальные — отрицательные id).
+fn hypr_visible_windows() -> usize {
+    run("hyprctl", &["-j", "clients"])
+        .ok()
+        .and_then(|out| serde_json::from_str::<serde_json::Value>(&out).ok())
+        .and_then(|v| v.as_array().map(|a| a.clone()))
+        .map(|list| {
+            list.iter()
+                .filter(|w| {
+                    w.get("workspace")
+                        .and_then(|ws| ws.get("id"))
+                        .and_then(|id| id.as_i64())
+                        .unwrap_or(0)
+                        >= 1
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Геометрия окна из IPC: (позиция, размер) в пикселях.
+fn hypr_window_geometry(addr: &str) -> Option<((i64, i64), (i64, i64))> {
+    let out = run("hyprctl", &["-j", "clients"]).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&out).ok()?;
+    for w in v.as_array()? {
+        if w.get("address")?.as_str()? == addr {
+            let nums = |key: &str| -> Option<Vec<i64>> {
+                w.get(key)
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.iter().filter_map(|n| n.as_i64()).collect())
+            };
+            let at = nums("at")?;
+            let size = nums("size")?;
+            if at.len() == 2 && size.len() == 2 {
+                return Some(((at[0], at[1]), (size[0], size[1])));
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// Плавает ли окно (float — переключатель, поэтому спрашиваем до вызова).
+fn hypr_window_is_floating(addr: &str) -> bool {
+    let out = match run("hyprctl", &["-j", "clients"]) {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) else {
+        return false;
+    };
+    let empty = Vec::new();
+    for w in v.as_array().unwrap_or(&empty) {
+        if w.get("address").and_then(|a| a.as_str()) == Some(addr) {
+            return w.get("floating").and_then(|f| f.as_bool()).unwrap_or(false);
+        }
+    }
+    false
+}
+
+/// Половина экрана: окно становится плавающим с точной геометрией.
+/// Порядок проверен живьём (Hyprland 0.56, Lua-диспетчеры): resize задаёт
+/// размер и центрирует окно, поэтому после него — move в угол; float —
+/// toggle, плаваем только тайловое окно.
+fn hypr_window_half(addr: &str, title: &str, left: bool) -> String {
+    let sel = format!("address:{addr}");
+    let (mon_w, mon_h, top) = hypr_monitor_usable();
+    let w = (mon_w / 2).max(200);
+    let h = mon_h.saturating_sub(top).max(200);
+    let x = if left { 0 } else { mon_w / 2 };
+    if !hypr_window_is_floating(addr) {
+        run_ok(
+            "hyprctl",
+            &["dispatch", &format!("hl.dsp.window.float({{ window = \"{sel}\" }})")],
+        );
+    }
+    run_ok(
+        "hyprctl",
+        &["dispatch",
+          &format!("hl.dsp.window.resize({{ x = {w}, y = {h}, window = \"{sel}\" }})")],
+    );
+    run_ok(
+        "hyprctl",
+        &["dispatch",
+          &format!("hl.dsp.window.move({{ x = {x}, y = {top}, window = \"{sel}\" }})")],
+    );
+    for _ in 0..5 {
+        if let Some(((ax, ay), (sw, sh))) = hypr_window_geometry(addr) {
+            let ok_pos = (ax - x as i64).abs() <= 4 && (ay - top as i64).abs() <= 4;
+            let ok_size = (sw - w as i64).abs() <= 4 && (sh - h as i64).abs() <= 4;
+            if ok_pos && ok_size {
+                let side = if left { "левую" } else { "правую" };
+                return format!("Разместил окно {title} на {side} половину экрана");
+            }
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    format!("Окно {title} не встало на половину экрана")
+}
+
+/// Размеры сфокусированного монитора и верхний резерв (панель).
+/// Порядок в reserved — [left, top, right, bottom]: проверено живьём,
+/// верхняя панель Omarchy резервирует 26 px во втором элементе.
+fn hypr_monitor_usable() -> (u32, u32, u32) {
+    let fallback = (1920, 1080, 0);
+    let Some(out) = run("hyprctl", &["-j", "monitors"]).ok() else {
+        return fallback;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) else {
+        return fallback;
+    };
+    let empty = Vec::new();
+    for m in v.as_array().unwrap_or(&empty) {
+        let focused = m.get("focused").and_then(|f| f.as_bool()).unwrap_or(false);
+        if !focused {
+            continue;
+        }
+        let width = m.get("width").and_then(|n| n.as_u64()).unwrap_or(1920) as u32;
+        let height = m.get("height").and_then(|n| n.as_u64()).unwrap_or(1080) as u32;
+        let top = m
+            .get("reserved")
+            .and_then(|r| r.as_array())
+            .and_then(|r| r.get(1))
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as u32;
+        // Страховка от кривых значений: резервы не съедают полэкрана.
+        let top = top.min(height / 3);
+        return (width, height, top);
+    }
+    fallback
 }
 
 /// Состояние окна из IPC: (существует, имя воркспейса, fullscreen 0/1/2).
@@ -1200,6 +1470,22 @@ pub fn window_control_checked(
 
     if action == "list" {
         return WindowControlOutcome::Done(window_control(action, app));
+    }
+
+    // Действия без выбора окна: переключение столов и «свернуть всё».
+    // Разбор «глагол номер» — номер приезжает внутри строки действия.
+    let (verb, desktop) = split_action_number(action);
+    if matches!(verb, "desktop" | "minimizeall") {
+        if in_wayland_session() && command_exists("hyprctl") {
+            let result = match verb {
+                "desktop" => hypr_desktop_switch(desktop),
+                _ => hypr_minimize_all(),
+            };
+            return WindowControlOutcome::Done(result);
+        }
+        return WindowControlOutcome::Done(
+            "Столы и «свернуть всё» пока умею только на Hyprland (Wayland)".to_string(),
+        );
     }
 
     let is_self = app.is_none() || app.is_some_and(crate::platform::is_self_window_target);
@@ -1794,6 +2080,17 @@ mod tests {
     }
 
     #[test]
+    fn action_number_split_and_desktop_digits() {
+        assert_eq!(split_action_number("desktop 3"), ("desktop", Some("3")));
+        assert_eq!(split_action_number("half_left"), ("half_left", None));
+        assert_eq!(split_action_number(" minimizeall "), ("minimizeall", None));
+        assert_eq!(desktop_number("3"), Some(3));
+        assert_eq!(desktop_number("стол 3"), Some(3));
+        assert_eq!(desktop_number("третий"), None);
+        assert_eq!(desktop_number(""), None);
+    }
+
+    #[test]
     fn desktop_entry_parses_name_ru_and_exec() {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("test-app.desktop");
@@ -1814,6 +2111,26 @@ mod tests {
         )
         .unwrap();
         assert!(parse_desktop(&hidden, "hidden").is_none());
+
+        // Записи-демоны (foot --server) не попадают в каталог: у них нет
+        // собственного окна, а модель видит их как правдоподобное имя.
+        let daemon = dir.path().join("foot-server.desktop");
+        std::fs::write(
+            &daemon,
+            "[Desktop Entry]\nType=Application\nName=Foot Server\nExec=foot --server\n",
+        )
+        .unwrap();
+        assert!(parse_desktop(&daemon, "foot-server").is_none());
+
+        // Обычное приложение, в имени которого «-server» — часть слова,
+        // не выкидываем: правило точное, по целому слову.
+        let normal = dir.path().join("openserver.desktop");
+        std::fs::write(
+            &normal,
+            "[Desktop Entry]\nType=Application\nName=OpenServer Panel\nExec=/usr/bin/openserver %U\n",
+        )
+        .unwrap();
+        assert!(parse_desktop(&normal, "openserver").is_some());
 
         // Exec=env VAR=... app — распространённая форма GNOME-записей:
         // имя процесса — уже после присваиваний, а не «env».

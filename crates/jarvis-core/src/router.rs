@@ -43,6 +43,13 @@ const UNAMBIGUOUS: &[&str] = &[
     "скрипт",
     "сверни",
     "разверни",
+    "минимизируй",
+    // Раскладка окон и столы: «перенеси окно на стол 2», «расположи окна
+    // рядом». Раньше уезжали в разговорную ветку, где каталога инструментов
+    // нет, и модель выдумывала несуществующий инструмент.
+    "перенеси",
+    "размести",
+    "расположи",
     "заблокируй",
     "усыпи",
     "перезагрузи",
@@ -170,6 +177,9 @@ const ACTION_NOUNS: &[&str] = &[
     "мышь",
     "курсор",
     "текст",
+    "окна",
+    "стол",
+    "воркспейс",
 ];
 
 /// Абстрактные понятия: с ними действие невозможно физически. Именно из-за
@@ -295,6 +305,13 @@ const ACTION_PHRASES: &[&str] = &[
     "что по задачам",
     "покажи список окон",
     "покажи окна",
+    // Геометрия окна: глагола в этих фразах нет («во весь левый край»).
+    "во весь левый край",
+    "во весь правый край",
+    "на левую половину",
+    "на правую половину",
+    "на левой половине",
+    "на правой половине",
     "прочитай буфер",
     "что в буфере",
     "какой сегодня день",
@@ -676,7 +693,7 @@ const TOOL_SLICES: &[(&str, &[&str], &str)] = &[
             "прокрути",
             "прокрутка",
         ],
-        "  window {\"action\":\"minimize\",\"app\":\"имя\"} — окна: minimize=свернуть, maximize=развернуть, fullscreen=экран, close, focus, list. Без app — Джарвис\n  open_utils {\"tab\":\"timer\"} — открыть окно утилит; tab: timer | stopwatch | calendar (без tab — таймер)\n  close_utils — закрыть окно утилит\n  play_reactor_intro — показать сборку реактора ещё раз (анимация интерфейса)\n  set_volume {\"percent\":50} / set_brightness {\"percent\":70}\n  desktop_input {\"action\":\"type_text\",\"text\":\"текст\"} — ввод текста\n  desktop_input {\"action\":\"press_key\",\"key\":\"ENTER\"} — клавиша\n  desktop_input {\"action\":\"hotkey\",\"keys\":[\"CTRL\",\"S\"]} — сочетание\n  desktop_input {\"action\":\"scroll\",\"direction\":\"down\",\"amount\":3} — прокрутка\n  screenshot / lock_screen / sleep",
+        "  window {\"action\":\"minimize\",\"app\":\"имя\"} — окна: minimize=свернуть, maximize=развернуть, fullscreen=экран, close, focus, list. Без app — Джарвис, «активное» — приложение на переднем плане\n  window: {\"action\":\"desktop\",\"desktop\":\"3\"} — стол 3; {\"action\":\"movetodesktop\",\"app\":\"имя\",\"desktop\":\"3\"} — перенести окно на стол; {\"action\":\"minimizeall\"} — свернуть все окна; {\"action\":\"half_left\",\"app\":\"активное\"} и half_right — окно на половину экрана («во весь левый край»; «расположи рядом» = два вызова). Столы и раскладка — только window; desktop_input — мышь и клавиатура\n  open_utils {\"tab\":\"timer\"} — открыть окно утилит; tab: timer | stopwatch | calendar (без tab — таймер)\n  close_utils — закрыть окно утилит\n  play_reactor_intro — показать сборку реактора ещё раз (анимация интерфейса)\n  set_volume {\"percent\":50} / set_brightness {\"percent\":70}\n  desktop_input {\"action\":\"type_text\",\"text\":\"текст\"} — ввод текста\n  desktop_input {\"action\":\"press_key\",\"key\":\"ENTER\"} — клавиша\n  desktop_input {\"action\":\"hotkey\",\"keys\":[\"CTRL\",\"S\"]} — сочетание\n  desktop_input {\"action\":\"scroll\",\"direction\":\"down\",\"amount\":3} — прокрутка\n  screenshot / lock_screen / sleep",
     ),
     (
         "таймеры",
@@ -856,8 +873,14 @@ pub fn action_prompt_for(prompt: &str) -> String {
     let apps_block = if catalog.is_empty() {
         String::new()
     } else {
+        // «Терминал» — категория, а не имя в списке: без подсказки модель
+        // не свяжет «Foot» с «открой терминал» и возьмёт правдоподобный
+        // мусор (реальный случай: Docker вместо терминала).
+        let hint = crate::platform::terminal_app_name(&catalog)
+            .map(|t| format!("\nПОДСКАЗКА: «терминал» = {t}"))
+            .unwrap_or_default();
         format!(
-            "\nУСТАНОВЛЕННЫЕ ПРИЛОЖЕНИЯ (open_app — только эти имена):\n{}\n",
+            "\nУСТАНОВЛЕННЫЕ ПРИЛОЖЕНИЯ (open_app — только эти имена):\n{}{hint}\n",
             catalog.join(", ")
         )
     };
@@ -1342,6 +1365,27 @@ pub fn plan_system_command_with(
     // Окна — раньше выхода приложения: «закрой окно X» и «закрой X» различаются.
     // Вопросительные обороты («как свернуть окно») сюда не пускаем, кроме
     // просьбы перечислить окна: «какие окна открыты» — это команда list.
+    // Столы и «свернуть всё» — раньше разбора окон: без этого «сверни все
+    // окна» опознавалось как «сверни моё окно».
+    if !plan_is_question(prompt) {
+        if let Some(action) = crate::tools::minimize_all_from_prompt(prompt) {
+            return Some(crate::tools::ToolCall::Window {
+                action,
+                app: None,
+                desktop: None,
+            });
+        }
+        if let Some(number) = crate::tools::desktop_number_from_prompt(prompt) {
+            return Some(crate::tools::ToolCall::Window {
+                action: "desktop".to_string(),
+                app: None,
+                desktop: Some(number),
+            });
+        }
+        if let Some(call) = crate::tools::window_half_from_prompt(prompt, &lookup) {
+            return Some(call);
+        }
+    }
     if let Some((action, app)) = crate::tools::window_request_from_prompt(prompt)
         && (action == "list" || !plan_is_question(prompt))
     {
@@ -1352,7 +1396,7 @@ pub fn plan_system_command_with(
                 lookup(&name).unwrap_or(name)
             }
         });
-        return Some(crate::tools::ToolCall::Window { action, app });
+        return Some(crate::tools::ToolCall::Window { action, app, desktop: None });
     }
 
     if PLAN_QUIT_TRIGGERS.contains(&first.as_str()) {
@@ -1723,7 +1767,7 @@ mod tests {
 
     fn window(prompt: &str, want_action: &str, want_app: Option<&str>) {
         match plan(prompt) {
-            Some(crate::tools::ToolCall::Window { action, app }) => {
+            Some(crate::tools::ToolCall::Window { action, app, .. }) => {
                 assert_eq!(action, want_action, "{prompt}");
                 assert_eq!(app.as_deref(), want_app, "{prompt}");
             }
@@ -1833,7 +1877,68 @@ mod tests {
             Some(crate::tools::ToolCall::Window {
                 action: "close".into(),
                 app: None,
+                desktop: None,
             })
         );
+    }
+
+    #[test]
+    fn planner_switches_desktops_by_phrase() {
+        // «Открой стол 2» — это переключение стола, а не запуск приложения.
+        match plan("открой стол 2") {
+            Some(crate::tools::ToolCall::Window { action, app, desktop }) => {
+                assert_eq!(action, "desktop");
+                assert!(app.is_none());
+                assert_eq!(desktop.as_deref(), Some("2"));
+            }
+            other => panic!("ждали desktop, получили {other:?}"),
+        }
+        // Число словами тоже читается.
+        match plan("перейди на третий стол") {
+            Some(crate::tools::ToolCall::Window { action, desktop, .. }) => {
+                assert_eq!(action, "desktop");
+                assert_eq!(desktop.as_deref(), Some("3"));
+            }
+            other => panic!("ждали desktop, получили {other:?}"),
+        }
+    }
+
+    #[test]
+    fn planner_minimizes_all_windows_not_own_window() {
+        // Реальная жалоба: «сверни все окна» сворачивало окно Джарвиса,
+        // потому что app=None означало «своё».
+        match plan("сверни все окна") {
+            Some(crate::tools::ToolCall::Window { action, app, .. }) => {
+                assert_eq!(action, "minimizeall");
+                assert!(app.is_none());
+            }
+            other => panic!("ждали minimizeall, получили {other:?}"),
+        }
+        match plan("покажи рабочий стол") {
+            Some(crate::tools::ToolCall::Window { action, .. }) => {
+                assert_eq!(action, "minimizeall");
+            }
+            other => panic!("ждали minimizeall, получили {other:?}"),
+        }
+        // Обычное «сверни окно» — не «свернуть всё».
+        window("сверни окно телеграма", "minimize", Some("Telegram"));
+    }
+
+    #[test]
+    fn window_layout_phrases_classify_as_action() {
+        // Раньше «перенеси окно на стол 2» уезжало в разговорную ветку,
+        // где каталога инструментов нет, и модель выдумывала «finder».
+        for phrase in [
+            "перенеси окно терминала на стол 2",
+            "расположи окна рядом",
+            "во весь левый край",
+            "терминал на правую половину экрана",
+        ] {
+            assert_eq!(
+                crate::router::classify_detailed(phrase).intent,
+                crate::router::Intent::Action,
+                "{phrase}"
+            );
+        }
     }
 }
