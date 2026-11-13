@@ -304,6 +304,13 @@ pub fn spawn_settings_watcher_with(
                         let llm_changed = previous.as_ref().is_none_or(|prev| {
                             prev.llm_backend != new_cfg.llm_backend
                                 || prev.llm_model != new_cfg.llm_model
+                                // Облачные поля: живой ApiEngine держит их
+                                // копию — смена требует перезагрузки движка.
+                                || prev.api_preset != new_cfg.api_preset
+                                || prev.api_base_url != new_cfg.api_base_url
+                                || prev.api_key != new_cfg.api_key
+                                || prev.api_model != new_cfg.api_model
+                                || prev.api_folder_id != new_cfg.api_folder_id
                         });
                         previous = Some(new_cfg.clone());
                         let mut lock = settings.write().unwrap_or_else(|e| e.into_inner());

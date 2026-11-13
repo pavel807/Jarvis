@@ -298,13 +298,33 @@ pub fn app_open(name: &str) -> Result<String, String> {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| probe.clone());
 
-    if run_ok("pgrep", &["-x", &probe_name]) || app_running(&display) {
-        return Ok(format!("{display} уже открыт"));
-    }
+    // Приложение уже запущено — это не повод отказывать: просьба «открой»
+    // в этом случае означает НОВОЕ ОКНО. Запускаем ещё раз и подтверждаем
+    // счётом окон: появилось — честное «открыл новое окно», нет — честное
+    // «уже открыт, новое окно не появилось».
+    let was_running = proc_alive_exact(&probe_name) || app_running(&display);
+    let windows_before = if was_running {
+        window_count_for(&display, &probe_name)
+    } else {
+        0
+    };
 
+    // Запуск НЕ через run()/output(): запущенное приложение наследует
+    // pipe stdout и держит его открытым — Command::output() ждал бы EOF
+    // вечно. Null-потоки + spawn: «запущено» проверяет pgrep следом.
     let launched = match &entry {
-        Some(app) if command_exists("gtk-launch") => run_ok("gtk-launch", &[&app.id]),
-        Some(app) if command_exists("gio") => run_ok("gio", &["launch", &app.path]),
+        Some(app) if command_exists("gtk-launch") => Command::new("gtk-launch")
+            .arg(&app.id)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok(),
+        Some(app) if command_exists("gio") => Command::new("gio")
+            .args(["launch", &app.path])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok(),
         _ => false,
     } || command_exists(&probe)
         && Command::new(&probe)
@@ -327,8 +347,20 @@ pub fn app_open(name: &str) -> Result<String, String> {
 
     // Статус запуска — ещё не гарантия: ждём появления процесса до 3 сек.
     for _ in 0..6 {
-        if run_ok("pgrep", &["-x", &probe_name]) || app_running(&display) {
-            return Ok(format!("Открыл {display}"));
+        if proc_alive_exact(&probe_name) {
+            if !was_running {
+                return Ok(format!("Открыл {display}"));
+            }
+            // Уже запущено: ждём новое окно до 3 сек, итог — по факту.
+            for _ in 0..6 {
+                std::thread::sleep(Duration::from_millis(500));
+                if window_count_for(&display, &probe_name) > windows_before {
+                    return Ok(format!("Открыл новое окно {display}"));
+                }
+            }
+            return Ok(format!(
+                "{display} уже был открыт — новое окно не появилось"
+            ));
         }
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -337,8 +369,40 @@ pub fn app_open(name: &str) -> Result<String, String> {
     ))
 }
 
+/// Сколько открытых окон принадлежит приложению (по имени и процессу).
+/// Наблюдение идёт через Hyprland IPC на Wayland и wmctrl на X11.
+fn window_count_for(display: &str, probe: &str) -> usize {
+    let Some(windows) = wmctrl_windows() else {
+        return 0;
+    };
+    windows
+        .iter()
+        .filter(|w| {
+            !w.title.trim().is_empty()
+                && (process_matches(&w.class, display)
+                    || process_matches(&w.class, probe)
+                    || class_words(&w.class)
+                        .iter()
+                        .any(|c| process_matches(c, display) || process_matches(c, probe)))
+        })
+        .count()
+}
+
 /// Настоящее установленное приложение по русской/приблизительной просьбе.
 /// `None` — такого приложения нет: подменять его файлом или сайтом нельзя.
+/// Каталог установленных приложений для контекста агента: модель выбирает
+/// из реального списка, а не выдумывает имена («Finder» на Linux).
+pub fn app_catalog() -> Vec<String> {
+    let mut names: Vec<String> = desktop_apps()
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    names.truncate(40);
+    names
+}
+
 pub fn app_lookup(name: &str) -> Option<String> {
     let want = name.trim();
     if want.is_empty() {
@@ -377,22 +441,60 @@ pub fn app_quit(name: &str) -> bool {
         .as_ref()
         .map(|a| a.name.clone())
         .unwrap_or_else(|| requested.to_string());
-    let probe = entry
+    let exec_path = entry
         .as_ref()
-        .map(|a| a.exec_bin.trim())
+        .map(|a| a.exec_bin.trim().to_string())
         .filter(|b| !b.is_empty())
-        .map(|b| {
-            Path::new(b)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| b.to_string())
-        })
         .unwrap_or_else(|| display.clone());
-    if !app_running(&display) && !app_running(&probe) {
+    let probe = Path::new(&exec_path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| exec_path.clone());
+    if !app_running(&display) && !proc_alive_exact(&probe) {
         return false;
     }
     println!("🛑 Закрываю: {display}");
-    run_ok("pkill", &["-x", &probe]) || run_ok("pkill", &["-f", &probe])
+    // SIGTERM — вежливый сигнал. Комм процесса обрезается до 15 символов
+    // (telegram-desktop → telegram-deskt), поэтому пробуем оба имени, а
+    // для -f — полный путь из .desktop: -f по короткому слову цепляет
+    // собственные процессы ассистента (bash с именем в аргументах).
+    let _ = run_ok("pkill", &["-x", &probe])
+        || run_ok("pkill", &["-x", &comm15(&probe)])
+        || run_ok("pkill", &["-f", &exec_path])
+        || run_ok("pkill", &["-f", &probe]);
+    // Успех — не код возврата pkill, а исчезнувший процесс, проверенный
+    // ТОЧНЫМ именем (comm), а не широким -f: последний матчит cmdline
+    // самой цепочки ассистента и вечно «видит живой» процесс.
+    for _ in 0..6 {
+        if !proc_alive_exact(&probe) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // Не ушли сами — SIGKILL, это и есть доведение до результата.
+    let _ = run_ok("pkill", &["-9", "-x", &probe])
+        || run_ok("pkill", &["-9", "-x", &comm15(&probe)])
+        || run_ok("pkill", &["-9", "-f", &exec_path])
+        || run_ok("pkill", &["-9", "-f", &probe]);
+    for _ in 0..4 {
+        if !proc_alive_exact(&probe) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    println!("⚠️ {display}: процесс не завершился после SIGTERM и SIGKILL");
+    false
+}
+
+/// Жив ли процесс с точным именем: comm обрезается ядром до 15 символов,
+/// поэтому проверяем и полное имя, и обрезанное.
+fn proc_alive_exact(probe: &str) -> bool {
+    let comm = comm15(probe);
+    run_ok("pgrep", &["-x", probe]) || (comm != probe && run_ok("pgrep", &["-x", &comm]))
+}
+
+fn comm15(name: &str) -> String {
+    name.chars().take(15).collect()
 }
 
 // =========================================================================
@@ -446,7 +548,276 @@ fn window_matches(window: &LinuxWindow, want: &str) -> bool {
         })
 }
 
+// =========================================================================
+// Hyprland (Wayland): IPC `hyprctl` — единственный источник окон в
+// чистой Wayland-сессии, wmctrl/xdotool туда не смотрят.
+// =========================================================================
+
+/// Управление окном на Hyprland через hl.dsp.* диспетчеры. Возвращает
+/// Some(ответ) для обработанных действий, None — пусть идёт старый путь.
+fn hyprland_window_control(action: &str, app: Option<&str>) -> Option<String> {
+    let action = action.trim().to_lowercase();
+    match action.as_str() {
+        "close" | "minimize" | "maximize" | "fullscreen" | "restore" | "focus" => {}
+        _ => return None,
+    }
+    let is_self = app.is_some() && crate::platform::is_self_window_target(app.unwrap_or(""));
+    let target = match app {
+        Some(wanted)
+            if is_self
+                || ["активное", "активную", "активный", "это", "текущее", "active"]
+                    .contains(&wanted.trim().to_lowercase().as_str()) =>
+        {
+            // Своё окно ищем по классу, «активное» — по активному.
+            if is_self {
+                wmctrl_windows()?.into_iter().find(|w| {
+                    class_words(&w.class)
+                        .iter()
+                        .any(|c| c.to_lowercase().contains("jarvis"))
+                })
+            } else {
+                let out = run("hyprctl", &["-j", "activewindow"]).ok()?;
+                parse_hypr_single(&out)
+            }
+        }
+        Some(wanted) => find_window(wanted),
+        None => wmctrl_windows()?.into_iter().find(|w| {
+            class_words(&w.class)
+                .iter()
+                .any(|c| c.to_lowercase().contains("jarvis"))
+        }),
+    };
+    let Some(window) = target else {
+        let name = app.unwrap_or("окно");
+        if is_self {
+            return Some("Не нашёл своё окно — я в фоне. Скажи, чьё окно трогать".to_string());
+        }
+        return Some(format!("Приложение {name} не найдено среди открытых"));
+    };
+    let addr = window.id.clone();
+    let title = if window.title.trim().is_empty() {
+        window.class.clone()
+    } else {
+        window.title.clone()
+    };
+    let sel = format!("address:{addr}");
+
+    match action.as_str() {
+        "close" => {
+            let ok = run_ok(
+                "hyprctl",
+                &["dispatch", &format!("hl.dsp.window.close(\"{sel}\")")],
+            );
+            // Верификация: окно обязано исчезнуть из списка. Приложения
+            // выходят не мгновенно — окно верификации до 4 секунд.
+            for _ in 0..10 {
+                if !hypr_window_exists(&addr) {
+                    return Some(format!("Закрыл окно {title}"));
+                }
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            let _ = ok;
+            Some(format!("Окно {title} не закрылось — приложение отказалось"))
+        }
+        "minimize" => {
+            // В Hyprland нет настоящего минимизирования: окно уезжает в
+            // служебный воркспейс «hidden» — из интерфейса это и есть свернуть.
+            let ok = run_ok(
+                "hyprctl",
+                &["dispatch",
+                  &format!("hl.dsp.window.move({{ workspace = \"special:hidden\", window = \"{sel}\" }})")],
+            );
+            for _ in 0..6 {
+                match hypr_window_state(&addr) {
+                    Some((true, ws, _)) if ws.starts_with("special") => {
+                        return Some(format!("Свернул окно {title}"));
+                    }
+                    _ => std::thread::sleep(Duration::from_millis(400)),
+                }
+            }
+            let _ = ok;
+            Some(format!("Окно {title} не свернулось"))
+        }
+        "maximize" | "fullscreen" => {
+            let mode = if action == "fullscreen" { "fullscreen" } else { "maximized" };
+            let before = hypr_window_state(&addr)
+                .map(|(_, _, fs)| fs)
+                .unwrap_or(0);
+            run_ok(
+                "hyprctl",
+                &["dispatch",
+                  &format!("hl.dsp.window.fullscreen({{ window = \"{sel}\", mode = \"{mode}\", action = \"toggle\" }})")],
+            );
+            let after = hypr_window_state(&addr).map(|(_, _, fs)| fs).unwrap_or(0);
+            if before == 0 && after != 0 {
+                Some(format!(
+                    "{} окно {title}",
+                    if mode == "fullscreen" { "Развернул на весь экран" } else { "Развёрнул до максимума" }
+                ))
+            } else if before != 0 && after == 0 {
+                Some(format!("Вернул окно {title} к обычному виду"))
+            } else {
+                Some(format!("Окно {title}: состояние экрана не изменилось"))
+            }
+        }
+        "restore" => {
+            let (exists, ws, fs) = hypr_window_state(&addr)
+                .unwrap_or((false, String::new(), 0));
+            if !exists {
+                return Some(format!("Окно {title} уже закрыто"));
+            }
+            if ws.starts_with("special") {
+                // Вернуть из свёрнутого: на текущий воркспейс.
+                let current = run("hyprctl", &["-j", "activeworkspace"])
+                    .ok()
+                    .and_then(|out| serde_json::from_str::<serde_json::Value>(&out).ok())
+                    .and_then(|v| v.get("name")?.as_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "1".to_string());
+                run_ok(
+                    "hyprctl",
+                    &["dispatch",
+                      &format!("hl.dsp.window.move({{ workspace = \"{current}\", window = \"{sel}\" }})")],
+                );
+                return match hypr_window_state(&addr) {
+                    Some((true, ws2, _)) if !ws2.starts_with("special") => {
+                        Some(format!("Вернул окно {title}"))
+                    }
+                    _ => Some(format!("Окно {title} не вернулось")),
+                };
+            }
+            if fs != 0 {
+                // unset у Hyprland 0.56 не снимает разворот — снимает toggle,
+                // в том же режиме, в котором окно было развёрнуто.
+                let mode = if fs == 2 { "fullscreen" } else { "maximized" };
+                run_ok(
+                    "hyprctl",
+                    &["dispatch",
+                      &format!("hl.dsp.window.fullscreen({{ window = \"{sel}\", mode = \"{mode}\", action = \"toggle\" }})")],
+                );
+                // Hyprland применяет диспетчер асинхронно: читаем с ретраем.
+                for _ in 0..6 {
+                    match hypr_window_state(&addr) {
+                        Some((true, _, fs2)) if fs2 == 0 => {
+                            return Some(format!("Вернул окно {title} к обычному виду"))
+                        }
+                        _ => std::thread::sleep(Duration::from_millis(300)),
+                    }
+                }
+                return Some(format!("Окно {title} не вернулось к обычному виду"));
+            }
+            Some(format!("Окно {title} уже в обычном виде"))
+        }
+        "focus" => {
+            let ok = run_ok(
+                "hyprctl",
+                &["dispatch", &format!("hl.dsp.focus({{ window = \"{sel}\" }})")],
+            );
+            let _ = run_ok(
+                "hyprctl",
+                &["dispatch",
+                  &format!("hl.dsp.window.alter_zorder({{ mode = \"top\", window = \"{sel}\" }})")],
+            );
+            let active = run("hyprctl", &["-j", "activewindow"])
+                .ok()
+                .and_then(|out| parse_hypr_single(&out))
+                .map(|w| w.id);
+            if active.as_deref() == Some(addr.as_str()) {
+                Some(format!("Переключился на {title}"))
+            } else {
+                let _ = ok;
+                Some(format!("Окно {title} не вышло на передний план"))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Состояние окна из IPC: (существует, имя воркспейса, fullscreen 0/1/2).
+fn hypr_window_state(addr: &str) -> Option<(bool, String, i64)> {
+    let out = run("hyprctl", &["-j", "clients"]).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&out).ok()?;
+    for w in v.as_array()? {
+        if w.get("address")?.as_str()? == addr {
+            return Some((
+                true,
+                w.get("workspace")
+                    .and_then(|ws| ws.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                w.get("fullscreen").and_then(|f| f.as_i64()).unwrap_or(0),
+            ));
+        }
+    }
+    Some((false, String::new(), 0))
+}
+
+fn hypr_window_exists(addr: &str) -> bool {
+    matches!(hypr_window_state(addr), Some((true, _, _)))
+}
+
+/// Одно окно из `hyprctl -j activewindow`.
+fn parse_hypr_single(out: &str) -> Option<LinuxWindow> {
+    let v: serde_json::Value = serde_json::from_str(out).ok()?;
+    let class = v.get("class")?.as_str()?.to_string();
+    let title = v.get("title")?.as_str()?.to_string();
+    let id = v.get("address").and_then(|a| a.as_str()).unwrap_or("").to_string();
+    Some(LinuxWindow { id, class, title })
+}
+
+/// Разбор `hyprctl clients -j` (JSON): класс и заголовок видимых окон.
+fn parse_hypr_clients(out: &str) -> Vec<LinuxWindow> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(out) else {
+        return Vec::new();
+    };
+    v.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|w| {
+                    // Скрытые и служебные окна наблюдению не нужны.
+                    w.get("hidden").and_then(|h| h.as_bool()) != Some(true)
+                        && w.get("mapped").and_then(|m| m.as_bool()) != Some(false)
+                })
+                .filter_map(|w| {
+                    let class = w.get("class")?.as_str()?.to_string();
+                    let title = w.get("title")?.as_str()?.to_string();
+                    let id = w.get("address").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                    Some(LinuxWindow { id, class, title })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn wayland_session_env() -> bool {
+    in_wayland_session()
+}
+
+fn hyprctl_windows() -> Option<Vec<LinuxWindow>> {
+    let out = run("hyprctl", &["clients", "-j"]).ok()?;
+    // Валидный JSON — массив или объект; мусор (ошибка IPC) — нет.
+    (out.starts_with('[') || out.starts_with('{')).then(|| parse_hypr_clients(&out))
+}
+
+fn hyprctl_active() -> Option<LinuxWindow> {
+    let out = run("hyprctl", &["activewindow", "-j"]).ok()?;
+    if !out.starts_with('{') || out.trim().is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&out).ok()?;
+    let class = v.get("class")?.as_str()?.to_string();
+    let title = v.get("title")?.as_str()?.to_string();
+    let id = v.get("address").and_then(|a| a.as_str()).unwrap_or("").to_string();
+    Some(LinuxWindow { id, class, title })
+}
+
 fn wmctrl_windows() -> Option<Vec<LinuxWindow>> {
+    // Wayland: сначала Hyprland IPC, wmctrl там не видит ничего.
+    if wayland_session_env() {
+        if let Some(windows) = hyprctl_windows() {
+            return Some(windows);
+        }
+    }
     run("wmctrl", &["-lx"])
         .ok()
         .map(|out| parse_wmctrl_lx(&out))
@@ -463,8 +834,14 @@ fn xdotool_search(flag: &str, pattern: &str) -> Option<Vec<String>> {
         })
 }
 
-/// Активное окно: id и заголовок. xdotool точнее; xprop — запасной путь.
-fn active_window() -> Option<(String, String)> {
+/// Активное окно: id и заголовок. На Hyprland — IPC; xdotool точнее на X11;
+/// xprop — запасной путь.
+pub fn active_window() -> Option<(String, String)> {
+    if wayland_session_env() {
+        if let Some(w) = hyprctl_active() {
+            return Some((w.class, w.title));
+        }
+    }
     if command_exists("xdotool") {
         // Без `?`: неудача xdotool не должна закрывать путь к xprop.
         if let Ok(id) = run("xdotool", &["getactivewindow"]) {
@@ -558,10 +935,10 @@ fn find_window_xdotool(want: &str) -> Option<LinuxWindow> {
 
 /// Найти окно приложения: основной путь — wmctrl, запасной — xdotool.
 fn find_window(want: &str) -> Option<LinuxWindow> {
-    if command_exists("wmctrl") {
-        if let Some(window) = find_window_wmctrl(want) {
-            return Some(window);
-        }
+    // Список окон уже ходит через Hyprland IPC на Wayland — затвор на
+    // наличие бинарника wmctrl тут не нужен и ломал поиск целиком.
+    if let Some(window) = find_window_wmctrl(want) {
+        return Some(window);
     }
     find_window_xdotool(want)
 }
@@ -705,7 +1082,39 @@ fn window_list() -> String {
 /// активное приложение (как на macOS: сворачивать чужое окно без просьбы —
 /// неприятный сюрприз).
 pub fn window_control(action: &str, app: Option<&str>) -> String {
-    // wmctrl и xdotool — инструменты X11: без DISPLAY им нечего смотреть.
+    // Чтение списка окон на Wayland идёт через Hyprland IPC — wmctrl и
+    // xdotool там не смотрят, но наблюдению это не мешает.
+    if action == "list" {
+        if let Some(windows) = hyprctl_windows() {
+            let shown: Vec<String> = windows
+                .iter()
+                .filter(|w| !w.title.trim().is_empty())
+                .take(12)
+                .map(|w| {
+                    let class_last = class_words(&w.class)
+                        .into_iter()
+                        .next_back()
+                        .unwrap_or_else(|| w.class.clone());
+                    format!("{class_last}: {}", w.title)
+                })
+                .collect();
+            return if shown.is_empty() {
+                "Открытых окон не нашёл".to_string()
+            } else {
+                shown.join("; ")
+            };
+        }
+    }
+    // Hyprland (Wayland): нативное IPC-управление. wmctrl/xdotool там слепы,
+    // а диспетчеры hl.dsp.* закрывают весь набор: close/minimize/maximize/
+    // fullscreen/restore/focus — с верификацией факта после действия.
+    if in_wayland_session() && command_exists("hyprctl") {
+        if let Some(result) = hyprland_window_control(action, app) {
+            return result;
+        }
+    }
+
+    // Изменения окон — инструменты X11: без DISPLAY им нечего смотреть.
     // Это не поломка, а отсутствие графической сессии — так и говорим.
     if std::env::var_os("DISPLAY").is_none() {
         return if in_wayland_session() {
@@ -855,6 +1264,10 @@ pub fn music_control(action: &str) -> Result<String, String> {
         _ => "Предыдущий трек",
     };
     Ok(said.to_string())
+}
+/// Статус плеера («Playing»/«Paused») без попытки управления — для наблюдения.
+pub fn music_status() -> Option<String> {
+    playerctl_status()
 }
 
 // =========================================================================
@@ -1180,3 +1593,35 @@ mod tests {
         assert_eq!(app.exec_bin, "gnome-terminal");
     }
 }
+
+#[cfg(test)]
+mod hypr_tests {
+    use super::*;
+
+    #[test]
+    fn hypr_clients_json_parses() {
+        let out = r#"[
+            {"address":"0x55f31ab2e770","hidden":false,"mapped":true,"class":"foot","title":"paveldev@omarchy:~"},
+            {"address":"0x55f31a529a40","hidden":true,"mapped":true,"class":"foot","title":"скрытое"},
+            {"address":"0xabc","hidden":false,"mapped":false,"class":"x","title":"не смаппено"}
+        ]"#;
+        let windows = parse_hypr_clients(out);
+        assert_eq!(windows.len(), 1, "скрытые и не смаппенные окна — не наблюдение");
+        assert_eq!(windows[0].class, "foot");
+        assert_eq!(windows[0].title, "paveldev@omarchy:~");
+    }
+
+    #[test]
+    fn hypr_clients_garbage_is_empty() {
+        assert!(parse_hypr_clients("Invalid").is_empty());
+        assert!(parse_hypr_clients("").is_empty());
+    }
+
+    #[test]
+    fn hypr_active_json_parses() {
+        let out = r#"{"address":"0x55f31ab2e770","class":"jarvis-app","title":"J.A.R.V.I.S"}"#;
+        let v: serde_json::Value = serde_json::from_str(out).unwrap();
+        assert_eq!(v.get("class").unwrap().as_str(), Some("jarvis-app"));
+    }
+}
+

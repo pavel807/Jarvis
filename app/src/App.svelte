@@ -104,7 +104,7 @@
     {/if}
   </div>
 
-  <nav class="nav" data-active={Math.max(0, activeIndex)} aria-label="Разделы">
+  <nav class="nav" style:--i={Math.max(0, activeIndex)} aria-label="Разделы">
     {#each NAV as item, i (item.key)}
       <button
         class="nav-btn"

@@ -81,3 +81,15 @@ pub fn add_note(_title: &str, _body: &str) -> Result<String, String> {
 pub fn create_event(_title: &str, _date: &str, _time: &str) -> Result<String, String> {
     Err("Календарь поддерживается только на macOS".to_string())
 }
+
+pub fn active_window() -> Option<(String, String)> {
+    None
+}
+
+pub fn music_status() -> Option<String> {
+    None
+}
+
+pub fn app_catalog() -> Vec<String> {
+    Vec::new()
+}

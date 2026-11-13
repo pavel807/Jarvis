@@ -416,15 +416,18 @@
         <div class="row-item" style="flex-direction: column; align-items: stretch; gap: 6px">
           <span class="row-item__title">Имя ассистента</span>
           <span class="row-item__hint">
-            Как он представляется в интерфейсе и разговоре. Фраза-активация
-            («Джарвис») меняется отдельно — «Wake word и голос — дополнительно».
+            Как он представляется в разговоре. То же слово — фраза-активация:
+            скажите имя, и ассистент откликнется.
           </span>
           <input
             class="input"
             type="text"
             value={settings.assistant_name}
             placeholder="Джарвис"
-            onchange={(e) => void patchSettings({ assistant_name: e.currentTarget.value.trim() || "Джарвис" })}
+            onchange={(e) => {
+              const v = e.currentTarget.value.trim() || "Джарвис";
+              void patchSettings({ assistant_name: v, wake_word: v });
+            }}
           />
         </div>
       {/if}

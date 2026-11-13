@@ -199,6 +199,15 @@ fn bundle_names() -> Vec<String> {
 /// Настоящее установленное приложение по русской/приблизительной просьбе.
 /// `None` — такого приложения нет: вызывающий код не должен подменять его
 /// файлом, папкой или сайтом.
+/// Каталог установленных приложений для контекста агента.
+pub fn app_catalog() -> Vec<String> {
+    let mut names = bundle_names();
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    names.truncate(40);
+    names
+}
+
 pub fn app_lookup(name: &str) -> Option<String> {
     let want = name.trim();
     if want.is_empty() {
@@ -1039,6 +1048,24 @@ fn current_music_target() -> Result<Option<MusicTarget>, String> {
             "Музыка может играть в браузере или в «Музыке», но управлять не вышло: {reason}"
         )),
         None => Ok(None),
+    }
+}
+
+/// Активное приложение для наблюдения: имя frontmost-процесса.
+pub fn active_window() -> Option<(String, String)> {
+    let name = active_process().ok().flatten()?;
+    Some((name.clone(), name))
+}
+
+/// Статус плеера для наблюдения: Apple Music, если запущен.
+pub fn music_status() -> Option<String> {
+    if app_running("Music") {
+        osascript(r#"tell application "Music" to get player state as text"#)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
     }
 }
 

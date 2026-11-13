@@ -399,6 +399,13 @@ pub fn classify_detailed(text: &str) -> Verdict {
         .iter()
         .any(|p| compact.contains(&normalize(p)));
 
+    // 0. Чтение состояния среды — цель для агента, у которого есть
+    // наблюдение и ui_read: «прочитай непрочитанные в телеграме» — это
+    // задача, а не болтовня, каким бы ни был глагол.
+    if reads_state(text) {
+        return Verdict::action(0.9);
+    }
+
     // 1. Явное действие целиком — до всякой аналитики. Короткие фразы
     // («температура тела») уступают контексту: они слишком общие.
     if normalized_phrases
@@ -841,21 +848,30 @@ pub fn action_prompt_for(prompt: &str) -> String {
     crate::mcp::ensure_connected();
     let mcp_block = crate::mcp::prompt_block();
 
+    // Каталог установленных приложений: модель выбирает open_app из
+    // реального списка, а не выдумывает имена («Finder» на Linux). Это
+    // универсальная сеть для любой формулировки, которую не поймал
+    // нечёткий сопоставитель.
+    let catalog = crate::platform::app_catalog();
+    let apps_block = if catalog.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nУСТАНОВЛЕННЫЕ ПРИЛОЖЕНИЯ (open_app — только эти имена):\n{}\n",
+            catalog.join(", ")
+        )
+    };
+
     format!(
-        r#"Ты — исполнитель команд на компьютере пользователя ({os}). Сегодня {today}.
-Рабочая папка: {cwd}; относительные пути — от неё.
-Действие — ровно один блок без слов вокруг: <tool>{{"name":"ИМЯ","args":{{...}}}}</tool>
-Имя — только из списка; обычный вопрос — короткий текстовый ответ без блока.
+        r#"Ты — агент на компьютере пользователя ({os}). Сегодня {today}. Рабочая папка: {cwd}; относительные пути — от неё.
+Просьба — цель, а не имя инструмента. Состояние системы приходит в сообщении «ОБСТАНОВКА» — опирайся на него, не догадывайся.
+Действие — ровно один блок без слов вокруг: <tool>{{"name":"ИМЯ","args":{{...}}}}</tool>; имя — только из списка. Ответить — текст без блока, коротко и в мужском роде.
 
 ИНСТРУМЕНТЫ:
-{tools}{commands_block}{mcp_block}
-ПРАВИЛА:
-1. Режим — сам: болтовня/знания — текст; свежие данные — web_search; сделать на компьютере — инструмент, не жди разрешения.
-2. «открой X»: программа → open_app; сайт/сервис → run_command из каталога, иначе web_search → open_url по адресу ИЗ ВЫДАЧИ, домен не выдумывай.
-3. Экран: сперва ui_read, затем действуй ПО ИМЕНИ из ui_read (ui_click/ui_type/ui_menu); наугад не кликай и не печатай. После ui_click приходит снимок экрана — проверь итог честно.
-4. «закрой X» — quit_app; «закрой окно» — window close. Файлы: сперва file_read/file_search, затем file_edit; чужой файл целиком не перезаписывай.
-5. Неудача — назови причину, пробуй другой путь (ui_read покажет имена; shell/applescript умеют почти всё); об успехе без успеха не говори. После open_app — wait 1–3 с. Без подтверждения не выполняй покупки, отправку наружу, удаление, платежи.
-6. run_command — только имя из каталога. send_message — только названный получатель. Комментарий — коротко, в мужском роде."#,
+{tools}{commands_block}{mcp_block}{apps_block}
+После каждого шага придёт свежая «ОБСТАНОВКА»: сверяй её с целью и продолжай, пока цель не подтверждена наблюдением.
+Успех — только подтверждённое наблюдением; не подтвердилось — скажи, на чём остановился и почему.
+Покупки, отправка наружу, удаление — только после явного подтверждения пользователя текстом."#,
         today = crate::text::today_russian(),
         cwd = crate::tools::cwd(),
     )
@@ -1154,6 +1170,30 @@ fn plan_open(
         return None;
     }
     let lower: Vec<String> = tokens.iter().map(|w| w.to_lowercase()).collect();
+    // «открой браузер файт фокс» = «открой Firefox»: слово «браузер» —
+    // указание категории, а не часть имени. Один «браузер» — браузер
+    // по умолчанию (platform::app_open знает этот случай).
+    let rest_of_target: Vec<String> = tokens[2..].to_vec();
+    if rest_of_target.is_empty()
+        && lower
+            .get(1)
+            .is_some_and(|w| w.starts_with("браузер") || w.starts_with("browser"))
+    {
+        return Some(crate::tools::ToolCall::OpenApp {
+            name: "браузер".to_string(),
+        });
+    }
+    let target = if lower
+        .get(1)
+        .is_some_and(|w| w.starts_with("браузер") || w.starts_with("browser"))
+    {
+        plan_target(&rest_of_target)
+    } else {
+        target
+    };
+    if target.is_empty() {
+        return None;
+    }
     // Музыка/плеер — не запуск приложения: «включи музыку» управляет
     // плеером, а не открывает Music.app. Пусть решает LLM со срезом music.
     if lower.iter().any(|w| {
@@ -1242,6 +1282,32 @@ fn plan_quit(
 
 /// Однозначная системная команда без LLM. `None` — фраза неоднозначна или
 /// это не системное действие: дальше решают каталог команд, кэш сайтов и LLM.
+/// Фраза просит ЧИТАТЬ состояние (непрочитанные, содержимое, счётчики),
+/// а не выполнить действие запуска/закрытия. Такие фразы не перехватываются
+/// детерминированным планом: «прочитай непрочитанные в телеграме» — это не
+/// «открой телеграм», агент должен увидеть состояние и ответить числом.
+/// Проверка по смыслу всей фразы, а не по первому слову.
+pub fn reads_state(prompt: &str) -> bool {
+    let t = normalize(prompt);
+    let read_verbs = [
+        "прочитай", "прочитать", "почитай", "проверь", "проверить", "посмотри",
+        "посмотреть", "скажи", "сколько", "какие", "что там", "покажи", "показать",
+        "зачитай", "объяви", "перечисли", "напиши что", "есть ли",
+    ];
+    let read_objects = [
+        "непрочитан", "сообщени", "письм", "писем", "почт", "уведомлен", "чат", "диалог",
+        "пропущен", "входящ",
+    ];
+    let has_verb = read_verbs.iter().any(|v| t.contains(v));
+    let has_object = read_objects.iter().any(|o| t.contains(o));
+    // «Сколько времени» / «какая погода» — не про состояние приложений.
+    let not_about_apps = ["времени", "погода", "погоду", "дата", "день"]
+        .iter()
+        .any(|w| t.contains(w));
+    has_verb && (has_object || (t.contains("непрочитан") || t.contains("уведомлен")))
+        && !not_about_apps
+}
+
 pub fn plan_system_command(prompt: &str) -> Option<crate::tools::ToolCall> {
     plan_system_command_with(prompt, crate::platform::app_lookup)
 }
@@ -1252,6 +1318,12 @@ pub fn plan_system_command_with(
     prompt: &str,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Option<crate::tools::ToolCall> {
+    // Смысл раньше глагола: «прочитай непрочитанные в телеграме» содержит
+    // слово «телеграм», но это чтение состояния, а не «открой телеграм».
+    if reads_state(prompt) {
+        return None;
+    }
+
     let tokens = plan_tokens(prompt);
     let first = tokens.first()?.to_lowercase();
     if tokens.len() < 2 {
@@ -1286,6 +1358,77 @@ pub fn plan_system_command_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_marker_is_stripped_from_target() {
+        // «открой браузер файт фокс» = «открой Firefox»: маркер не часть имени.
+        let lookup = |want: &str| {
+            (matches!(want, "файт фокс" | "зум" | "хром"))
+                .then(|| format!("{want}-resolved"))
+        };
+        let call = plan_system_command_with("открой браузер файт фокс", lookup);
+        assert_eq!(
+            call,
+            Some(crate::tools::ToolCall::OpenApp {
+                name: "файт фокс-resolved".to_string()
+            })
+        );
+        // Голый «браузер» — браузер по умолчанию.
+        let call = plan_system_command_with("открой браузер", |_| None);
+        assert_eq!(
+            call,
+            Some(crate::tools::ToolCall::OpenApp {
+                name: "браузер".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn read_state_requests_are_not_intercepted() {
+        // Диагноз задания: «прочитай непрочитанные в Telegram» превращался
+        // в запуск Telegram. Теперь фраза чтения уходит агенту.
+        for phrase in [
+            "прочитай непрочитанные в телеграме",
+            "сколько непрочитанных в почте",
+            "проверь сообщения в телеграме",
+            "что там в почте",
+            "прочитай письма",
+            "сколько уведомлений",
+        ] {
+            assert!(
+                plan_system_command_with(phrase, |_| None).is_none(),
+                "чтение состояния не должно перехватываться планом: {phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_open_quit_still_intercepted() {
+        // Регрессии прежних сценариев недопустимы: явные действия работают.
+        let lookup = |want: &str| (want == "телеграм").then(|| "Telegram".to_string());
+        assert!(plan_system_command_with("открой aviasales.ru", |_| None).is_some());
+        assert!(plan_system_command_with("закрой телеграм", lookup).is_some());
+        assert!(plan_system_command_with("открой телеграм", lookup).is_some());
+    }
+
+    #[test]
+    fn reads_state_understands_meaning_not_verb() {
+        assert!(reads_state("прочитай непрочитанные в телеграме"));
+        assert!(reads_state("сколько писем пришло"));
+        assert!(reads_state("проверь почту"));
+        // Не состояние приложений:
+        assert!(!reads_state("сколько времени"));
+        assert!(!reads_state("какая погода"));
+        // Явное действие без чтения:
+        assert!(!reads_state("открой телеграм"));
+        assert!(!reads_state("закрой хром"));
+    }
+
+    #[test]
+    fn weather_question_still_plans_weather_path() {
+        // «проверь погоду» — не перехватывается планом (погода в движке).
+        assert!(plan_system_command_with("проверь погоду в москве", |_| None).is_none());
+    }
 
     #[test]
     fn action_recognized() {

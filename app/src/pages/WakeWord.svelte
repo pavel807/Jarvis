@@ -33,6 +33,8 @@
   let phraseBusy = $state(false);
   let phraseReport = $state<PhraseReport | null>(null);
 
+  const name = $derived(settings.assistant_name || "Джарвис");
+
   /**
    * Сгенерировать фразу-активацию разными дикторами и проверить, что
    * модель её слышит: сколько вариантов произнесения распознано буквально.
@@ -167,9 +169,9 @@
       <AppIcon name="chevronLeft" size={17} />
     </button>
     <div class="page-head__body">
-      <h1 class="page-title">Обучение «Джарвис»</h1>
+      <h1 class="page-title">Wake word и голос — дополнительно</h1>
       <p class="page-sub">
-        Джарвис срабатывает на слово «Джарвис». Если он путает его с другой речью
+        Ассистент срабатывает на фразу «{name}». Если он путает её с другой речью
         или не откликается — запишите несколько образцов своим голосом.
       </p>
     </div>
@@ -178,9 +180,10 @@
   <div class="card card--outline" style="margin-bottom: 12px">
     <div class="card__title">Активационная фраза</div>
     <p class="card__hint">
-      Любая фраза: «Джарвис», «Компьютер», «Найджер веса». Детектор слушает
+      Любая фраза: «Джарвис», «Компьютер», «Робот». Детектор слушает
       ASR-модель и срабатывает, когда она услышала фразу буквально, — голос
-      значения не имеет. Фраза применяется после перезапуска движка.
+      значения не имеет. Фраза — то же слово, что и имя ассистента, и
+      применяется сразу после сохранения.
     </p>
     <label class="api-field">
       <span class="api-field__label">Фраза-активация</span>
@@ -189,7 +192,11 @@
         type="text"
         value={settings.wake_word}
         placeholder="Джарвис"
-        onchange={(e) => void patchSettings({ wake_word: e.currentTarget.value })}
+        onchange={(e) => {
+          // Имя и фраза — одна переменная: сменил фразу, сменилось имя.
+          const v = e.currentTarget.value.trim() || settings.assistant_name || "Джарвис";
+          void patchSettings({ wake_word: v, assistant_name: v });
+        }}
       />
     </label>
     <button class="btn btn--primary btn--block" disabled={phraseBusy} onclick={generatePhrase}>

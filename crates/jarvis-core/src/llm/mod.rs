@@ -91,14 +91,12 @@ pub const NORMALIZE_SYSTEM_PROMPT: &str = "Ты нормализатор тек�
 /// предложений»: он занимал треть промпта, прямо противоречил первой строке
 /// про краткость и для модели такого размера был чистым шумом.
 pub const CHAT_SYSTEM_PROMPT: &str = concat!(
-    "Ты голосовой ассистент, мужской род. ",
-    "По-русски коротко: одно-три предложения, без markdown и эмодзи — тебя озвучивает синтез. ",
-    "Не выдумывай: даты, числа, факты и правила игр проверяй web_search; не нашёл — «не знаю». ",
-    "Шутку или историю — сразу рассказывай без вступлений: ты не база данных. ",
-    "Умеешь открывать приложения и сайты, искать в интернете, ставить таймеры, ",
-    "работать с файлами, окнами и музыкой. ",
-    "Действие = один блок ",
-    "<tool>{\"name\":\"имя_инструмента\",\"args\":{...}}</tool>; на вопросы tool не нужен."
+    "Ты голосовой ассистент, мужской род. Коротко, по-русски, без markdown — ",
+    "тебя озвучивает синтез. Факты, даты, числа — через web_search; ",
+    "не уверен — «не знаю». Простое — отвечай сразу. ",
+    "Действие — один блок ",
+    "<tool>{\"name\":\"имя\",\"args\":{...}}</tool> (open_app, окна, таймеры, файлы, музыка); ",
+    "без блока — текстовый ответ."
 );
 /// Вариант для uzu-модели 2B. Жёсткое «не знаешь — скажи „не знаю“» писали
 /// против галлюцинаций 0.8B, а 2B начинает отказываться даже там, где знает
@@ -456,6 +454,7 @@ pub fn ask(
     if plan.is_none()
         && system == CHAT_SYSTEM_PROMPT
         && router::classify(&prompt) == router::Intent::Action
+        && !router::reads_state(&prompt)
         && let Some(url) = crate::site_cache::lookup(&crate::tool_guard::strip_browser_phrase(&prompt).0)
     {
         println!("⚡ Кэш сайта: {prompt} → {url}");
@@ -836,8 +835,67 @@ pub fn ask(
             {
                 *query = prompt.clone();
             }
-            let outcome = tools::execute(call, &audio_tx, &events);
-            let speech = if outcome.ok {
+            let outcome = tools::execute(call.clone(), &audio_tx, &events);
+            // Читающие инструменты возвращают ДАННЫЕ: итоговый ответ
+            // собирает модель по ним. Сырая речь инструмента («Нашёл 5
+            // результатов») без сводки — обрыв, а не ответ.
+            let returns_data = matches!(
+                call,
+                tools::ToolCall::WebSearch { .. }
+                    | tools::ToolCall::FileRead { .. }
+                    | tools::ToolCall::FileList { .. }
+                    | tools::ToolCall::FileSearch { .. }
+                    | tools::ToolCall::FileGlob { .. }
+                    | tools::ToolCall::ClipboardRead
+                    | tools::ToolCall::SystemInfo
+                    | tools::ToolCall::TaskList
+                    | tools::ToolCall::ScheduleList
+                    | tools::ToolCall::UiRead
+                    | tools::ToolCall::RunCommand { .. }
+            );
+            let speech = if outcome.ok && returns_data {
+                match wait_for_engine(&shared, Duration::from_secs(LLM_WAIT_TIMEOUT_SECS)) {
+                    Some(mut guard) => {
+                        let system_for_summary = match call {
+                            tools::ToolCall::WebSearch { .. } => format!(
+                                "{}\nСегодняшняя дата: {}.",
+                                WEB_SYSTEM_PROMPT,
+                                crate::text::today_russian()
+                            ),
+                            _ => effective_system.clone(),
+                        };
+                        let ask = format!(
+                            "Результат инструмента:\n{}\n\nВопрос пользователя: {prompt}. \
+                             Ответь коротко по существу на его основе, без упоминаний \
+                             «инструмент» и «результаты поиска».",
+                            outcome.detail.chars().take(2500).collect::<String>()
+                        );
+                        let mut summary = String::new();
+                        if let Some(engine) = guard.as_mut() {
+                            let _ = engine.generate_streaming_with_params(
+                                &system_for_summary,
+                                &history_snapshot,
+                                &ask,
+                                None,
+                                &cancel,
+                                |sentence| {
+                                    let _ = audio_tx.send(AudioMessage::SynthesizeAndPlay(
+                                        sentence.to_string(),
+                                    ));
+                                },
+                                |full| summary = full.to_string(),
+                            );
+                        }
+                        let summary = tools::strip_tool_blocks(&summary);
+                        if summary.trim().is_empty() {
+                            outcome.speech
+                        } else {
+                            summary
+                        }
+                    }
+                    None => outcome.speech,
+                }
+            } else if outcome.ok {
                 outcome.speech
             } else {
                 // Единая семантика с action-веткой: неудача инструмента
@@ -1175,6 +1233,25 @@ fn take_search(
     crate::web::search(&query, 5).unwrap_or_default()
 }
 
+/// Короткое описание вызова для честного отказа при исчерпании шагов.
+fn tool_summary_of(call: &tools::ToolCall) -> String {
+    let name = tools::tool_name_public(call);
+    let arg = match call {
+        tools::ToolCall::Shell { cmd } => cmd.chars().take(60).collect(),
+        tools::ToolCall::OpenApp { name } | tools::ToolCall::QuitApp { name } => name.clone(),
+        tools::ToolCall::OpenUrl { url, .. } => url.chars().take(60).collect(),
+        tools::ToolCall::UiClick { .. } | tools::ToolCall::UiType { .. } => {
+            "действие на экране".into()
+        }
+        _ => String::new(),
+    };
+    if arg.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}: {arg}")
+    }
+}
+
 fn needs_next_step(call: &tools::ToolCall, outcome: &tools::ToolOutcome) -> bool {
     match call {
         tools::ToolCall::Shell { .. }
@@ -1231,8 +1308,18 @@ fn run_action(
     // Новый запрос пользователя — новая задача: флаг отмены автоматизации от
     // прошлого «стоп» снят, экран снова можно трогать.
     crate::auto::clear_cancel();
-    let mut loop_history: Vec<ChatTurn> = Vec::new();
-    let mut user_msg = prompt.to_string();
+    // Контекст задачи: последние обмены из общей истории. Уточнения,
+    // местоимения и продолжения («а теперь закрой его») относятся к
+    // текущей задаче, а не начинаются с нуля.
+    let loop_history: Vec<ChatTurn> = {
+        let buf = history.lock().unwrap_or_else(|e| e.into_inner());
+        buf.iter().rev().take(4).rev().cloned().collect()
+    };
+    let mut loop_history = loop_history;
+    // Наблюдение до действия: агент видит окна, плеер, буфер и счётчики,
+    // а не угадывает состояние системы по названию просьбы.
+    let observe_now = || crate::observe::brief(&crate::observe::snapshot());
+    let mut user_msg = format!("{}\n\n{}", prompt, observe_now());
     // Промпт шага не постоянен: после веб-поиска переключаемся на веб-промпт
     // (ответ строго по результатам), иначе модель продолжает «задачу».
     let mut active_system: String = system.to_string();
@@ -1489,12 +1576,24 @@ fn run_action(
                 }
                 let last_step = step == MAX_TOOL_STEPS;
                 if last_step || !needs_next_step(&call, &outcome) {
+                    // Исчерпание шагов — отказ с описанием прогресса, не
+                    // молчаливое «готово»: пользователь слышит, на чём
+                    // остановились и почему.
+                    let speech = if last_step && needs_next_step(&call, &outcome) {
+                        format!(
+                            "Шагов не осталось — остановился после: {}. {}",
+                            tool_summary_of(&call),
+                            outcome.speech
+                        )
+                    } else {
+                        outcome.speech.clone()
+                    };
                     if let Some(task) = active_task.take() {
                         offer_close_task(audio_tx, events, &task);
                     } else {
-                        speak_cancelable(audio_tx, events, &outcome.speech, cancel);
+                        speak_cancelable(audio_tx, events, &speech, cancel);
                     }
-                    commit_action_history(history, prompt, &outcome.speech);
+                    commit_action_history(history, prompt, &speech);
                     return;
                 }
                 loop_history.push((user_msg.clone(), text.clone()));
@@ -1523,8 +1622,8 @@ fn run_action(
                         outcome.detail.chars().take(3000).collect::<String>()
                     );
                 } else {
-                    // 800 символов вместо 400: вывод команды и содержимое файла
-                    // в 400 знаков не влезали, и модель продолжала задачу вслепую.
+                    // Результат шага + свежее наблюдение среды: сравнение с
+                    // целью по факту, а не по памяти модели.
                     let brief: String = outcome.detail.chars().take(800).collect();
                     let status_note = if outcome.ok {
                         "успех"
@@ -1559,10 +1658,15 @@ fn run_action(
                             ""
                         };
                     let done_list = done_calls.join("; ");
+                    // Перечитывание после шага — обязательная часть цикла:
+                    // модель сверяет цель с фактом, а не с памятью.
+                    let observation = observe_now();
                     user_msg = format!(
                         "Результат инструмента ({status_note}): {brief}{empty_note}{app_note}\n\
                          Уже выполнено: {done_list}. Не повторяй эти команды.\n\
-                         Продолжай задачу. Если всё готово — ответь коротко, без tool."
+                         {observation}\n\
+                         Сверь обстановка с целью: если цель ещё не подтверждена — следующий шаг; \
+                         если подтверждена — ответь коротко, без tool."
                     );
                 }
             }
@@ -1588,10 +1692,16 @@ fn run_action(
                 if step == 1 && !nudged {
                     nudged = true;
                     loop_history.push((user_msg.clone(), text.clone()));
+                    // Подсказка держит модель на цели: выдуманного инструмента
+                    // нет — исполняй цель реальным инструментом из списка, а
+                    // не гугли его название и не рассказывай про него.
                     user_msg = format!(
-                        "Твой tool-блок не разобран: {reason}. Выбери имя инструмента \
-                         строго из списка системного промпта и ответь ОДНИМ корректным \
-                         tool-блоком вида <tool>{{\"name\":\"open_url\",\"args\":{{...}}}}</tool>."
+                        "Твой tool-блок не разобран: {reason}. Такого инструмента нет. \
+                         Цель пользователя: {prompt}. Выбери реальный инструмент строго из \
+                         списка системного промпта, который исполняет эту цель, и ответь \
+                         ОДНИМ корректным tool-блоком вида \
+                         <tool>{{\"name\":\"open_url\",\"args\":{{...}}}}</tool>. \
+                         Не гугли название выдуманного инструмента и не описывай его."
                     );
                     continue;
                 }

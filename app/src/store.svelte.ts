@@ -478,11 +478,19 @@ export async function initEvents() {
   await Promise.all([refreshStatus(), loadSettings()]);
 }
 
+let engineWasUp = false;
+
 export async function refreshStatus() {
   try {
-    store.status = await invoke<EngineStatus>("status");
+    const status = await invoke<EngineStatus>("status");
+    const wasUp = engineWasUp;
+    engineWasUp = status.engineRunning;
+    store.status = status;
+    // Движок поднялся (впервые или после пересборки): подтягиваем его
+    // настройки — при старте интерфейса get_settings мог уйти в пустоту.
+    if (status.engineRunning && !wasUp) void loadSettings();
   } catch {
-    // движок ещё не поднят
+    engineWasUp = false;
   }
 }
 

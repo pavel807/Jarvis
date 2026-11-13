@@ -1,0 +1,75 @@
+#[derive(Debug, Clone)]
+pub enum Expr {
+    Number(i64),
+    Float(f64),
+    Str(String),
+    Ident(String),
+    Bool(bool),
+    None,
+    Array(Vec<Expr>),
+    Dict(Vec<(Expr, Expr)>),
+    Set(Vec<Expr>),
+    Tuple(Vec<Expr>),
+    BinaryOp(Box<Expr>, String, Box<Expr>),
+    UnaryOp(String, Box<Expr>),
+    Compare(Box<Expr>, String, Box<Expr>),
+    Index { array: Box<Expr>, index: Box<Expr> },
+    MethodCall { receiver: Box<Expr>, method: String, args: Vec<Expr> },
+    Call { func: Box<Expr>, args: Vec<Expr> },
+    Lambda { args: Vec<String>, body: Box<Expr> },
+    Ternary { cond: Box<Expr>, then: Box<Expr>, else_: Box<Expr> },
+    Input(Option<String>),
+}
+
+#[derive(Debug, Clone)]
+pub enum Stmt {
+    Assign { target: String, value: Expr },
+    AugAssign { target: String, op: String, value: Expr },
+    Expr(Expr),
+    Print(Expr),
+    If {
+        condition: Expr,
+        then_branch: Vec<Stmt>,
+        elif_branches: Vec<(Expr, Vec<Stmt>)>,
+        else_branch: Option<Vec<Stmt>>,
+    },
+    While {
+        condition: Expr,
+        body: Vec<Stmt>,
+    },
+    For {
+        var: String,
+        iter: Expr,
+        body: Vec<Stmt>,
+        else_body: Option<Vec<Stmt>>,
+    },
+    Def {
+        name: String,
+        args: Vec<(String, Option<Expr>)>,
+        body: Vec<Stmt>,
+    },
+    Class {
+        name: String,
+        bases: Vec<String>,
+        body: Vec<Stmt>,
+    },
+    Try {
+        body: Vec<Stmt>,
+        except_branches: Vec<(Option<String>, Option<String>, Vec<Stmt>)>,
+        else_branch: Option<Vec<Stmt>>,
+        finally_body: Option<Vec<Stmt>>,
+    },
+    With {
+        items: Vec<(Expr, Option<String>)>,
+        body: Vec<Stmt>,
+    },
+    Raise(Option<Expr>),
+    Assert(Expr, Option<Expr>),
+    Return(Option<Expr>),
+    Break,
+    Continue,
+    Pass,
+    Global(Vec<String>),
+    Nonlocal(Vec<String>),
+    Import { module: String, items: Option<Vec<String>>, alias: Option<String> },
+}

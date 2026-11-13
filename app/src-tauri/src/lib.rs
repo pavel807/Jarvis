@@ -531,7 +531,11 @@ fn get_settings(shared: State<'_, Arc<Shared>>) -> Settings {
 }
 
 #[tauri::command]
-fn save_settings(shared: State<'_, Arc<Shared>>, settings: Settings) -> Result<(), String> {
+fn save_settings(
+    app: tauri::AppHandle,
+    shared: State<'_, Arc<Shared>>,
+    settings: Settings,
+) -> Result<(), String> {
     let voice = settings.tts_voice.clone();
     let voice_changed = tts::current_voice() != voice;
     // Смена фразы-активации, режима детектора или длины окна: детектор
@@ -541,6 +545,18 @@ fn save_settings(shared: State<'_, Arc<Shared>>, settings: Settings) -> Result<(
         cur.wake_word != settings.wake_word
             || cur.wake_detector != settings.wake_detector
             || cur.wake_window_ms != settings.wake_window_ms
+    };
+    // Смена облачного провайдера (ключ, каталог, модель, адрес): живой
+    // ApiEngine захватил старые значения при загрузке — без перезагрузки
+    // он слал бы устаревший modelUri и облука отвечала «Failed to parse
+    // model URI» при верных новых настройках.
+    let api_changed = {
+        let cur = shared.settings.read().unwrap_or_else(|e| e.into_inner());
+        cur.api_preset != settings.api_preset
+            || cur.api_base_url != settings.api_base_url
+            || cur.api_key != settings.api_key
+            || cur.api_model != settings.api_model
+            || cur.api_folder_id != settings.api_folder_id
     };
     settings
         .save(&paths::settings_file())
@@ -553,6 +569,18 @@ fn save_settings(shared: State<'_, Arc<Shared>>, settings: Settings) -> Result<(
     }
     if wake_changed {
         shared.wakeword_reload.store(true, Ordering::SeqCst);
+    }
+    if api_changed {
+        // Тот же путь, что и кнопка «Перезагрузить модель»: статусы
+        // перезагрузки видны в интерфейсе, облачные поля применяются сразу.
+        let (tx, rx) = channel::<JarvisEvent>();
+        let llm = Arc::clone(&shared.shared_llm);
+        std::thread::spawn(move || {
+            spawn_llm_loader(&llm, &tx);
+            for ev in rx {
+                let _ = app.emit("engine-event", &ev);
+            }
+        });
     }
     Ok(())
 }

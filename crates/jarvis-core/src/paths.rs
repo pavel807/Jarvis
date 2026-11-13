@@ -148,6 +148,18 @@ pub fn tts_cache_dir() -> PathBuf {
     resources_dir().join("tts_cache")
 }
 
+/// Пользовательские плагины-автоматизации (.sk на Spark): системная папка
+/// данных — то, что пользователь добавил сам.
+pub fn plugins_dir() -> PathBuf {
+    app_data_dir().join("plugins")
+}
+
+/// Кэш скомпилированных плагинов: бинарник на хэш исходника, чтобы
+/// перекомпиляция не съедала время при каждом запуске.
+pub fn plugins_cache_dir() -> PathBuf {
+    app_data_dir().join("plugins_cache")
+}
+
 /// Активная модель wake word: имя файла задаётся настройкой
 /// `wakeword_model` в settings.toml (см. `Settings::default`).
 pub fn wakeword_model_file(name: &str) -> PathBuf {

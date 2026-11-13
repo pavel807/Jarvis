@@ -60,6 +60,17 @@ impl ApiEngine {
         let mut model = super::config::api_model();
         if preset == "yandex" {
             let folder = super::config::api_folder_id();
+            if folder.trim().is_empty() && !model.starts_with("gpt://") {
+                // Без каталога Яндекс вернёт криптическое «Failed to parse
+                // model URI»: говорим прямо и до запроса, где что вписать.
+                let _ = events.send(JarvisEvent::Error {
+                    message: "Для Яндекс GPT нужен Каталог (folder id, b1g…) — Настройки → Модель"
+                        .into(),
+                });
+                return Err(anyhow!(
+                    "Каталог (folder id) не задан: впиши его в Настройки → Модель,                      поле «Каталог (folder id)» — b1g… из консоли Яндекса"
+                ));
+            }
             if !folder.trim().is_empty() && !model.starts_with("gpt://") {
                 let version = if model.contains('/') { "" } else { "/latest" };
                 model = format!("gpt://{}/{model}{version}", folder.trim());

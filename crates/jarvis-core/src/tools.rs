@@ -1634,6 +1634,12 @@ pub struct ToolOutcome {
     pub ok: bool,
     pub speech: String,
     pub detail: String,
+    /// Единый контракт результата: статус ставится конструктором и
+    /// уточняется верификацией постусловия. Успех (`Succeeded`) присваивает
+    /// только проверка — запуск без ошибки остаётся `Unknown`.
+    pub status: crate::agent::ExecutionStatus,
+    /// Чем подтверждён итог: процесс, значение настройки, файл-доказательство.
+    pub evidence: Option<String>,
 }
 
 impl ToolOutcome {
@@ -1643,6 +1649,8 @@ impl ToolOutcome {
             ok: true,
             speech: speech.clone(),
             detail: speech,
+            status: crate::agent::ExecutionStatus::Unknown,
+            evidence: None,
         }
     }
 
@@ -1651,6 +1659,8 @@ impl ToolOutcome {
             ok: true,
             speech: speech.into(),
             detail: detail.into(),
+            status: crate::agent::ExecutionStatus::Unknown,
+            evidence: None,
         }
     }
 
@@ -1660,6 +1670,8 @@ impl ToolOutcome {
             ok: false,
             speech: speech.clone(),
             detail: speech,
+            status: crate::agent::ExecutionStatus::Failed,
+            evidence: None,
         }
     }
 
@@ -1668,6 +1680,21 @@ impl ToolOutcome {
             ok: false,
             speech: speech.into(),
             detail: detail.into(),
+            status: crate::agent::ExecutionStatus::Failed,
+            evidence: None,
+        }
+    }
+
+    /// Операция не поддерживается на этой платформе: отдельный статус,
+    /// не маскирующийся под провал или успех.
+    pub fn unsupported(speech: impl Into<String>) -> Self {
+        let speech = speech.into();
+        Self {
+            ok: false,
+            speech: speech.clone(),
+            detail: speech,
+            status: crate::agent::ExecutionStatus::Unsupported,
+            evidence: None,
         }
     }
 }
@@ -1729,6 +1756,11 @@ fn tool_name(call: &ToolCall) -> &'static str {
         ToolCall::UiType { .. } => "ui_type",
         ToolCall::UiMenu { .. } => "ui_menu",
     }
+}
+
+/// Каноническое имя вызова для диагностики цикла (публичная обёртка).
+pub fn tool_name_public(call: &ToolCall) -> &'static str {
+    tool_name(call)
 }
 
 /// Человекочитаемая сводка вызова для события ActionStarted.
@@ -1879,6 +1911,14 @@ pub fn execute(call: ToolCall, audio_tx: &Sender<AudioMessage>, events: &EventTx
 /// - StateReadback: фактическое значение читается из системы;
 /// - ProcessState/ExitCode: уже проверены в реализациях инструментов;
 /// - None: проверить нечего — статус остаётся, но речь не усиливается.
+/// Подтверждённый итог: статус «выполнено» и доказательство выставляет
+/// только верификация постусловия — не инструмент и не модель.
+fn verified_outcome(mut outcome: ToolOutcome, evidence: String) -> ToolOutcome {
+    outcome.status = crate::agent::ExecutionStatus::Succeeded;
+    outcome.evidence = Some(evidence);
+    outcome
+}
+
 fn verify_outcome(
     call: &ToolCall,
     spec: Option<&crate::agent::ToolSpec>,
@@ -1898,7 +1938,9 @@ fn verify_outcome(
             ToolCall::FileWrite { path, content } => {
                 let p = resolve_path(path);
                 match std::fs::read_to_string(&p) {
-                    Ok(actual) if actual == *content => outcome,
+                    Ok(actual) if actual == *content => {
+                        verified_outcome(outcome, format!("файл перечитан: {p}, содержимое совпало"))
+                    }
                     Ok(_) => {
                         log(format!("⚠️ Верификация file_write: {p} не совпал с ожидаемым"));
                         ToolOutcome::fail(format!(
@@ -1918,7 +1960,9 @@ fn verify_outcome(
                     // допускаем их в проверке хвоста.
                     Ok(actual)
                         if actual.ends_with(content.as_str())
-                            || actual.ends_with(&format!("{content}\n")) => outcome,
+                            || actual.ends_with(&format!("{content}\n")) => {
+                        verified_outcome(outcome, format!("файл перечитан: {p}, дописанное в хвосте"))
+                    }
                     Ok(_) => {
                         log(format!("⚠️ Верификация file_append: {p} не содержит дописанного"));
                         ToolOutcome::fail(format!(
@@ -1938,7 +1982,7 @@ fn verify_outcome(
                             actual.matches(old.as_str()).count() <= 1
                         };
                         if old_gone {
-                            outcome
+                            verified_outcome(outcome, format!("файл перечитан: {p}, старого фрагмента нет"))
                         } else {
                             log(format!("⚠️ Верификация file_edit: старый фрагмент в {p} остался"));
                             ToolOutcome::fail(format!(
@@ -1964,8 +2008,9 @@ fn verify_outcome(
                             .unwrap_or(false)
                     })
                     .unwrap_or(false);
+                let path = outcome.detail.lines().last().unwrap_or("").to_string();
                 if exists {
-                    outcome
+                    verified_outcome(outcome, format!("файл-доказательство: {path}"))
                 } else {
                     log("⚠️ Верификация screenshot: файла нет или он пуст".into());
                     ToolOutcome::fail("Скриншот не подтвердился: файл не создан")
@@ -1976,9 +2021,12 @@ fn verify_outcome(
         Postcondition::StateReadback => match call {
             ToolCall::SetVolume { percent } => match crate::platform::get_volume() {
                 Some(actual) if (i16::from(actual) - i16::from(*percent)).abs() <= 2 => {
-                    ToolOutcome::with_detail(
-                        outcome.speech.clone(),
-                        format!("{} фактическая громкость {}%", outcome.detail, actual),
+                    verified_outcome(
+                        ToolOutcome::with_detail(
+                            outcome.speech.clone(),
+                            format!("{} фактическая громкость {}%", outcome.detail, actual),
+                        ),
+                        format!("readback: система вернула {actual}%"),
                     )
                 }
                 Some(actual) => {

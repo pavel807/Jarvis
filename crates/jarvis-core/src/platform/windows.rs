@@ -255,6 +255,15 @@ $hit=@($procs | Where-Object { $p=$_; $pn=$p.ProcessName.ToLower(); @($tokens | 
 
 /// Настоящее установленное приложение из меню «Пуск». `None` — такого
 /// приложения нет: подменять его файлом или сайтом нельзя.
+/// Каталог установленных приложений для контекста агента.
+pub fn app_catalog() -> Vec<String> {
+    let mut names: Vec<String> = start_apps().into_iter().map(|(n, _)| n).collect();
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    names.truncate(40);
+    names
+}
+
 pub fn app_lookup(name: &str) -> Option<String> {
     let want = name.trim();
     if want.is_empty() {
@@ -641,6 +650,17 @@ try {{
 /// Управление текущим медиа-плеером через SMTC: состояние читается до и
 /// после команды — как на macOS, чтобы «Поставил на паузу» не звучало при
 /// тишине. SMTC недоступен — честное нажатие медиа-клавиши.
+/// Наблюдение на Windows: честная заглушка — активное окно по имени
+/// не читается, плеер по SMTC требует отдельного чтения. Отчёт скажет
+/// «данных нет», а не выдумает.
+pub fn active_window() -> Option<(String, String)> {
+    None
+}
+
+pub fn music_status() -> Option<String> {
+    None
+}
+
 pub fn music_control(action: &str) -> Result<String, String> {
     let action_word = match action {
         "play" => "TryPlayAsync",

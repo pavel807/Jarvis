@@ -63,6 +63,11 @@ pub const COMMON_ALIASES: &[(&str, &str)] = &[
     ("нотион", "Notion"),
     ("фигма", "Figma"),
     ("спотифай", "Spotify"),
+    ("файрфокс", "Firefox"),
+    ("фаерфокс", "Firefox"),
+    ("файерфокс", "Firefox"),
+    ("файтфокс", "Firefox"),
+    ("файрофокс", "Firefox"),
     ("зед", "Zed"),
     ("вскод", "Code"),
     ("код", "Code"),
@@ -247,9 +252,11 @@ pub fn app_name_tokens(name: &str) -> Vec<String> {
 }
 
 /// Нечёткий подбор приложения: токены просьбы (транслит) сверяем с токенами
-/// имени приложения через word_similarity. Уверенность — минимум два совпавших
-/// слова с порогом 0.6 («энкубик слайсер некст» → slaiser≈slicer 0.71,
-/// nekst≈next 0.6) либо одно очень близкое (0.8) для однословных просьб.
+/// имени приложения через word_similarity, в том числе с ОКНАМИ-ПРЕФИКСАМИ
+/// токена («фокс» ≈ «fox» в «firefox»). Уверенность: два совпавших слова
+/// (порог 0.6), один сильный токен (0.72) или очень близкое однословное
+/// совпадение (0.8). Сильный одиночный выбирает кандидата только с запасом
+/// от второго лучшего — иначе «пиджин» уехал бы в похожее название.
 pub fn fuzzy_app_match(want: &str, candidates: &[String]) -> Option<String> {
     let want_tokens: Vec<String> = want
         .split_whitespace()
@@ -260,34 +267,80 @@ pub fn fuzzy_app_match(want: &str, candidates: &[String]) -> Option<String> {
         return None;
     }
 
-    let single_strong = |app_tokens: &[String]| {
-        want_tokens.len() == 1
-            && app_tokens
-                .iter()
-                .any(|at| crate::text::word_similarity(&want_tokens[0], at) >= 0.8)
+    // Сходство токена просьбы с ЛУЧШИМ окном токена приложения. STT режет
+    // имя на слова в произвольных местах («фаер фокс» = fire + fox), поэтому
+    // сравниваем со ВСЕМИ окнами подстрок длины просьбы ±1: «фокс» находит
+    // «fox» внутри «firefox» (0.75), хотя целое слово даёт лишь 0.14.
+    let token_sim = |wt: &str, app_tokens: &[String]| -> f32 {
+        let mut best = 0.0f32;
+        let wt_len = wt.chars().count();
+        for at_raw in app_tokens.iter().filter(|at| at.chars().count() >= 2) {
+            // Фонетика латинского x: произносится как «кс», и STT пишет его
+            // двумя буквами («фокс» = fox). Разворачиваем x → ks, чтобы окна
+            // сравнивались со звучанием, а не с буквами.
+            let expanded = at_raw.replace('x', "ks");
+            let at = expanded.as_str();
+            best = best.max(crate::text::word_similarity(wt, at));
+            let chars: Vec<char> = at.chars().collect();
+            for size in wt_len.saturating_sub(1).max(3)..=wt_len + 1 {
+                if size >= chars.len() {
+                    break;
+                }
+                for start in 0..=(chars.len() - size) {
+                    let window: String = chars[start..start + size].iter().collect();
+                    best = best.max(crate::text::word_similarity(wt, &window));
+                }
+            }
+        }
+        best
     };
-    let mut best: Option<(usize, &String)> = None;
+
+    let mut scored: Vec<(usize, f32, usize, &String)> = Vec::new();
     for candidate in candidates {
         let app_tokens = app_name_tokens(candidate);
-        let hits = want_tokens
-            .iter()
-            .filter(|wt| {
-                app_tokens
-                    .iter()
-                    .filter(|at| at.chars().count() >= 2)
-                    .any(|at| {
-                        crate::text::word_similarity(wt, at) >= 0.6
-                            || (wt.len() >= 4
-                                && (at.starts_with(wt.as_str()) || wt.starts_with(at.as_str())))
-                    })
-            })
-            .count();
-        let confident = hits >= 2 || (hits >= 1 && single_strong(&app_tokens));
-        if confident && best.is_none_or(|(n, _)| hits > n) {
-            best = Some((hits, candidate));
+        let mut hits = 0usize;
+        let mut best_sim = 0.0f32;
+        for wt in &want_tokens {
+            let sim = token_sim(wt, &app_tokens);
+            if sim >= 0.6
+                || (wt.len() >= 4
+                    && app_tokens.iter().any(|at| {
+                        at.starts_with(wt.as_str()) || wt.starts_with(at.as_str())
+                    }))
+            {
+                hits += 1;
+            }
+            best_sim = best_sim.max(sim);
+        }
+        // Сильный одиночный токен считается за два: «фаер фокс» имеет одно
+        // честное совпадение (fox), но его достаточно для выбора цели.
+        // Реальные попадания сохраняются отдельно — маржа против близкого
+        // второго кандидата оценивается по ним.
+        let effective = if best_sim >= 0.72 { hits.max(2) } else { hits };
+        let single_strong = want_tokens.len() == 1 && best_sim >= 0.8;
+        if effective >= 2 || single_strong {
+            scored.push((effective, best_sim, hits, candidate));
         }
     }
-    best.map(|(_, b)| b.clone())
+    // Ранжирование по баллам, при равенстве — по сходству. Единственная
+    // опасность — выигравший по одиночному сильному токену кандидат с
+    // сомнительным запасом: если второй лучший почти так же близок, честнее
+    // отказаться, чем открыть не то приложение.
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)));
+    match scored.first() {
+        Some((_, top_sim, real_hits, name)) => {
+            // Победа одним токеном при почти равном втором кандидате —
+            // неоднозначность: честнее не угадывать, чем открыть не то.
+            if *real_hits < 2
+                && let Some((_, second_sim, _, _)) = scored.get(1)
+                && top_sim - second_sim < 0.1
+            {
+                return None;
+            }
+            Some((*name).clone())
+        }
+        None => None,
+    }
 }
 
 // =========================================================================
@@ -427,5 +480,78 @@ mod tests {
         let bin = exe.file_name().unwrap();
         assert!(search_path_in(bin.to_str().unwrap(), dir.as_os_str()));
         assert!(!search_path_in("jarvis-нет-такого-бинаря", dir.as_os_str()));
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::imp::alias;
+
+    #[test]
+    fn firefox_stt_garbles_resolve() {
+        // STT искажает «Firefox» по-разному: все частые варианты должны
+        // находить приложение, а не уезжать в выдуманный инструмент.
+        for said in ["файрфокс", "фаер фокс", "файт фокс", "файерфокс", "файрофокс"] {
+            assert_eq!(alias(said), Some("Firefox"), "алиас для «{said}» потерян");
+        }
+    }
+}
+
+#[cfg(test)]
+mod fuzzy_tests {
+    use super::fuzzy_app_match;
+
+    #[test]
+    fn stt_garbles_resolve_without_aliases() {
+        // Универсальность: фонетические искажения STT должны находить
+        // приложение численно, а не по зашитому списку алиасов.
+        let apps = vec![
+            "Firefox".to_string(),
+            "Google Chrome".to_string(),
+            "Telegram".to_string(),
+            "Vim".to_string(),
+            "Blender".to_string(),
+            "Discord".to_string(),
+            "Code - OSS".to_string(),
+        ];
+        for (said, want) in [
+            ("фаер фокс", "Firefox"),
+            ("файр фокс", "Firefox"),
+            ("гогл хром", "Google Chrome"),
+            ("дискорд", "Discord"),
+            ("блэндер", "Blender"),
+            ("файт фокс", "Firefox"),
+            ("фаер фокс", "Firefox"),
+        ] {
+            assert_eq!(
+                fuzzy_app_match(said, &apps).as_deref(),
+                Some(want),
+                "«{said}» должен находить {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn garbage_does_not_open_anything() {
+        // Честный отказ важнее угадывания: мусор не открывает приложения.
+        let apps = vec![
+            "Firefox".to_string(),
+            "Google Chrome".to_string(),
+            "Telegram".to_string(),
+        ];
+        for said in ["пиджин", "заплатка", "совещание в три часа"] {
+            assert_eq!(
+                fuzzy_app_match(said, &apps),
+                None,
+                "«{said}» не должно ни во что превращаться"
+            );
+        }
+    }
+
+    #[test]
+    fn close_call_between_two_apps_is_refused() {
+        // Два кандидата почти одинаково близки — честнее не угадывать.
+        let apps = vec!["Foxit Reader".to_string(), "Foxmail".to_string()];
+        assert_eq!(fuzzy_app_match("фокс", &apps), None);
     }
 }
