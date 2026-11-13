@@ -102,6 +102,9 @@ struct DesktopApp {
     name: String,
     /// Имя исполняемого файла из Exec (@@@ — не разобрали).
     exec_bin: String,
+    /// Категория TerminalEmulator: универсальный признак эмулятора
+    /// терминала — работает для любого терминала с любым названием.
+    terminal: bool,
 }
 
 /// Каталоги .desktop: системные, пользовательские и экспорт Flatpak/Snap.
@@ -131,6 +134,7 @@ fn parse_desktop(path: &Path, id: &str) -> Option<DesktopApp> {
     let mut hidden = false;
     let mut no_display = false;
     let mut is_application = false;
+    let mut categories = String::new();
 
     for line in text.lines() {
         let line = line.trim();
@@ -152,6 +156,7 @@ fn parse_desktop(path: &Path, id: &str) -> Option<DesktopApp> {
             "Type" => is_application = value == "Application",
             "Hidden" => hidden = value.eq_ignore_ascii_case("true"),
             "NoDisplay" => no_display = value.eq_ignore_ascii_case("true"),
+            "Categories" => categories = value.to_string(),
             _ => {}
         }
     }
@@ -182,6 +187,9 @@ fn parse_desktop(path: &Path, id: &str) -> Option<DesktopApp> {
         path: path.to_string_lossy().to_string(),
         name,
         exec_bin,
+        terminal: categories
+            .split(';')
+            .any(|c| c.trim() == "TerminalEmulator"),
     })
 }
 
@@ -246,7 +254,8 @@ fn find_desktop_app(want: &str) -> Option<DesktopApp> {
     // (реальный случай: вместо терминала открывался Docker).
     if crate::platform::is_terminal_request(want) {
         let names: Vec<String> = apps.iter().map(|a| a.name.clone()).collect();
-        if let Some(name) = crate::platform::terminal_app_name(&names) {
+        let by_category: Vec<String> = apps.iter().filter(|a| a.terminal).map(|a| a.name.clone()).collect();
+        if let Some(name) = crate::platform::terminal_app_name(&names, &by_category) {
             if let Some(app) = apps.iter().find(|a| a.name == name) {
                 return Some(app.clone());
             }
@@ -430,6 +439,16 @@ pub fn app_db_entries() -> Vec<(String, String, String)> {
         .collect()
 }
 
+/// Имена приложений с категорией TerminalEmulator — универсальный набор
+/// терминалов, независимый от названий и оболочек.
+pub fn terminal_category_names() -> Vec<String> {
+    desktop_apps()
+        .into_iter()
+        .filter(|a| a.terminal)
+        .map(|a| a.name)
+        .collect()
+}
+
 pub fn app_catalog() -> Vec<String> {
     let mut names: Vec<String> = desktop_apps()
         .into_iter()
@@ -600,7 +619,8 @@ fn hyprland_window_control(action: &str, app: Option<&str>) -> Option<String> {
     let verb = action.split_whitespace().next().unwrap_or("");
     match verb {
         "close" | "minimize" | "maximize" | "fullscreen" | "restore" | "focus"
-        | "movetodesktop" | "half_left" | "half_right" => {}
+        | "movetodesktop" | "half_left" | "half_right" | "tab_close" | "tab_close_all"
+        | "tab_restore" | "tab_next" | "tab_prev" => {}
         _ => return None,
     }
     let is_self = app.is_some() && crate::platform::is_self_window_target(app.unwrap_or(""));
@@ -804,6 +824,65 @@ fn hyprland_window_action(window: &LinuxWindow, action: &str) -> String {
             }
         }
         "half_left" | "half_right" => hypr_window_half(&addr, &title, action == "half_left"),
+        // Вкладки браузера — не действие композитора, а сочетания клавиш
+        // в целевое окно. Работает с любым браузером: это их стандартные
+        // хоткеи, названий терминалов и браузеров не требуется.
+        "tab_close" | "tab_close_all" | "tab_restore" | "tab_next" | "tab_prev" => {
+            let keys: &[&str] = match verb {
+                "tab_close" => &["CTRL", "W"],
+                "tab_close_all" => &["CTRL", "SHIFT", "W"],
+                "tab_restore" => &["CTRL", "SHIFT", "T"],
+                "tab_next" => &["CTRL", "TAB"],
+                _ => &["CTRL", "SHIFT", "TAB"],
+            };
+            // Фокус нужен только если цель ещё не активна: повторный
+            // focus на активное окно на мгновение сбивает клавиатурный
+            // фокус композитора, и синтетические клавиши теряются
+            // (проверено живьём). После смены фокуса пауза обязательна:
+            // клавиатура коммитится не мгновенно.
+            let already_active = run("hyprctl", &["-j", "activewindow"])
+                .ok()
+                .and_then(|out| parse_hypr_single(&out))
+                .map(|w| w.id == addr)
+                .unwrap_or(false);
+            if !already_active {
+                run_ok(
+                    "hyprctl",
+                    &["dispatch", &format!("hl.dsp.focus({{ window = \"{sel}\" }})")],
+                );
+                std::thread::sleep(Duration::from_millis(600));
+            }
+            let sent = crate::platform::desktop::execute(
+                &crate::platform::desktop::DesktopAction::Hotkey {
+                    keys: keys.iter().map(|s| s.to_string()).collect(),
+                },
+            );
+            if sent.is_err() {
+                return format!("Не смог отправить сочетание клавиш в {title}");
+            }
+            // Верификация — наблюдаемое следствие: заголовок вкладки
+            // обязан измениться, последняя вкладка закрывает всё окно.
+            // Хром применяет сочетание неспешно: окно наблюдения до 4с.
+            for _ in 0..10 {
+                std::thread::sleep(Duration::from_millis(400));
+                if !hypr_window_exists(&addr) {
+                    return match verb {
+                        "tab_close" => format!("Закрыл вкладку {title} — окно целиком"),
+                        _ => format!("Закрыл {title} вместе со всеми вкладками"),
+                    };
+                }
+                if let Some(now) = hypr_window_title(&addr)
+                    && now != title
+                {
+                    return match verb {
+                        "tab_close" => format!("Закрыл вкладку — теперь открыта «{now}»"),
+                        "tab_restore" => format!("Вернул закрытую вкладку — открылась «{now}»"),
+                        _ => format!("Переключил вкладку — открыта «{now}»"),
+                    };
+                }
+            }
+            "Вкладка не изменилась: окно на месте, заголовок прежний".to_string()
+        }
         other => format!("Не могу выполнить действие с окном: {other}"),
     }
 }
@@ -1020,9 +1099,23 @@ fn hypr_monitor_usable() -> (u32, u32, u32) {
     fallback
 }
 
-/// Состояние окна из IPC: (существует, имя воркспейса, fullscreen 0/1/2).
-fn hypr_window_state(addr: &str) -> Option<(bool, String, i64)> {
+/// Заголовок окна из IPC — наблюдаемое следствие для вкладок.
+fn hypr_window_title(addr: &str) -> Option<String> {
     let out = run("hyprctl", &["-j", "clients"]).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&out).ok()?;
+    for w in v.as_array()? {
+        if w.get("address")?.as_str()? == addr {
+            return w
+                .get("title")
+                .and_then(|t| t.as_str())
+                .map(|t| t.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Состояние окна из IPC: (существует, имя воркспейса, fullscreen 0/1/2).
+fn hypr_window_state(addr: &str) -> Option<(bool, String, i64)> {    let out = run("hyprctl", &["-j", "clients"]).ok()?;
     let v: serde_json::Value = serde_json::from_str(&out).ok()?;
     for w in v.as_array()? {
         if w.get("address")?.as_str()? == addr {
@@ -2131,6 +2224,17 @@ mod tests {
         )
         .unwrap();
         assert!(parse_desktop(&normal, "openserver").is_some());
+
+        // Категория TerminalEmulator — универсальный признак терминала,
+        // работает для любого названия.
+        let term = dir.path().join("blackbox.desktop");
+        std::fs::write(
+            &term,
+            "[Desktop Entry]\nType=Application\nName=Black Box\nExec=blackbox\nCategories=Utility;TerminalEmulator;\n",
+        )
+        .unwrap();
+        let app = parse_desktop(&term, "blackbox").expect("запись разобрана");
+        assert!(app.terminal, "категория TerminalEmulator распознана");
 
         // Exec=env VAR=... app — распространённая форма GNOME-записей:
         // имя процесса — уже после присваиваний, а не «env».

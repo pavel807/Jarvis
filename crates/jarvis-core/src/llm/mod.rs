@@ -672,6 +672,15 @@ pub fn ask(
             return;
         }
 
+        // Обучаемая память команд: та же (или почти та же) фраза уже
+        // выполнялась успешно — воспроизводим мгновенно, без LLM.
+        // Память не узнала — обычный путь: план, модель.
+        if let Some(call) = crate::learned::lookup(&prompt) {
+            let outcome = tools::execute(call, &audio_tx, &events);
+            speak(&audio_tx, &events, &outcome.speech);
+            return;
+        }
+
         // Быстрый путь «открой X» убран: он разрешал «яндекс карты» → Maps по
         // суффиксу, игнорируя контекст. Приложение vs сайт теперь решает LLM:
         // open_app/open_url/run_command (каталог команд) с контекстом фразы.
@@ -1591,6 +1600,14 @@ fn run_action(
                 let outcome = tools::execute(call.clone(), audio_tx, events);
                 if let (Some(url), true) = (cache_url, cache_confirmed) && outcome.ok {
                     crate::site_cache::remember(site_prompt, &url);
+                }
+                // Обучение: первый шаг запроса выполнился успешно — фраза
+                // с этим действием идёт в память команд (безопасные
+                // инструменты только; shell и файлы память не учит).
+                if outcome.ok && step == 1 {
+                    if crate::learned::remember(prompt, &text) {
+                        println!("🧠 Запомнил: «{prompt}» → {}", tools::tool_name_public(&call));
+                    }
                 }
                 let last_step = step == MAX_TOOL_STEPS;
                 if last_step || !needs_next_step(&call, &outcome) {

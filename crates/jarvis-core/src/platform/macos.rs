@@ -418,6 +418,12 @@ pub fn window_control(action: &str, app: Option<&str>) -> String {
 }
 
 /// Оконная команда без молчаливого выбора первого окна.
+/// Категорий .desktop на macOS нет: терминал ищется по именам (запасной
+/// путь в mod.rs).
+pub fn terminal_category_names() -> Vec<String> {
+    Vec::new()
+}
+
 pub fn window_control_checked(
     action: &str,
     app: Option<&str>,
@@ -429,11 +435,12 @@ pub fn window_control_checked(
         return WindowControlOutcome::Done(window_list());
     }
 
-    // Столы и точная геометрия — пока только Hyprland на Linux.
+    // Столы, раскладка и вкладки браузера — пока только Hyprland на Linux.
     let (verb, _) = action.trim().split_once(' ').unwrap_or((action.trim(), ""));
     if matches!(
         verb,
         "desktop" | "minimizeall" | "movetodesktop" | "half_left" | "half_right"
+        | "tab_close" | "tab_close_all" | "tab_restore" | "tab_next" | "tab_prev"
     ) {
         return WindowControlOutcome::Done(
             "Столы и раскладку окон я пока умею только на Hyprland (Linux)".to_string(),

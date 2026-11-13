@@ -325,10 +325,22 @@ fn execute_linux(action: &DesktopAction) -> Result<String, String> {
     let xdotool = find_binary(&["xdotool", "/usr/bin/xdotool", "/usr/local/bin/xdotool"]);
 
     if wayland {
+        // wtype — клавиатура через протокол композитора: без демона и
+        // прав uinput (ydotoold их требует). Клавиатурные действия —
+        // предпочтительный путь; мышь остаётся за ydotool.
+        let keyboard = matches!(
+            action,
+            DesktopAction::Hotkey { .. } | DesktopAction::PressKey { .. }
+        );
+        if keyboard
+            && let Some(bin) = find_binary(&["wtype", "/usr/bin/wtype", "/usr/local/bin/wtype"])
+        {
+            return execute_wtype(&bin, action);
+        }
         if let Some(bin) = ydotool {
             return execute_ydotool(&bin, action);
         }
-        return Err("Обнаружен Wayland. Для управления мышью и клавиатурой установи ydotool и запусти ydotoold; службе нужен доступ к /dev/uinput. xdotool в Wayland не управляет всем рабочим столом.".into());
+        return Err("Обнаружен Wayland. Для клавиатуры установи wtype, для мыши — ydotool + ydotoold (службе нужен доступ к /dev/uinput). xdotool в Wayland не управляет всем рабочим столом.".into());
     }
     if let Some(bin) = xdotool {
         return execute_xdotool(&bin, action);
@@ -420,6 +432,47 @@ fn xdotool_key(key: &str) -> Result<String, String> {
         other => other,
     };
     Ok(mapped.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn execute_wtype(bin: &str, action: &DesktopAction) -> Result<String, String> {
+    let wtype_mod = |key: &str| {
+        match compact_key(key).as_str() {
+            "super" | "win" | "windows" | "meta" | "command" => "logo".to_string(),
+            other => other.to_string(),
+        }
+    };
+    let mut args: Vec<String> = Vec::new();
+    // Пауза 100 мс между событиями обязательна: без неё композитор
+    // склеивает синтетическую последовательность, и приложения теряют
+    // модификаторы (проверено живьём: ctrl+shift без -s не доходил,
+    // с -s 100 работает).
+    const PAUSE: &str = "100";
+    match action {
+        DesktopAction::Hotkey { keys } => {
+            // wtype -M ctrl -M shift -P w -p w -m shift -m ctrl: зажать
+            // модификаторы, нажать и отпустить основную клавишу,
+            // отпустить модификаторы.
+            for key in keys.iter().filter(|k| is_modifier(k)) {
+                args.extend(["-M".into(), wtype_mod(key).into(), "-s".into(), PAUSE.into()]);
+            }
+            let primary = keys
+                .iter()
+                .find(|k| !is_modifier(k))
+                .ok_or("В сочетании отсутствует основная клавиша")?;
+            let keysym = xdotool_key(primary)?;
+            args.extend(["-s".into(), PAUSE.into(), "-P".into(), keysym.clone(), "-s".into(), PAUSE.into(), "-p".into(), keysym]);
+            for key in keys.iter().filter(|k| is_modifier(k)).rev() {
+                args.extend(["-s".into(), PAUSE.into(), "-m".into(), wtype_mod(key).into()]);
+            }
+        }
+        DesktopAction::PressKey { key } => {
+            let keysym = xdotool_key(key)?;
+            args.extend(["-s".into(), PAUSE.into(), "-P".into(), keysym.clone(), "-s".into(), PAUSE.into(), "-p".into(), keysym]);
+        }
+        _ => return Err("wtype отправляет клавиши; для мыши нужен ydotool".into()),
+    }
+    command_output(bin, &args).map(|_| "Ввод отправлен активному окну".into())
 }
 
 #[cfg(target_os = "linux")]

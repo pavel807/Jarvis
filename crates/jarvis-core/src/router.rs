@@ -693,7 +693,7 @@ const TOOL_SLICES: &[(&str, &[&str], &str)] = &[
             "прокрути",
             "прокрутка",
         ],
-        "  window {\"action\":\"minimize\",\"app\":\"имя\"} — окна: minimize=свернуть, maximize=развернуть, fullscreen=экран, close, focus, list. Без app — Джарвис, «активное» — приложение на переднем плане\n  window: {\"action\":\"desktop\",\"desktop\":\"3\"} — стол 3; {\"action\":\"movetodesktop\",\"app\":\"имя\",\"desktop\":\"3\"} — перенести окно на стол; {\"action\":\"minimizeall\"} — свернуть все окна; {\"action\":\"half_left\",\"app\":\"активное\"} и half_right — окно на половину экрана («во весь левый край»; «расположи рядом» = два вызова). Столы и раскладка — только window; desktop_input — мышь и клавиатура\n  open_utils {\"tab\":\"timer\"} — открыть окно утилит; tab: timer | stopwatch | calendar (без tab — таймер)\n  close_utils — закрыть окно утилит\n  play_reactor_intro — показать сборку реактора ещё раз (анимация интерфейса)\n  set_volume {\"percent\":50} / set_brightness {\"percent\":70}\n  desktop_input {\"action\":\"type_text\",\"text\":\"текст\"} — ввод текста\n  desktop_input {\"action\":\"press_key\",\"key\":\"ENTER\"} — клавиша\n  desktop_input {\"action\":\"hotkey\",\"keys\":[\"CTRL\",\"S\"]} — сочетание\n  desktop_input {\"action\":\"scroll\",\"direction\":\"down\",\"amount\":3} — прокрутка\n  screenshot / lock_screen / sleep",
+        "  window {\"action\":\"minimize\",\"app\":\"имя\"} — окна: minimize/maximize/fullscreen/close/focus/list; без app — Джарвис, «активное» — передний план\n  window: {\"action\":\"desktop\",\"desktop\":\"3\"} — стол 3; movetodesktop {app,desktop} — окно на стол; minimizeall — свернуть все окна; half_left/half_right {app} — окно на половину экрана («рядом» = два вызова); вкладки браузера: tab_close, tab_close_all, tab_restore, tab_next, tab_prev {app: браузер или активное}. Столы, раскладка, вкладки — только window; desktop_input — мышь и клавиатура\n  open_utils {\"tab\":\"timer\"} — открыть окно утилит; tab: timer | stopwatch | calendar (без tab — таймер)\n  close_utils — закрыть окно утилит\n  play_reactor_intro — показать сборку реактора ещё раз (анимация интерфейса)\n  set_volume {\"percent\":50} / set_brightness {\"percent\":70}\n  desktop_input {\"action\":\"type_text\",\"text\":\"текст\"} — ввод текста\n  desktop_input {\"action\":\"press_key\",\"key\":\"ENTER\"} — клавиша\n  desktop_input {\"action\":\"hotkey\",\"keys\":[\"CTRL\",\"S\"]} — сочетание\n  desktop_input {\"action\":\"scroll\",\"direction\":\"down\",\"amount\":3} — прокрутка\n  screenshot / lock_screen / sleep",
     ),
     (
         "таймеры",
@@ -876,7 +876,7 @@ pub fn action_prompt_for(prompt: &str) -> String {
         // «Терминал» — категория, а не имя в списке: без подсказки модель
         // не свяжет «Foot» с «открой терминал» и возьмёт правдоподобный
         // мусор (реальный случай: Docker вместо терминала).
-        let hint = crate::platform::terminal_app_name(&catalog)
+        let hint = crate::platform::terminal_app_name(&catalog, &crate::platform::terminal_category_names())
             .map(|t| format!("\nПОДСКАЗКА: «терминал» = {t}"))
             .unwrap_or_default();
         format!(
@@ -1383,6 +1383,9 @@ pub fn plan_system_command_with(
             });
         }
         if let Some(call) = crate::tools::window_half_from_prompt(prompt, &lookup) {
+            return Some(call);
+        }
+        if let Some(call) = crate::tools::tab_request_from_prompt(prompt, &lookup) {
             return Some(call);
         }
     }

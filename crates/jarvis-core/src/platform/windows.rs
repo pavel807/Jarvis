@@ -626,6 +626,11 @@ pub fn window_control(action: &str, app: Option<&str>) -> String {
 /// Оконная команда без выбора: Win32 через PowerShell отдаёт только главное
 /// окно процесса (`MainWindowTitle`), поэтому отдельных окон одного
 /// приложения здесь не видно — предлагать выбор не из чего.
+/// Категорий .desktop на этой ОС нет: терминал ищется по именам.
+pub fn terminal_category_names() -> Vec<String> {
+    Vec::new()
+}
+
 pub fn window_control_checked(
     action: &str,
     app: Option<&str>,

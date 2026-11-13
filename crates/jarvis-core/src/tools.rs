@@ -2005,6 +2005,8 @@ fn window_text_failed(text: &str) -> bool {
         "не переключился",
         "не все окна",
         "не понял, на какой стол",
+        "вкладка не изменилась",
+        "не смог отправить сочетание",
     ]
     .iter()
     .any(|p| lower.contains(p))
@@ -2037,6 +2039,10 @@ fn window_action_verb(action: &str) -> &'static str {
         "focus" => "выбрать",
         "movetodesktop" => "перенести",
         "half_left" | "half_right" => "разместить",
+        "tab_close" => "закрыть вкладку",
+        "tab_close_all" => "закрыть все вкладки",
+        "tab_restore" => "вернуть вкладку",
+        "tab_next" | "tab_prev" => "переключить вкладку",
         _ => "выбрать",
     }
 }
@@ -3382,6 +3388,49 @@ pub fn desktop_number_from_prompt(prompt: &str) -> Option<String> {
     None
 }
 
+/// «Закрой вкладку», «верни закрытую вкладку в хроме» — детерминированный
+/// план вкладок: это стандартные хоткеи браузера, любые названия работают.
+/// Без названного приложения цель — активное окно.
+pub fn tab_request_from_prompt(
+    prompt: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<ToolCall> {
+    let t = prompt.to_lowercase();
+    if !t.contains("вкладк") {
+        return None;
+    }
+    let close_all = (t.contains("все") || t.contains("всё")) && !t.contains("верни");
+    let action = if t.contains("верни") || t.contains("восстанови") || t.contains("открой обратно")
+    {
+        "tab_restore"
+    } else if t.contains("закрой") || t.contains("закрыть") || t.contains("сверни") {
+        if close_all {
+            "tab_close_all"
+        } else {
+            "tab_close"
+        }
+    } else if t.contains("переключи") || t.contains("следующ") {
+        "tab_next"
+    } else {
+        return None;
+    };
+    const STOP: &[&str] = &[
+        "закрой", "закрыть", "сверни", "верни", "восстанови", "переключи", "все", "всё", "вкладку",
+        "вкладки", "вкладок", "вкладке", "пожалуйста", "джарвис", "открытую", "закрытую",
+        "закрытую", "на", "в", "с", "и", "мне", "пожалуйста",
+    ];
+    let app = t
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty() && !STOP.contains(w))
+        .find_map(lookup);
+    Some(ToolCall::Window {
+        action: action.to_string(),
+        app: Some(app.unwrap_or_else(|| "активное".to_string())),
+        desktop: None,
+    })
+}
+
 /// «Во весь левый край», «терминал на правую половину» — детерминированный
 /// план геометрии. Модель в этой ветке стабильно тянет desktop_input.move
 /// (курсор), а не window: фраза простая, разбираем сами. Без названного
@@ -4552,6 +4601,41 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn tab_request_from_prompt_close_restore_and_app() {
+        // Реальный lookup понимает морфологию («хроме» → Chromium);
+        // имитируем через префикс.
+        let fake_lookup =
+            |name: &str| name.starts_with("хром").then(|| "Chromium".to_string());
+        match tab_request_from_prompt("закрой вкладку", fake_lookup) {
+            Some(ToolCall::Window { action, app, desktop }) => {
+                assert_eq!(action, "tab_close");
+                assert_eq!(app.as_deref(), Some("активное"));
+                assert!(desktop.is_none());
+            }
+            other => panic!("ждали tab_close, получили {other:?}"),
+        }
+        match tab_request_from_prompt("закрой вкладку в хроме", fake_lookup) {
+            Some(ToolCall::Window { action, app, .. }) => {
+                assert_eq!(action, "tab_close");
+                assert_eq!(app.as_deref(), Some("Chromium"));
+            }
+            other => panic!("ждали tab_close/Chromium, получили {other:?}"),
+        }
+        match tab_request_from_prompt("верни закрытую вкладку", fake_lookup) {
+            Some(ToolCall::Window { action, .. }) => assert_eq!(action, "tab_restore"),
+            other => panic!("ждали tab_restore, получили {other:?}"),
+        }
+        match tab_request_from_prompt("закрой все вкладки", fake_lookup) {
+            Some(ToolCall::Window { action, .. }) => assert_eq!(action, "tab_close_all"),
+            other => panic!("ждали tab_close_all, получили {other:?}"),
+        }
+        // Не вкладки — не наша: «закрой окно» остаётся окном.
+        assert!(tab_request_from_prompt("закрой окно телеграма", fake_lookup).is_none());
+        // Вопросы отсекает планер (plan_is_question), не этот разбор.
+        assert!(tab_request_from_prompt("закрыть вкладку хрома", fake_lookup).is_some());
     }
 
     #[test]

@@ -115,37 +115,43 @@ pub fn is_terminal_request(name: &str) -> bool {
 
 /// Первый установленный эмулятор терминала из известного списка. Порядок —
 /// от современных к дедовским; возврат — каноничное имя .desktop.
-pub fn terminal_app_name(installed: &[String]) -> Option<String> {
-    const CANDIDATES: &[&str] = &[
-        "foot", "footclient", "ghostty", "kitty", "alacritty", "wezterm",
-        "konsole", "gnome-terminal", "gnome-terminal-server", "xfce4-terminal",
-        "tilix", "terminator", "qterminal", "lxterminal", "xterm", "st", "urxvt",
-    ];
-    // Демоны и службы — не то, что видит пользователь: «Foot Server»
-    // открывает фоновый процесс без окна, а просили терминал.
-    let is_daemon = |n: &str| {
+pub fn terminal_app_name(installed: &[String], category_terminals: &[String]) -> Option<String> {
+    // Демоны, службы и клиенты — не то, что видит пользователь: «Foot
+    // Server» открывает фоновый процесс без окна, «Foot client» бесполезен
+    // без своего сервера. Отсекаем и целыми словами, и по подстроке.
+    let is_aux = |n: &str| {
         let l = n.to_lowercase();
-        l.contains("server") || l.contains("daemon")
-    };
-    // Нормализация для сравнения: «GNOME Terminal» и «gnome-terminal» —
-    // одно и то же, дефисы и пробелы не различаем.
-    let norm = |n: &str| n.to_lowercase().replace(['-', '_'], " ");
-    // Первый проход: точное имя («Foot» == foot). Второй: подстрока
-    // («GNOME Terminal» содержит gnome terminal), но не демон.
-    for cand in CANDIDATES {
-        if let Some(hit) = installed
+        ["server", "daemon", "client", "сервер", "клиент"]
             .iter()
-            .find(|n| !is_daemon(n) && norm(n) == *cand)
-        {
+            .any(|w| l.split_whitespace().any(|p| p == *w))
+            || l.contains("server")
+            || l.contains("daemon")
+    };
+    // 1. Универсальный признак — категория TerminalEmulator из .desktop:
+    // любой эмулятор с любым названием, ничего не захардкожено. При
+    // нескольких терминалах берём самый короткий (основной, а не клиент).
+    let mut cands: Vec<&String> = category_terminals.iter().filter(|n| !is_aux(n)).collect();
+    if !cands.is_empty() {
+        cands.sort_by(|a, b| a.chars().count().cmp(&b.chars().count()).then(a.cmp(b)));
+        return Some(cands[0].clone());
+    }
+    // 2. Запасной путь для платформ без категорий (macOS/Windows) —
+    // известные имена эмуляторов. Нормализация: «GNOME Terminal» и
+    // «gnome-terminal» — одно и то же, дефисы и пробелы не различаем.
+    const CANDIDATES: &[&str] = &[
+        "foot", "ghostty", "kitty", "alacritty", "wezterm", "terminal", "iterm",
+        "konsole", "gnome-terminal", "xfce4-terminal", "tilix", "terminator",
+        "qterminal", "lxterminal", "xterm", "warp", "st", "urxvt",
+    ];
+    let norm = |n: &str| n.to_lowercase().replace(['-', '_'], " ");
+    for cand in CANDIDATES {
+        if let Some(hit) = installed.iter().find(|n| !is_aux(n) && norm(n) == *cand) {
             return Some(hit.clone());
         }
     }
     for cand in CANDIDATES {
         let cand = cand.replace('-', " ");
-        if let Some(hit) = installed
-            .iter()
-            .find(|n| !is_daemon(n) && norm(n).contains(&cand))
-        {
+        if let Some(hit) = installed.iter().find(|n| !is_aux(n) && norm(n).contains(&cand)) {
             return Some(hit.clone());
         }
     }
@@ -640,25 +646,37 @@ mod terminal_tests {
     }
 
     #[test]
-    fn terminal_resolves_to_installed_emulator() {
-        // Каталог этой машины: foot. Резолвер обязан выбрать эмулятор,
-        // а не первый попавшийся (Docker не входит в кандидаты).
+    fn terminal_resolves_by_category_universally() {
+        // Универсальный путь: категория TerminalEmulator из .desktop.
+        // Названия могут быть любыми — «Black Box», «Ptyxis», «Мыльница»:
+        // резолвер не знает имён и не обязан.
+        assert_eq!(
+            terminal_app_name(&["Docker".to_string()], &["Ptyxis".to_string()]),
+            Some("Ptyxis".to_string())
+        );
+        // Демон и клиент из категории не считаются терминалом.
+        assert_eq!(
+            terminal_app_name(
+                &[],
+                &["Foot Server".to_string(), "Foot client".to_string(), "Foot".to_string()],
+            ),
+            Some("Foot".to_string()),
+            "демон и клиент выкинуты, основной — самый короткий"
+        );
+        // Запасной путь по именам (macOS/Windows, категорий нет).
         let installed = vec![
             "Docker".to_string(),
             "Foot Server".to_string(),
-            "Foot".to_string(),
+            "GNOME Terminal".to_string(),
             "Zed".to_string(),
         ];
         assert_eq!(
-            terminal_app_name(&installed),
-            Some("Foot".to_string()),
-            "демон Foot Server не терминал"
+            terminal_app_name(&installed, &[]),
+            Some("GNOME Terminal".to_string()),
+            "без категорий — известные кандидаты: демон Foot Server мимо"
         );
-        // Без точного — подстрока: «GNOME Terminal» подходит.
-        let installed = vec!["GNOME Terminal".to_string(), "Docker".to_string()];
-        assert_eq!(terminal_app_name(&installed), Some("GNOME Terminal".to_string()));
-        // Без терминалов в каталоге — честный None, никакого выдуманного.
+        // Без терминалов нигде — честный None, никакого выдуманного.
         let installed = vec!["Docker".to_string(), "Zed".to_string()];
-        assert_eq!(terminal_app_name(&installed), None);
+        assert_eq!(terminal_app_name(&installed, &[]), None);
     }
 }

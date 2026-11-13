@@ -30,6 +30,11 @@ pub fn window_control(_action: &str, _app: Option<&str>) -> String {
     "Управление окнами поддерживается на macOS, Linux и Windows".to_string()
 }
 
+/// Категорий .desktop на этой ОС нет: терминал ищется по именам.
+pub fn terminal_category_names() -> Vec<String> {
+    Vec::new()
+}
+
 pub fn window_control_checked(
     action: &str,
     app: Option<&str>,

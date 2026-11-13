@@ -28,6 +28,7 @@ pub mod db;
 pub mod engine;
 pub mod events;
 pub mod jokes;
+pub mod learned;
 pub mod llm;
 pub mod mcp;
 pub mod memory;
