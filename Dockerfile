@@ -18,6 +18,7 @@ RUN pacman -Syu --noconfirm \
         file \
         git \
         git-lfs \
+        unzip \
     && pacman -Scc --noconfirm || true
 
 # Rust через rustup (пакет rust в Arch тянет меньше, но rustup даёт

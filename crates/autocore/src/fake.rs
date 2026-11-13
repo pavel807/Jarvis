@@ -256,6 +256,24 @@ impl FakeDesktop {
         true
     }
 
+    /// Добавить текстовое поле к окну (для сценариев ввода).
+    pub fn add_field(&mut self, name: &str, value: &str) {
+        let p = Arc::get_mut(&mut self.provider).expect("провайдер ещё не расшарен");
+        let mut nodes = p.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let window = nodes.iter().position(|n| n.role == Role::Window).expect("окно есть");
+        let idx = nodes.len();
+        nodes.push(FakeNode {
+            role: Role::TextField,
+            name: name.to_string(),
+            value: Some(value.to_string()),
+            children: vec![],
+            parent: Some(window),
+            removed: false,
+            focused: false,
+        });
+        nodes[window].children.push(idx);
+    }
+
     /// Приложение уничтожило узел.
     pub fn remove(&self, name: &str) -> bool {
         let mut nodes = self.provider.nodes.lock().unwrap_or_else(|e| e.into_inner());
@@ -449,8 +467,10 @@ impl xa11y::Provider for FakeProvider {
         self.log_action(&format!("set_value={value}"), element);
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(i) = self.idx_of(element) {
+            // Меняется только значение: имя — часть личности узла,
+            // селектор обязан продолжать матчиться (иначе подтверждение
+            // чтением находило бы «другой» элемент).
             nodes[i].value = Some(value.to_string());
-            nodes[i].name = value.to_string();
         }
         Ok(())
     }
@@ -462,6 +482,12 @@ impl xa11y::Provider for FakeProvider {
 
     fn type_text(&self, element: &ElementData, text: &str) -> Result<(), Error> {
         self.log_action(&format!("type_text={text}"), element);
+        // Набор текста меняет значение поля: подтверждение чтением
+        // (§4) имеет что подтверждать.
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = self.idx_of(element) {
+            nodes[i].value = Some(text.to_string());
+        }
         Ok(())
     }
 
