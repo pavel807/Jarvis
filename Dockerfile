@@ -30,7 +30,7 @@ RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --pr
 
 # bun: единственный поддержанный пакетный менеджер фронтенда.
 RUN curl -fsSL https://bun.sh/install | bash \
-    && mv /root/.bun/bin/bun /usr/local/bin/bun
+    && cp /root/.bun/bin/{bun,bunx} /usr/local/bin/
 
 WORKDIR /src
 

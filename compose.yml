@@ -24,7 +24,14 @@ services:
       - .:/src
       - cargo-registry:/usr/local/cargo/registry
       - target-cache:/src/target
-    command: ["bash", "-lc", "cargo test --workspace --quiet && bun install --frozen-lockfile && bunx svelte-check --quiet"]
+      # Токенизатор для бюджетных тестов живёт в данных пользователя,
+      # не в репо: JARVIS_MODELS_DIR направляет поиск в монтирование
+      # read-only, чтобы бюджет в контейнере измерялся тем же счётчиком,
+      # что и на хосте.
+      - ${HOME}/.local/share/Jarvis/models:/host-models:ro
+    environment:
+      - JARVIS_MODELS_DIR=/host-models
+    command: ["bash", "-lc", "cargo test --workspace --quiet && cd app && bun install --frozen-lockfile && bunx svelte-check"]
 
 volumes:
   cargo-registry:
