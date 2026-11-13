@@ -398,17 +398,45 @@ fn own_process_name() -> Option<String> {
 /// приложение, которым человек прямо сейчас пользуется, и «сверни окно»,
 /// применённое к нему, сворачивает Chrome посреди работы — неприятный
 /// сюрприз. Явное «активное» адресует активное приложение.
+///
+/// Если у приложения несколько подходящих окон, функция не выбирает первое
+/// молча: возвращается вопрос со списком. Инструмент превращает его в
+/// интерактивный выбор (см. `choice`), а прямой вызов получает готовую фразу.
 pub fn window_control(action: &str, app: Option<&str>) -> String {
+    use crate::platform::WindowControlOutcome;
+    match window_control_checked(action, app) {
+        WindowControlOutcome::Done(text) => text,
+        WindowControlOutcome::Ambiguous(targets) => {
+            ambiguous_window_speech(action, app, &targets)
+        }
+    }
+}
+
+/// Оконная команда без молчаливого выбора первого окна.
+pub fn window_control_checked(
+    action: &str,
+    app: Option<&str>,
+) -> crate::platform::WindowControlOutcome {
+    use crate::platform::{WindowControlOutcome, WindowTarget};
+
     // Список окон не требует конкретного приложения: показываем все.
     if action == "list" {
-        return window_list();
+        return WindowControlOutcome::Done(window_list());
     }
 
-    match app {
+    let (process, display) = match app {
         // «Сверни окно голосового помощника» — это моё окно, а не чужой
         // процесс с именем «голосовой помощник».
         Some(wanted) if crate::platform::is_self_window_target(wanted) => {
-            return window_control(action, None);
+            match own_process_name().and_then(|me| find_process(&me).ok().flatten()) {
+                Some(me) => (me, "Джарвис".to_string()),
+                None => {
+                    return WindowControlOutcome::Done(
+                        "Моё окно не запущено — я в фоне. Скажи, чьё окно свернуть"
+                            .to_string(),
+                    );
+                }
+            }
         }
         Some(wanted)
             if [
@@ -421,26 +449,190 @@ pub fn window_control(action: &str, app: Option<&str>) -> String {
             ]
             .contains(&wanted.trim().to_lowercase().as_str()) =>
         {
-            match active_process() {
-                Ok(Some(p)) => window_run(&p, &p, action),
+            return WindowControlOutcome::Done(match active_process() {
+                Ok(Some(p)) => window_run_index(&p, &p, action, None),
                 Ok(None) => "Не нашёл активное приложение с окном".to_string(),
                 Err(e) => format!("Не могу управлять окнами: {e}"),
-            }
+            });
         }
         Some(wanted) => match find_process(wanted) {
-            Ok(Some(process)) => window_run(&process, &process, action),
-            Ok(None) => format!("Приложение {wanted} не найдено среди открытых"),
-            Err(e) => format!("Не могу управлять окнами: {e}"),
+            Ok(Some(process)) => (process.clone(), process),
+            Ok(None) => {
+                return WindowControlOutcome::Done(format!(
+                    "Приложение {wanted} не найдено среди открытых"
+                ));
+            }
+            Err(e) => {
+                return WindowControlOutcome::Done(format!("Не могу управлять окнами: {e}"));
+            }
         },
         None => match own_process_name() {
             Some(me) => match find_process(&me) {
-                Ok(Some(me)) => window_run(&me, "Джарвис", action),
-                Ok(None) => "Моё окно не запущено — я в фоне. Скажи, чьё окно свернуть".to_string(),
-                Err(e) => format!("Не могу управлять окнами: {e}"),
+                Ok(Some(me)) => (me, "Джарвис".to_string()),
+                Ok(None) => {
+                    return WindowControlOutcome::Done(
+                        "Моё окно не запущено — я в фоне. Скажи, чьё окно свернуть"
+                            .to_string(),
+                    );
+                }
+                Err(e) => {
+                    return WindowControlOutcome::Done(format!("Не могу управлять окнами: {e}"));
+                }
             },
-            None => "Не могу управлять окнами: не понял имя своего процесса".to_string(),
+            None => {
+                return WindowControlOutcome::Done(
+                    "Не могу управлять окнами: не понял имя своего процесса".to_string(),
+                );
+            }
         },
+    };
+
+    let windows = match window_targets(&process) {
+        Ok(windows) => windows,
+        Err(e) => {
+            return WindowControlOutcome::Done(format!(
+                "Не могу управлять окнами: {}",
+                friendly_access_error(&e)
+            ));
+        }
+    };
+    if windows.is_empty() {
+        return WindowControlOutcome::Done(format!("У {display} нет открытых окон"));
     }
+
+    // «Верни окно» при нескольких окнах неоднозначно только тогда, когда
+    // свёрнутых несколько. Одно свёрнутое — это уже конкретная цель.
+    let candidates: Vec<WindowTarget> = if action == "restore" {
+        windows.iter().filter(|w| w.minimized).cloned().collect()
+    } else {
+        windows.clone()
+    };
+    if candidates.len() > 1 {
+        return WindowControlOutcome::Ambiguous(candidates);
+    }
+
+    let index = candidates.first().and_then(|target| {
+        windows
+            .iter()
+            .position(|window| window.title == target.title)
+            .map(|index| index + 1)
+    });
+    WindowControlOutcome::Done(window_run_index(&process, &display, action, index))
+}
+
+/// Действие над конкретным окном, выбранным пользователем. Окно ищется
+/// заново по заголовку: индексы на macOS меняются после сворачивания, и
+/// запомненный номер мог бы указать на другое окно.
+pub fn window_control_target(action: &str, app: &str, title: &str) -> String {
+    let process = match find_process(app) {
+        Ok(Some(process)) => process,
+        Ok(None) => return format!("Приложение {app} больше не открыто"),
+        Err(e) => return format!("Не могу управлять окнами: {e}"),
+    };
+    let windows = match window_targets(&process) {
+        Ok(windows) => windows,
+        Err(e) => {
+            return format!(
+                "Не могу управлять окнами: {}",
+                friendly_access_error(&e)
+            );
+        }
+    };
+    let index = windows
+        .iter()
+        .position(|window| window.title == title)
+        .or_else(|| {
+            windows.iter().position(|window| {
+                !window.title.trim().is_empty()
+                    && (window.title.contains(title) || title.contains(&window.title))
+            })
+        })
+        .map(|index| index + 1);
+    match index {
+        Some(index) => {
+            let name = if title.trim().is_empty() {
+                process.as_str()
+            } else {
+                title
+            };
+            window_run_index(&process, name, action, Some(index))
+        }
+        None => format!("Окно «{title}» уже закрыто или переименовано"),
+    }
+}
+
+/// Список окон процесса: заголовок и состояние «свёрнуто».
+fn window_targets(process: &str) -> Result<Vec<crate::platform::WindowTarget>, String> {
+    let p = format!(
+        "\"{}\"",
+        process.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    let script = format!(
+        r#"tell application "System Events" to tell process {p}
+set out to ""
+set sep to (ASCII character 31)
+repeat with w in windows
+  set wn to ""
+  set mn to false
+  try
+    set wn to name of w
+  end try
+  try
+    set mn to value of attribute "AXMinimized" of w
+  end try
+  set out to out & wn & sep & (mn as text) & linefeed
+end repeat
+return out
+end tell"#
+    );
+    let out = osascript(&script)?;
+    let mut windows = Vec::new();
+    for line in out.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        let (title, minimized) = line.split_once('\u{1f}').unwrap_or((line, "false"));
+        windows.push(crate::platform::WindowTarget {
+            app: process.to_string(),
+            title: title.replace(['\n', '\r'], " ").trim().to_string(),
+            minimized: minimized.trim().eq_ignore_ascii_case("true"),
+        });
+    }
+    Ok(windows)
+}
+
+/// Человеческая фраза для прямого вызова `window_control`, когда окон
+/// несколько. Интерактивный путь (`tools::Window`) использует `choice`.
+fn ambiguous_window_speech(
+    action: &str,
+    app: Option<&str>,
+    targets: &[crate::platform::WindowTarget],
+) -> String {
+    let who = app.unwrap_or("приложения");
+    let list = targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| {
+            let label = if target.title.trim().is_empty() {
+                "без названия"
+            } else {
+                target.title.as_str()
+            };
+            format!("{} — {label}", index + 1)
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let verb = match action {
+        "minimize" => "свернуть",
+        "close" => "закрыть",
+        "maximize" => "развернуть",
+        "fullscreen" => "открыть на весь экран",
+        "restore" => "вернуть",
+        "focus" => "выбрать",
+        _ => "выполнить действие с",
+    };
+    format!("У {who} несколько окон: {list}. Какое {verb}? Уточни номер или название.")
 }
 
 /// Выполнить действие над окном процесса и превратить ответ в человеческую
@@ -449,7 +641,10 @@ pub fn window_control(action: &str, app: Option<&str>) -> String {
 /// оборачивал имя в кавычки, а функция экранировала их повторно — в AppleScript
 /// уходило `\"zoom.us\"`, команда валилась с «syntax error» (-2741), и окно
 /// не сворачивалось. `name` нужен только для текста ответа.
-fn window_run(target: &str, name: &str, action: &str) -> String {
+///
+/// `index` — номер окна в исходном списке `windows` (с единицы). `None` —
+/// прежнее поведение для одиночного окна/активного приложения.
+fn window_run_index(target: &str, name: &str, action: &str, index: Option<usize>) -> String {
     let p = format!("\"{}\"", target.replace('\\', "\\\\").replace('"', "\\\""));
     // `set frontmost to true` — единственная валидная форма; `to frontmost
     // to true` давала -2740, которую никто не видел (ошибка активации
@@ -457,6 +652,9 @@ fn window_run(target: &str, name: &str, action: &str) -> String {
     let tell =
         format!(r#"tell application "System Events" to tell process {p} to set frontmost to true"#);
     let _ = osascript(&tell);
+    // Конкретное окно выбирается только тогда, когда пользователь его назвал.
+    // Для одиночного окна и активного приложения поведение прежнее: window 1.
+    let window = format!("window {}", index.unwrap_or(1));
 
     match action {
         "maximize" => {
@@ -469,9 +667,9 @@ fn window_run(target: &str, name: &str, action: &str) -> String {
             let script = format!(
                 r#"tell application "System Events" to tell process {p}
 if (count of windows) = 0 then return "нет окон"
-set value of attribute "AXFullScreen" of window 1 to false
-set value of attribute "AXMinimized" of window 1 to false
-set bounds of window 1 to {{{x1}, {y1}, {x2}, {y2}}}
+set value of attribute "AXFullScreen" of {window} to false
+set value of attribute "AXMinimized" of {window} to false
+set bounds of {window} to {{{x1}, {y1}, {x2}, {y2}}}
 return "готово"
 end tell"#
             );
@@ -481,62 +679,186 @@ end tell"#
             let script = format!(
                 r#"tell application "System Events" to tell process {p}
 if (count of windows) = 0 then return "нет окон"
-set value of attribute "AXFullScreen" of window 1 to true
+set value of attribute "AXFullScreen" of {window} to true
 return "готово"
 end tell"#
             );
             run_window_script(&script, name, "включил полный экран")
         }
         "minimize" => {
+            // Свёрнутое окно уезжает в конец списка windows. Проверять
+            // «window 1» после действия нельзя: это уже следующее окно,
+            // и честное сворачивание выглядело как неудача. Считаем
+            // свёрнутые до и после — прирост и есть подтверждение.
             let script = format!(
                 r#"tell application "System Events" to tell process {p}
 if (count of windows) = 0 then return "нет окон"
-set value of attribute "AXMinimized" of window 1 to true
-return "готово"
+try
+  if value of attribute "AXMinimized" of {window} then return "already"
+end try
+set beforeMin to 0
+repeat with w in windows
+  try
+    if value of attribute "AXMinimized" of w then set beforeMin to beforeMin + 1
+  end try
+end repeat
+set value of attribute "AXMinimized" of {window} to true
+delay 0.2
+set afterMin to 0
+repeat with w in windows
+  try
+    if value of attribute "AXMinimized" of w then set afterMin to afterMin + 1
+  end try
+end repeat
+if afterMin > beforeMin then return "готово"
+return "не подтвердил"
 end tell"#
             );
             match osascript(&script) {
                 Ok(out) if out.contains("нет окон") => format!("У {name} нет открытых окон"),
+                Ok(out) if out.trim() == "already" => format!("Окно {name} уже свёрнуто"),
+                Ok(out) if out.trim() == "готово" => format!("свернул окно {name}"),
                 Ok(_) => {
-                    // Статус AppleScript ещё не факт: читаем атрибут обратно.
-                    std::thread::sleep(Duration::from_millis(150));
-                    match window_flag(&p, "AXMinimized") {
-                        Ok(Some(true)) => format!("свернул окно {name}"),
-                        Ok(Some(false)) => {
-                            format!(
-                                "Не удалось свернуть окно {name}: macOS не подтвердил сворачивание"
-                            )
-                        }
-                        Ok(None) => format!("У {name} нет открытых окон"),
-                        Err(e) => format!("Ошибка: {}", friendly_access_error(&e)),
-                    }
+                    format!("Не удалось свернуть окно {name}: macOS не подтвердил сворачивание")
                 }
                 Err(e) => format!("Ошибка: {}", friendly_access_error(&e)),
             }
         }
         "restore" => {
-            let script = format!(
-                r#"tell application "System Events" to tell process {p}
-if (count of windows) = 0 then return "нет окон"
-set value of attribute "AXMinimized" of window 1 to false
-set value of attribute "AXFullScreen" of window 1 to false
-return "готово"
+            // Свёрнутое окно — не «window 1»: оно в конце списка. Для
+            // выбранного пользователем окна адресуем конкретный номер из
+            // исходного списка; без выбора разворачиваем последнее свёрнутое.
+            // В обоих случаях подтверждение — уменьшение числа свёрнутых.
+            let script = match index {
+                Some(target_index) => format!(
+                    r#"tell application "System Events" to tell process {p}
+if (count of windows) < {target_index} then return "нет окна"
+set beforeMin to 0
+repeat with w in windows
+  try
+    if value of attribute "AXMinimized" of w then set beforeMin to beforeMin + 1
+  end try
+end repeat
+set wasMin to false
+try
+  set wasMin to value of attribute "AXMinimized" of window {target_index}
+end try
+if wasMin then
+  try
+    set value of attribute "AXFullScreen" of window {target_index} to false
+  end try
+  set value of attribute "AXMinimized" of window {target_index} to false
+  delay 0.2
+  set afterMin to 0
+  repeat with w in windows
+    try
+      if value of attribute "AXMinimized" of w then set afterMin to afterMin + 1
+    end try
+  end repeat
+  if afterMin < beforeMin then return "готово"
+  return "не подтвердил"
+end if
+set wasFullscreen to false
+try
+  set wasFullscreen to value of attribute "AXFullScreen" of window {target_index}
+end try
+try
+  set value of attribute "AXFullScreen" of window {target_index} to false
+end try
+if wasFullscreen then return "из полного экрана"
+return "уже в обычном виде"
 end tell"#
-            );
-            run_window_script(&script, name, "вернул обычный размер")
+                ),
+                None => format!(
+                    r#"tell application "System Events" to tell process {p}
+if (count of windows) = 0 then return "нет окон"
+set beforeMin to 0
+set targetIndex to 0
+set idx to 0
+repeat with w in windows
+  set idx to idx + 1
+  try
+    if value of attribute "AXMinimized" of w then
+      set beforeMin to beforeMin + 1
+      set targetIndex to idx
+    end if
+  end try
+end repeat
+if targetIndex = 0 then
+  set wasFullscreen to false
+  try
+    set wasFullscreen to value of attribute "AXFullScreen" of window 1
+  end try
+  try
+    set value of attribute "AXFullScreen" of window 1 to false
+  end try
+  if wasFullscreen then return "из полного экрана"
+  return "нет свёрнутых"
+end if
+try
+  set value of attribute "AXFullScreen" of window targetIndex to false
+end try
+set value of attribute "AXMinimized" of window targetIndex to false
+delay 0.2
+set afterMin to 0
+repeat with w in windows
+  try
+    if value of attribute "AXMinimized" of w then set afterMin to afterMin + 1
+  end try
+end repeat
+if afterMin < beforeMin then return "готово"
+return "не подтвердил"
+end tell"#
+                ),
+            };
+            match osascript(&script) {
+                Ok(out) if out.contains("нет окон") => format!("У {name} нет открытых окон"),
+                Ok(out) if out.contains("нет окна") => {
+                    format!("Окно «{name}» уже закрыто")
+                }
+                Ok(out) if out.contains("из полного экрана") => {
+                    format!("вернул окно {name} из полного экрана")
+                }
+                Ok(out) if out.contains("нет свёрнутых") => {
+                    format!("У {name} нет свёрнутых окон")
+                }
+                Ok(out) if out.contains("уже в обычном виде") => {
+                    format!("Окно {name} уже в обычном виде")
+                }
+                Ok(out) if out.trim() == "готово" => {
+                    format!("вернул окно {name} из Dock")
+                }
+                Ok(_) => format!(
+                    "Не удалось вернуть окно {name}: macOS не подтвердил разворачивание"
+                ),
+                Err(e) => format!("Ошибка: {}", friendly_access_error(&e)),
+            }
         }
         "close" => {
             let script = format!(
                 r#"tell application "System Events" to tell process {p}
 if (count of windows) = 0 then return "нет окон"
-close window 1
+close {window}
 return "готово"
 end tell"#
             );
-            run_window_script(&script, name, "закрыл окно")
+            run_window_script(&script, name, "закрыл")
         }
         "focus" => match osascript(&tell) {
             Ok(_) => {
+                // При выборе конкретного окна одного frontmost мало: поднимаем
+                // его над остальными окнами приложения.
+                if let Some(target_index) = index {
+                    let raise = format!(
+                        r#"tell application "System Events" to tell process {p}
+try
+  perform action "AXRaise" of window {target_index}
+end try
+set frontmost to true
+end tell"#
+                    );
+                    let _ = osascript(&raise);
+                }
                 // `set frontmost` не гарантирует, что система успела сменить
                 // активное приложение. Проверяем фактического frontmost.
                 for _ in 0..6 {
@@ -554,22 +876,6 @@ end tell"#
             Err(e) => format!("Ошибка: {}", friendly_access_error(&e)),
         },
         other => format!("Не могу выполнить действие с окном: {other}"),
-    }
-}
-
-/// Прочитать булев AX-атрибут окна: `None` — окон нет, `Err` — отказ системы.
-fn window_flag(target_quoted: &str, attribute: &str) -> Result<Option<bool>, String> {
-    let script = format!(
-        r#"tell application "System Events" to tell process {target_quoted}
-if (count of windows) = 0 then return "none"
-return ((value of attribute "{attribute}" of window 1) as text)
-end tell"#
-    );
-    let out = osascript(&script)?;
-    match out.trim().to_lowercase().as_str() {
-        "true" => Ok(Some(true)),
-        "false" => Ok(Some(false)),
-        _ => Ok(None),
     }
 }
 

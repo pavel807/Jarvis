@@ -3,6 +3,13 @@
 use serde::Serialize;
 use std::sync::mpsc::Sender;
 
+/// Вариант выбора для интерфейса: номер (с нуля) и подпись.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChoiceOptionView {
+    pub index: usize,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JarvisEvent {
@@ -42,6 +49,19 @@ pub enum JarvisEvent {
         intent: String,
         confidence: f32,
         force_tool: bool,
+    },
+    /// У команды несколько равноправных целей: UI показывает варианты,
+    /// голосовой ответ («второе», «2», название) разрешает тот же запрос.
+    ChoiceRequested {
+        choice_id: u64,
+        prompt: String,
+        options: Vec<ChoiceOptionView>,
+    },
+    /// Выбор закрыт. `index = None` — отмена, истечение или новая команда.
+    ChoiceResolved {
+        choice_id: u64,
+        index: Option<usize>,
+        label: Option<String>,
     },
     /// Tool-вызов модели не разобран (битый JSON, неизвестный инструмент).
     ToolParseFailed {

@@ -1608,7 +1608,20 @@ mod tests {
         // пример `"app":"зум"` — на «сверни приложение рио» модель писала
         // «зум». В промпте не должно быть конкретных адресов и имён
         // приложений — только слова из просьбы пользователя.
+        // Каталоги установленных приложений и пользовательских команд —
+        // динамические данные, а не примеры промпта: на машине с DeepSeek
+        // или YouTube-клиентом они законно содержат эти слова. Проверяем
+        // только статическую часть инструкции.
         let prompt = action_prompt();
+        let static_part = prompt
+            .split("\nКОМАНДЫ ПОЛЬЗОВАТЕЛЯ")
+            .next()
+            .unwrap_or(prompt.as_str());
+        let static_part = static_part
+            .split("\nУСТАНОВЛЕННЫЕ ПРИЛОЖЕНИЯ")
+            .next()
+            .unwrap_or(static_part)
+            .to_lowercase();
         for bad in [
             "deepseek",
             "youtube.com",
@@ -1618,7 +1631,7 @@ mod tests {
             "зум",
         ] {
             assert!(
-                !prompt.to_lowercase().contains(bad),
+                !static_part.contains(bad),
                 "в action-промпте не должно быть домена/примера «{bad}»"
             );
         }

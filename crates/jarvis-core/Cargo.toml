@@ -25,6 +25,7 @@ ureq.workspace = true
 # Локальное время для планировщика («каждое утро в 8»).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 regex.workspace = true
+redb.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 # macOS: AppleScript прямо в процессе приложения (NSAppleScript), а не через

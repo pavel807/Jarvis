@@ -1882,6 +1882,54 @@ impl ToolCall {
     }
 }
 
+/// window_impl сигнализирует неудачу строкой — превращаем в статус.
+fn window_text_failed(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "не удалось",
+        "не нашла",
+        "не нашёл",
+        "не найден",
+        "ошибка",
+        "не могу",
+        "нет окон",
+        "не подтвердил",
+        "не закрылось",
+        "не свернулось",
+        "не вернулось",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+}
+
+/// Подпись окна-кандидата: заголовок и, если его нет в заголовке, имя
+/// приложения. По этой подписи пользователь может ответить голосом.
+fn window_target_label(target: &crate::platform::WindowTarget) -> String {
+    let title = target.title.trim();
+    if title.is_empty() {
+        return target.app.clone();
+    }
+    let app = target.app.trim();
+    if app.is_empty() || title.to_lowercase().contains(&app.to_lowercase()) {
+        title.to_string()
+    } else {
+        format!("{title} — {app}")
+    }
+}
+
+/// Глагол для вопроса «какое окно …?».
+fn window_action_verb(action: &str) -> &'static str {
+    match action {
+        "minimize" => "свернуть",
+        "close" => "закрыть",
+        "maximize" => "развернуть",
+        "fullscreen" => "открыть на весь экран",
+        "restore" => "вернуть",
+        "focus" => "выбрать",
+        _ => "выбрать",
+    }
+}
+
 pub fn execute(call: ToolCall, audio_tx: &Sender<AudioMessage>, events: &EventTx) -> ToolOutcome {
     let log = |msg: String| {
         let _ = events.send(JarvisEvent::Log { message: msg });
@@ -2575,24 +2623,72 @@ fn execute_inner(
                 "🔧 window: {action} {}",
                 app.as_deref().unwrap_or("(активное)")
             ));
-            let text = crate::platform::window_control(&action, app.as_deref());
-            // window_impl сигнализирует неудачу строкой — превращаем в статус.
-            let lower = text.to_lowercase();
-            let failed = [
-                "не удалось",
-                "не нашла",
-                "не нашёл",
-                "не найден",
-                "ошибка",
-                "не могу",
-                "нет окон",
-            ]
-            .iter()
-            .any(|p| lower.contains(p));
-            if failed {
-                ToolOutcome::fail(text)
-            } else {
-                ToolOutcome::ok(text)
+            match crate::platform::window_control_checked(&action, app.as_deref()) {
+                crate::platform::WindowControlOutcome::Done(text) => {
+                    // window_impl сигнализирует неудачу строкой — превращаем в статус.
+                    if window_text_failed(&text) {
+                        ToolOutcome::fail(text)
+                    } else {
+                        ToolOutcome::ok(text)
+                    }
+                }
+                crate::platform::WindowControlOutcome::Ambiguous(targets) => {
+                    // Не выбираем первое окно молча: предлагаем варианты
+                    // голосом и чипами в интерфейсе. Запрос живёт 60 секунд.
+                    let verb = window_action_verb(&action);
+                    let labels: Vec<String> = targets
+                        .iter()
+                        .map(window_target_label)
+                        .collect();
+                    let list = labels
+                        .iter()
+                        .enumerate()
+                        .map(|(index, label)| format!("{} — {label}", index + 1))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let who = app.as_deref().unwrap_or("приложения");
+                    let prompt = format!(
+                        "У {who} несколько окон: {list}. Какое {verb}? Скажи номер или название."
+                    );
+                    let options = labels
+                        .iter()
+                        .enumerate()
+                        .map(|(index, label)| {
+                            crate::choice::ChoiceOption::new(format!(
+                                "{} — {label}",
+                                index + 1
+                            ))
+                        })
+                        .collect();
+                    let action_for_choice = action.clone();
+                    crate::choice::offer(
+                        prompt.clone(),
+                        options,
+                        audio_tx.clone(),
+                        events.clone(),
+                        move |index| {
+                            let Some(target) = targets.get(index) else {
+                                return crate::choice::ChoiceActionResult::fail(
+                                    "Такого окна уже нет",
+                                );
+                            };
+                            let text = crate::platform::window_control_target(
+                                &action_for_choice,
+                                &target.app,
+                                &target.title,
+                            );
+                            if window_text_failed(&text) {
+                                crate::choice::ChoiceActionResult::fail(text)
+                            } else {
+                                crate::choice::ChoiceActionResult::ok(text)
+                            }
+                        },
+                    );
+                    let mut outcome = ToolOutcome::ok(prompt);
+                    outcome.status =
+                        crate::agent::ExecutionStatus::NeedsConfirmation;
+                    outcome
+                }
             }
         }
 

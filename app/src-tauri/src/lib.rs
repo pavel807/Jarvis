@@ -736,6 +736,14 @@ fn show_utils_window(app: &tauri::AppHandle, tab: Option<&str>) {
     }
 }
 
+/// Выбор варианта кликом в интерфейсе. Голосовой ответ идёт через движок;
+/// здесь тот же выбор разрешается по номеру, чтобы действие выполнилось
+/// ровно один раз.
+#[tauri::command]
+fn choice_resolve(choice_id: u64, index: usize) -> Result<String, String> {
+    jarvis_core::choice::resolve_index(choice_id, index)
+}
+
 /// Таймер из окна утилит (ручная кнопка, не голос).
 #[tauri::command]
 fn timer_start(
@@ -1367,6 +1375,7 @@ pub fn run() {
             voice_record_stop,
             get_settings,
             save_settings,
+            choice_resolve,
             tasks_list,
             tasks_add,
             tasks_set_done,

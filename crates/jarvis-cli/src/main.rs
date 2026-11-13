@@ -143,6 +143,18 @@ fn main() -> Result<()> {
                 JarvisEvent::ToolParseFailed { reason, raw } => {
                     println!("⚠️ Tool не разобран: {reason}; ответ: {raw}")
                 }
+                JarvisEvent::ChoiceRequested { prompt, options, .. } => {
+                    let list = options
+                        .iter()
+                        .map(|option| format!("{} — {}", option.index + 1, option.label))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    println!("🔀 {prompt} [{list}]")
+                }
+                JarvisEvent::ChoiceResolved { label, .. } => match label {
+                    Some(label) => println!("🔀 Выбрано: {label}"),
+                    None => println!("🔀 Выбор снят"),
+                },
             }
         }
     });

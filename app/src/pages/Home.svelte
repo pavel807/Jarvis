@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, settings, clearHistory, go } from "../store.svelte";
+  import { store, settings, clearHistory, go, resolveChoice } from "../store.svelte";
   import { getAssistant, voiceStatusLabel } from "../assistant";
   import ArcReactor from "../components/ArcReactor.svelte";
   import MicControl from "../components/MicControl.svelte";
@@ -80,6 +80,20 @@
     {/if}
   </div>
 
+  <!-- Несколько целей: выбор голосом или кликом по чипу -->
+  {#if store.pendingChoice}
+    <div class="choice">
+      <span class="choice__prompt">{store.pendingChoice.prompt}</span>
+      <div class="chips">
+        {#each store.pendingChoice.options as option (option.index)}
+          <button class="chip choice__chip" onclick={() => resolveChoice(option.index)}>
+            {option.label}
+          </button>
+        {/each}
+      </div>
+    </div>
+  {/if}
+
   <!-- Голосовой пульт: статус, кнопка с уровнем звука, спектр -->
   <div class="voice-zone">
     <span class="voice-status" class:is-live={assistant.tone === "live"} class:is-busy={busy} class:is-off={store.status.paused} class:is-err={assistant.tone === "error"}>
@@ -109,6 +123,34 @@
 <style>
   .transmission.is-empty {
     justify-content: center;
+  }
+
+  .choice {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 0 16px;
+  }
+
+  .choice__prompt {
+    color: var(--text-2);
+    font-size: 12.5px;
+    line-height: 1.45;
+    text-align: center;
+  }
+
+  .choice__chip {
+    cursor: pointer;
+    transition: color 0.14s, border-color 0.14s, background 0.14s;
+  }
+
+  .choice__chip:hover {
+    background: var(--cyan-soft);
+    border-color: var(--cyan-ring);
+    color: var(--cyan);
   }
 
   .voice-links {

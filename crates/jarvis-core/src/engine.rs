@@ -720,9 +720,8 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                             // иначе фоновый шум держит ассистента в режиме
                             // слушания бесконечно, съедая цикл за циклом.
                             if !noise_input || followup_deadline.is_none() {
-                                followup_deadline = Some(
-                                    Instant::now()
-                                        + Duration::from_secs(settings_snap.followup_window_secs),
+                                followup_deadline = followup_deadline_after(
+                                    settings_snap.followup_window_secs,
                                 );
                             }
                             audio_history.clear();
@@ -911,10 +910,11 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
             audio_history.clear();
             // Ответ закончился: окно уточнения начинается заново, если
             // предыдущая реплика была вопросом владельца (а не шумом).
-            if last_outcome_followup && settings_snap.followup_window_secs > 0 {
-                followup_deadline = Some(
-                    Instant::now() + Duration::from_secs(settings_snap.followup_window_secs),
-                );
+            if last_outcome_followup
+                && (settings_snap.followup_window_secs > 0
+                    || crate::choice::remaining().is_some())
+            {
+                followup_deadline = followup_deadline_after(settings_snap.followup_window_secs);
             }
             std::thread::sleep(Duration::from_millis(POST_SPEAK_GUARD_MS));
             audio_history.clear();
@@ -932,6 +932,13 @@ pub fn run_engine(stt: Stt, h: EngineHandles) -> Result<()> {
                     Instant::now() + Duration::from_secs(settings_snap.followup_window_secs),
                 );
             } else if state == AppState::WaitingForCommand {
+                // Ожидающий выбор живёт дольше обычного окна: пока он не
+                // истёк, остаёмся в режиме слушания.
+                if let Some(left) = crate::choice::remaining() {
+                    followup_deadline = Some(Instant::now() + left);
+                    continue;
+                }
+                crate::choice::expire();
                 println!(
                     "🔒 Окно прямого слушания ({} сек) истекло. Переход в режим вакворда.",
                     settings_snap.followup_window_secs
@@ -1471,6 +1478,22 @@ fn followup_expired_or_none(deadline: Option<Instant>) -> bool {
     }
 }
 
+/// Дедлайн прямого слушания: обычное окно из настроек, но не короче
+/// ожидающего выбора. Вопрос «какое окно?» должен жить столько же, сколько
+/// сам выбор, иначе ответ «второе» уже некому услышать.
+fn followup_deadline_after(settings_secs: u64) -> Option<Instant> {
+    let base = Duration::from_secs(settings_secs);
+    let wait = match crate::choice::remaining() {
+        Some(left) => left.max(base),
+        None => base,
+    };
+    if wait.is_zero() {
+        None
+    } else {
+        Some(Instant::now() + wait)
+    }
+}
+
 /// Фразы-триггеры детерминированного пути к агенту зрения.
 const SCREEN_QUESTION_PATTERNS: &[&str] = &[
     "что на экране",
@@ -1616,6 +1639,35 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
     h.llm_cancel.store(false, Ordering::SeqCst);
     // Номер обращения: фоновый веб-поиск проверит его перед озвучкой.
     let req_id = llm::new_request();
+
+    // Ожидается ответ на выбор окна: «второе», «2» или название. Явная
+    // отмена закрывает выбор; нераспознанная фраза снимает его и идёт
+    // обычным путём, чтобы новая команда не потерялась.
+    match crate::choice::resolve_text(text) {
+        crate::choice::ChoiceResolution::Picked { .. }
+        | crate::choice::ChoiceResolution::Cancelled { .. } => return Outcome::Followup,
+        crate::choice::ChoiceResolution::Unrecognized
+        | crate::choice::ChoiceResolution::NotPending => {}
+    }
+
+    // Шутка берётся из локальной базы: не зависит от сети и модели.
+    if crate::jokes::is_joke_request(text) {
+        match crate::jokes::tell() {
+            Ok(joke) => {
+                println!("😄 Шутка: {joke}");
+                llm::speak(&h.audio_tx, &h.events, &joke);
+            }
+            Err(reason) => {
+                let speech = format!("Не могу рассказать шутку: {reason}");
+                println!("⚠️ {speech}");
+                let _ = h.events.send(JarvisEvent::Error {
+                    message: speech.clone(),
+                });
+                llm::speak(&h.audio_tx, &h.events, &speech);
+            }
+        }
+        return Outcome::Followup;
+    }
 
     // Джарвис только что спросил «задача выполнена?» — короткий ответ закрывает
     // галочку, не уходя в LLM.

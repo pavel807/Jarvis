@@ -594,6 +594,14 @@ fn hyprland_window_control(action: &str, app: Option<&str>) -> Option<String> {
         }
         return Some(format!("Приложение {name} не найдено среди открытых"));
     };
+    Some(hyprland_window_action(&window, &action))
+}
+
+/// Действие над уже найденным окном Hyprland. Вынесено отдельно: выбор
+/// конкретного окна приходит из интерфейса уже с заголовком, а не с именем
+/// приложения.
+fn hyprland_window_action(window: &LinuxWindow, action: &str) -> String {
+    let action = action.trim().to_lowercase();
     let addr = window.id.clone();
     let title = if window.title.trim().is_empty() {
         window.class.clone()
@@ -612,12 +620,12 @@ fn hyprland_window_control(action: &str, app: Option<&str>) -> Option<String> {
             // выходят не мгновенно — окно верификации до 4 секунд.
             for _ in 0..10 {
                 if !hypr_window_exists(&addr) {
-                    return Some(format!("Закрыл окно {title}"));
+                    return format!("Закрыл окно {title}");
                 }
                 std::thread::sleep(Duration::from_millis(400));
             }
             let _ = ok;
-            Some(format!("Окно {title} не закрылось — приложение отказалось"))
+            format!("Окно {title} не закрылось — приложение отказалось")
         }
         "minimize" => {
             // В Hyprland нет настоящего минимизирования: окно уезжает в
@@ -630,13 +638,13 @@ fn hyprland_window_control(action: &str, app: Option<&str>) -> Option<String> {
             for _ in 0..6 {
                 match hypr_window_state(&addr) {
                     Some((true, ws, _)) if ws.starts_with("special") => {
-                        return Some(format!("Свернул окно {title}"));
+                        return format!("Свернул окно {title}");
                     }
                     _ => std::thread::sleep(Duration::from_millis(400)),
                 }
             }
             let _ = ok;
-            Some(format!("Окно {title} не свернулось"))
+            format!("Окно {title} не свернулось")
         }
         "maximize" | "fullscreen" => {
             let mode = if action == "fullscreen" { "fullscreen" } else { "maximized" };
@@ -650,21 +658,21 @@ fn hyprland_window_control(action: &str, app: Option<&str>) -> Option<String> {
             );
             let after = hypr_window_state(&addr).map(|(_, _, fs)| fs).unwrap_or(0);
             if before == 0 && after != 0 {
-                Some(format!(
+                format!(
                     "{} окно {title}",
                     if mode == "fullscreen" { "Развернул на весь экран" } else { "Развёрнул до максимума" }
-                ))
+                )
             } else if before != 0 && after == 0 {
-                Some(format!("Вернул окно {title} к обычному виду"))
+                format!("Вернул окно {title} к обычному виду")
             } else {
-                Some(format!("Окно {title}: состояние экрана не изменилось"))
+                format!("Окно {title}: состояние экрана не изменилось")
             }
         }
         "restore" => {
             let (exists, ws, fs) = hypr_window_state(&addr)
                 .unwrap_or((false, String::new(), 0));
             if !exists {
-                return Some(format!("Окно {title} уже закрыто"));
+                return format!("Окно {title} уже закрыто");
             }
             if ws.starts_with("special") {
                 // Вернуть из свёрнутого: на текущий воркспейс.
@@ -680,9 +688,9 @@ fn hyprland_window_control(action: &str, app: Option<&str>) -> Option<String> {
                 );
                 return match hypr_window_state(&addr) {
                     Some((true, ws2, _)) if !ws2.starts_with("special") => {
-                        Some(format!("Вернул окно {title}"))
+                        format!("Вернул окно {title}")
                     }
-                    _ => Some(format!("Окно {title} не вернулось")),
+                    _ => format!("Окно {title} не вернулось"),
                 };
             }
             if fs != 0 {
@@ -698,14 +706,14 @@ fn hyprland_window_control(action: &str, app: Option<&str>) -> Option<String> {
                 for _ in 0..6 {
                     match hypr_window_state(&addr) {
                         Some((true, _, fs2)) if fs2 == 0 => {
-                            return Some(format!("Вернул окно {title} к обычному виду"))
+                            return format!("Вернул окно {title} к обычному виду")
                         }
                         _ => std::thread::sleep(Duration::from_millis(300)),
                     }
                 }
-                return Some(format!("Окно {title} не вернулось к обычному виду"));
+                return format!("Окно {title} не вернулось к обычному виду");
             }
-            Some(format!("Окно {title} уже в обычном виде"))
+            format!("Окно {title} уже в обычном виде")
         }
         "focus" => {
             let ok = run_ok(
@@ -722,13 +730,13 @@ fn hyprland_window_control(action: &str, app: Option<&str>) -> Option<String> {
                 .and_then(|out| parse_hypr_single(&out))
                 .map(|w| w.id);
             if active.as_deref() == Some(addr.as_str()) {
-                Some(format!("Переключился на {title}"))
+                format!("Переключился на {title}")
             } else {
                 let _ = ok;
-                Some(format!("Окно {title} не вышло на передний план"))
+                format!("Окно {title} не вышло на передний план")
             }
         }
-        _ => None,
+        other => format!("Не могу выполнить действие с окном: {other}"),
     }
 }
 
@@ -1075,6 +1083,223 @@ fn window_list() -> String {
         "Открытых окон не нашёл".to_string()
     } else {
         shown.join("; ")
+    }
+}
+
+/// Окно подходит под просьбу: класс, заголовок или словарь алиасов.
+fn window_app_matches(window: &LinuxWindow, want: &str) -> bool {
+    let want_lower = want.to_lowercase();
+    class_words(&window.class)
+        .iter()
+        .any(|c| c.to_lowercase() == want_lower)
+        || window.title.to_lowercase().contains(&want_lower)
+        || window_matches(window, want)
+}
+
+/// Все окна, подходящие под просьбу. На X11 — wmctrl, запасной путь —
+/// xdotool. Возвращает пустой список, если окно не найдено.
+fn windows_matching(want: &str) -> Vec<LinuxWindow> {
+    if let Some(windows) = wmctrl_windows() {
+        let hits: Vec<LinuxWindow> = windows
+            .iter()
+            .filter(|w| window_app_matches(w, want))
+            .cloned()
+            .collect();
+        if !hits.is_empty() {
+            return hits;
+        }
+        // Нечёткий подбор по заголовкам — как fuzzy_app_match на macOS.
+        let titles: Vec<String> = windows.iter().map(|w| w.title.clone()).collect();
+        if let Some(hit) = fuzzy_app_match(want, &titles) {
+            return windows.into_iter().filter(|w| w.title == hit).collect();
+        }
+        // wmctrl не нашёл — возможно, окно видно только xdotool.
+    }
+    if !command_exists("xdotool") {
+        return Vec::new();
+    }
+    let mut patterns = vec![want.to_string()];
+    if let Some(target) = alias(want) {
+        patterns.push(target.to_string());
+    }
+    let mut found: Vec<LinuxWindow> = Vec::new();
+    for pattern in patterns {
+        if let Some(ids) = xdotool_search("--name", &pattern) {
+            for id in ids {
+                if found.iter().any(|w| w.id == id) {
+                    continue;
+                }
+                let title = run("xdotool", &["getwindowname", &id]).unwrap_or_default();
+                found.push(LinuxWindow {
+                    id,
+                    class: String::new(),
+                    title,
+                });
+            }
+        }
+    }
+    found
+}
+
+/// Окно свёрнуто. На Hyprland это служебный воркспейс `special:hidden`;
+/// на X11 — состояние `_NET_WM_STATE_HIDDEN` (если xprop отвечает).
+fn window_is_minimized(window: &LinuxWindow) -> bool {
+    if wayland_session_env() && command_exists("hyprctl") {
+        return hypr_window_state(&window.id)
+            .map(|(_, ws, _)| ws.starts_with("special"))
+            .unwrap_or(false);
+    }
+    window_state_has(&window.id, "HIDDEN") == Some(true)
+}
+
+/// Имя приложения окна: из WM_CLASS берём человеческую часть
+/// («google-chrome.Google-chrome» → «Google-chrome»).
+fn window_app_name(window: &LinuxWindow) -> String {
+    let class = window.class.trim();
+    if class.is_empty() {
+        return "окно без названия".to_string();
+    }
+    class.rsplit('.').next().unwrap_or(class).to_string()
+}
+
+/// Подпись окна для выбора: заголовок, а если он пуст — класс приложения.
+fn window_label(window: &LinuxWindow) -> String {
+    let title = window.title.trim();
+    if !title.is_empty() {
+        return title.to_string();
+    }
+    window_app_name(window)
+}
+
+/// Действие над окном тем путём, который соответствует сессии.
+fn linux_window_action(window: &LinuxWindow, action: &str) -> String {
+    if wayland_session_env() && command_exists("hyprctl") {
+        hyprland_window_action(window, action)
+    } else {
+        do_window_action(&window.id, &window_label(window), action)
+    }
+}
+
+/// Оконная команда без молчаливого выбора первого окна. Если под просьбу
+/// подходит несколько окон, возвращается список — интерфейс предложит выбор.
+pub fn window_control_checked(
+    action: &str,
+    app: Option<&str>,
+) -> crate::platform::WindowControlOutcome {
+    use crate::platform::{WindowControlOutcome, WindowTarget};
+
+    if action == "list" {
+        return WindowControlOutcome::Done(window_control(action, app));
+    }
+
+    let is_self = app.is_none() || app.is_some_and(crate::platform::is_self_window_target);
+    let is_active = app.is_some_and(|wanted| {
+        ["активное", "активную", "активный", "это", "текущее", "active"]
+            .contains(&wanted.trim().to_lowercase().as_str())
+    });
+
+    let window = if is_self {
+        wmctrl_windows().and_then(|windows| {
+            windows.into_iter().find(|w| {
+                class_words(&w.class)
+                    .iter()
+                    .any(|c| c.to_lowercase().contains("jarvis"))
+            })
+        })
+    } else if is_active {
+        if wayland_session_env() && command_exists("hyprctl") {
+            hyprctl_active()
+        } else {
+            active_window().map(|(id, title)| LinuxWindow {
+                id,
+                class: String::new(),
+                title,
+            })
+        }
+    } else {
+        let wanted = app.unwrap_or_default();
+        let mut hits = windows_matching(wanted);
+        if hits.is_empty() {
+            return WindowControlOutcome::Done(format!(
+                "Приложение {wanted} не найдено среди открытых{}",
+                wayland_limitation()
+            ));
+        }
+        // «Верни окно»: если какие-то окна свёрнуты, выбор — только среди
+        // них; остальные и так видны и возвращать их нечего.
+        if action == "restore" {
+            let minimized: Vec<LinuxWindow> = hits
+                .iter()
+                .filter(|window| window_is_minimized(window))
+                .cloned()
+                .collect();
+            if !minimized.is_empty() {
+                hits = minimized;
+            }
+        }
+        if hits.len() > 1 {
+            let targets = hits
+                .into_iter()
+                .map(|window| WindowTarget {
+                    app: window_app_name(&window),
+                    minimized: window_is_minimized(&window),
+                    title: window_label(&window),
+                })
+                .collect();
+            return WindowControlOutcome::Ambiguous(targets);
+        }
+        hits.into_iter().next()
+    };
+
+    let Some(window) = window else {
+        let name = app.unwrap_or("");
+        if is_self {
+            return WindowControlOutcome::Done(
+                "Не нашёл своё окно — я в фоне. Скажи, чьё окно трогать".to_string(),
+            );
+        }
+        if is_active {
+            return WindowControlOutcome::Done(
+                "Не нашёл активное приложение с окном".to_string(),
+            );
+        }
+        return WindowControlOutcome::Done(format!(
+            "Приложение {name} не найдено среди открытых{}",
+            wayland_limitation()
+        ));
+    };
+    WindowControlOutcome::Done(linux_window_action(&window, action))
+}
+
+/// Действие над конкретным окном, выбранным пользователем. Окно ищется
+/// заново по заголовку и классу: список окон мог измениться, пока человек
+/// читал варианты.
+pub fn window_control_target(action: &str, app: &str, title: &str) -> String {
+    let windows = wmctrl_windows().unwrap_or_default();
+    let by_title = |window: &LinuxWindow| {
+        window.title == title
+            || (!title.trim().is_empty()
+                && (window.title.contains(title) || title.contains(&window.title)))
+    };
+    let same_app = |window: &LinuxWindow| {
+        app.trim().is_empty()
+            || class_words(&window.class)
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(app))
+            || window_matches(window, app)
+    };
+    let window = windows
+        .iter()
+        .find(|window| by_title(window) && same_app(window))
+        .or_else(|| windows.iter().find(|window| by_title(window)))
+        .cloned()
+        .or_else(|| {
+            // Запасной путь X11: wmctrl нет, но выбор строился через xdotool.
+            find_window_xdotool(app).filter(|window| by_title(window))
+        });
+    match window {
+        Some(window) => linux_window_action(&window, action),
+        None => format!("Окно «{title}» уже закрыто или переименовано"),
     }
 }
 

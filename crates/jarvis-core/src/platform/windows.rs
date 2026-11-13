@@ -618,6 +618,22 @@ pub fn window_control(action: &str, app: Option<&str>) -> String {
     }
 }
 
+/// Оконная команда без выбора: Win32 через PowerShell отдаёт только главное
+/// окно процесса (`MainWindowTitle`), поэтому отдельных окон одного
+/// приложения здесь не видно — предлагать выбор не из чего.
+pub fn window_control_checked(
+    action: &str,
+    app: Option<&str>,
+) -> crate::platform::WindowControlOutcome {
+    crate::platform::WindowControlOutcome::Done(window_control(action, app))
+}
+
+/// Действие над выбранным окном. На Windows список окон не различает окна
+/// одного процесса, так что адресуем приложение целиком.
+pub fn window_control_target(action: &str, app: &str, _title: &str) -> String {
+    window_control(action, Some(app))
+}
+
 // =========================================================================
 // Музыка: SMTC (кнопки медиа системы)
 // =========================================================================

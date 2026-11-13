@@ -97,6 +97,22 @@ export interface Toast {
   kind: "info" | "ok" | "err";
 }
 
+/** Вариант ожидающего выбора. */
+export interface ChoiceOption {
+  index: number;
+  label: string;
+}
+
+/**
+ * Под команду подходит несколько целей (например, несколько окон Chrome).
+ * Выбор разрешается голосом или кликом по чипу.
+ */
+export interface PendingChoice {
+  id: number;
+  prompt: string;
+  options: ChoiceOption[];
+}
+
 /** Реплика в общей истории диалога на главной. */
 export interface Turn {
   id: number;
@@ -166,6 +182,8 @@ export const store = $state({
   speaking: false as boolean,
   /** Команда, которую движок распознал дословно. */
   matchedCommand: "" as string,
+  /** Ожидающий выбор цели: чипы на главной, ответ голосом тоже работает. */
+  pendingChoice: null as PendingChoice | null,
   chat: {
     question: "" as string,
     streaming: "" as string,
@@ -314,6 +332,28 @@ export async function patchSettings(patch: Partial<Settings>) {
   }
 }
 
+// ---------- Выбор цели ----------
+
+/**
+ * Выбрать вариант кликом. Действие выполняет ядро — то же, что при
+ * голосовом ответе; повторный клик по устаревшему выбору честно отклоняется.
+ */
+export async function resolveChoice(index: number) {
+  const pending = store.pendingChoice;
+  if (!pending) return;
+  try {
+    const speech = await invoke<string>("choice_resolve", {
+      choiceId: pending.id,
+      index,
+    });
+    if (speech && speech.trim()) toast(speech.trim(), "ok");
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), "err");
+  } finally {
+    if (store.pendingChoice?.id === pending.id) store.pendingChoice = null;
+  }
+}
+
 // ---------- Инициализация ----------
 
 export async function initEvents() {
@@ -343,6 +383,29 @@ export async function initEvents() {
       case "topic_resumed":
         noteTurn(`Вернулись к теме: ${((ev.topic as string) ?? "").trim()}`);
         break;
+      case "choice_requested": {
+        const raw = Array.isArray(ev.options) ? ev.options : [];
+        const options: ChoiceOption[] = raw.map((item) => {
+          const option = item as { index?: unknown; label?: unknown };
+          return {
+            index: Number(option.index ?? 0),
+            label: String(option.label ?? ""),
+          };
+        });
+        store.pendingChoice = {
+          id: Number(ev.choice_id ?? 0),
+          prompt: String(ev.prompt ?? ""),
+          options,
+        };
+        break;
+      }
+      case "choice_resolved": {
+        // Чужое (уже закрытое) событие не должно снимать актуальный выбор.
+        if (store.pendingChoice?.id === Number(ev.choice_id ?? 0)) {
+          store.pendingChoice = null;
+        }
+        break;
+      }
       case "action_result": {
         const summary = ((ev.summary as string) ?? "").slice(0, 300);
         store.matchedCommand = "";

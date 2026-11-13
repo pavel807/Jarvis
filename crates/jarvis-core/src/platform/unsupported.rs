@@ -30,6 +30,17 @@ pub fn window_control(_action: &str, _app: Option<&str>) -> String {
     "Управление окнами поддерживается на macOS, Linux и Windows".to_string()
 }
 
+pub fn window_control_checked(
+    action: &str,
+    app: Option<&str>,
+) -> crate::platform::WindowControlOutcome {
+    crate::platform::WindowControlOutcome::Done(window_control(action, app))
+}
+
+pub fn window_control_target(action: &str, app: &str, _title: &str) -> String {
+    window_control(action, Some(app))
+}
+
 pub fn music_control(_action: &str) -> Result<String, String> {
     Err("Управление музыкой поддерживается на macOS, Linux и Windows".to_string())
 }

@@ -42,6 +42,25 @@ use unsupported as imp;
 
 pub use imp::*;
 
+/// Конкретное окно-кандидат. `app` — имя процесса/приложения, по которому
+/// действие найдёт окно повторно (индексы окон на macOS меняются после
+/// сворачивания, поэтому запоминать номер окна нельзя).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowTarget {
+    pub app: String,
+    pub title: String,
+    /// На macOS и Hyprland состояние известно; на остальных ОС — `false`.
+    pub minimized: bool,
+}
+
+/// Результат оконной команды. `Ambiguous` — у приложения несколько окон,
+/// и выбор нужно оставить пользователю, а не делать первое попавшееся.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowControlOutcome {
+    Done(String),
+    Ambiguous(Vec<WindowTarget>),
+}
+
 pub mod shell;
 pub mod desktop;
 

@@ -55,7 +55,13 @@ pub fn normalize_role(role: &str) -> String {
 pub mod ax;
 
 #[cfg(target_os = "macos")]
+pub mod ax_native;
+
+#[cfg(target_os = "macos")]
 pub use ax::{click_element, menu_path, read_screen, set_field_value, ScreenDump};
+
+/// Единая модель элементов экрана и нечёткий матч — общая для всех ОС.
+pub mod elements;
 
 // Linux: полная реализация через AT-SPI2 (read/click/type/menu).
 #[cfg(target_os = "linux")]

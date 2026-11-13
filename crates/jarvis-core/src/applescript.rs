@@ -209,6 +209,20 @@ mod tests {
         }
     }
 
+    /// `delay` — команда Standard Additions. Скрипты окон ждут анимацию
+    /// сворачивания внутри AppleScript, поэтому проверяем, что in-process
+    /// путь её понимает, а не только внешний `osascript`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn in_process_delay_is_available() {
+        match super::run(r#"delay 0.05
+return "ok""#) {
+            Some(Ok(value)) => assert_eq!(value.trim(), "ok"),
+            Some(Err(e)) => eprintln!("⚠️ AppleScript недоступен в этом окружении: {e}"),
+            None => eprintln!("⚠️ in-process путь выключен переменной окружения"),
+        }
+    }
+
     /// Отказ в автоматизации раньше приводил к панике objc2 на NULL и ронял
     /// приложение. Теперь это честная ошибка: проверяем, что вызов вообще
     /// возвращается и не теряет причину.

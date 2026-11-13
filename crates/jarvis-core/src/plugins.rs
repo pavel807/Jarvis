@@ -16,7 +16,7 @@ use crate::agent::ToolSpec;
 use crate::paths;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 
 /// Один загруженный плагин.
 #[derive(Debug, Clone)]
@@ -139,7 +139,7 @@ fn source_hash(source: &str) -> u64 {
 
 /// Скомпилировать один плагин: генерация Rust через Spark, rustc в кэш.
 /// Кэш по хэшу исходника — пересборка только после правки плагина.
-fn compile(source: &str, file: &Path) -> Result<PathBuf, String> {
+fn compile(source: &str, _file: &Path) -> Result<PathBuf, String> {
     // Парсер Spark на некоторых ошибках паникует («Неподдерживаемое
     // выражение»): плагин с опечаткой не должен ронять ассистента —
     // на границе паника превращается в честную ошибку.
