@@ -36,4 +36,4 @@ WORKDIR /src
 
 # Скрипт сборки вызывает compose (см. compose.yml): он монтирует исходники
 # и забирает артефакты в dist-out/.
-CMD ["bash", "-lc", "bun install --frozen-lockfile && bun tauri build && mkdir -p /out && cp -v src-tauri/target/release/jarvis-app /out/ && cp -rv src-tauri/target/release/bundle/* /out/ 2>/dev/null || true"]
+CMD ["bash", "-lc", "bun install --frozen-lockfile && bun tauri build && mkdir -p /out && cp -v target/release/jarvis-app /out/ && cp -rv target/release/bundle/* /out/ 2>/dev/null || true"]

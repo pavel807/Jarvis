@@ -15,7 +15,7 @@ services:
     # OUT_DIR — куда сложить артефакты на хосте (по умолчанию dist-out).
     environment:
       - HOME=/root
-    command: ["bash", "-lc", "bun install --frozen-lockfile && bun tauri build && mkdir -p /src/${OUT_DIR:-dist-out} && cp -v src-tauri/target/release/jarvis-app /src/${OUT_DIR:-dist-out}/ && cp -rv src-tauri/target/release/bundle/* /src/${OUT_DIR:-dist-out}/ 2>/dev/null || true"]
+    command: ["bash", "-lc", "bun install --frozen-lockfile && bun tauri build && mkdir -p /src/${OUT_DIR:-dist-out} && cp -v target/release/jarvis-app /src/${OUT_DIR:-dist-out}/ && cp -rv target/release/bundle/* /src/${OUT_DIR:-dist-out}/ 2>/dev/null || true"]
 
   test:
     build: .

@@ -94,12 +94,12 @@ elif [ "$DRY_RUN" = 1 ]; then
 else
   (cd "$REPO_DIR/app" && bun install --frozen-lockfile)
   (cd "$REPO_DIR/app" && bun tauri build) || die "сборка не удалась"
-  ok "сборка готова: app/src-tauri/target/release/jarvis-app"
+  ok "сборка готова: target/release/jarvis-app"
 fi
 
 # ── Шаг 3. Установка ───────────────────────────────────────────────────────
 step "Устанавливаю"
-BIN_SRC="$REPO_DIR/app/src-tauri/target/release/jarvis-app"
+BIN_SRC="$REPO_DIR/target/release/jarvis-app"
 
 install_file() { # src dst mode
   if [ "$DRY_RUN" = 0 ]; then
