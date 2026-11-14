@@ -166,13 +166,16 @@
     return settings.llm_backend === "api" && settings.api_preset === preset;
   }
 
-  async function pickApi(preset: "yandex" | "openai") {
+  async function pickApi(preset: "yandex" | "openai" | "gigachat") {
     if (apiActive && settings.api_preset === preset) return;
     const base =
       preset === "yandex"
         ? "https://llm.api.cloud.yandex.net/v1"
-        : "https://api.openai.com/v1";
-    const model = preset === "yandex" ? "yandexgpt-lite" : "gpt-4o-mini";
+        : preset === "gigachat"
+          ? "https://gigachat.devices.sberbank.ru/api/v1"
+          : "https://api.openai.com/v1";
+    const model =
+      preset === "yandex" ? "yandexgpt-lite" : preset === "gigachat" ? "GigaChat" : "gpt-4o-mini";
     await patchSettings({ llm_backend: "api", api_preset: preset, api_base_url: base, api_model: model });
     toast(
       settings.api_key
@@ -249,6 +252,11 @@
       key: "yandex",
       title: "Яндекс GPT — облако",
       hint: "Ответы через Яндекс. Нужен API-ключ Яндекс.Облака и идентификатор каталога.",
+    },
+    {
+      key: "gigachat",
+      title: "GigaChat (Сбер) — облако",
+      hint: "Ключ авторизации из личного кабинета GigaChat (Basic …). Access-токен Джарвис получает сам и продлевает.",
     },
     {
       key: "openai",
@@ -618,6 +626,32 @@
               type="text"
               value={settings.api_model}
               placeholder="yandexgpt-lite"
+              onchange={(e) => void saveApiField({ api_model: e.currentTarget.value })}
+            />
+          </label>
+          <button class="btn btn--secondary btn--sm" disabled={apiChecking} onclick={checkApi}>
+            {apiChecking ? "Проверяю…" : "Проверить ключ"}
+          </button>
+        </div>
+      {:else if apiActive && settings.api_preset === "gigachat"}
+        <div class="api-fields">
+          <label class="api-field">
+            <span class="api-field__label">Ключ авторизации</span>
+            <input
+              class="input"
+              type="password"
+              value={settings.api_key}
+              placeholder="MDE5ZGNhNTYt… (Basic-ключ из личного кабинета GigaChat)"
+              onchange={(e) => void saveApiField({ api_key: e.currentTarget.value })}
+            />
+          </label>
+          <label class="api-field">
+            <span class="api-field__label">Модель</span>
+            <input
+              class="input"
+              type="text"
+              value={settings.api_model}
+              placeholder="GigaChat"
               onchange={(e) => void saveApiField({ api_model: e.currentTarget.value })}
             />
           </label>
