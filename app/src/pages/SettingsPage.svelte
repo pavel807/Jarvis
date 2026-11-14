@@ -480,12 +480,6 @@
         </button>
       {/if}
       {#if hit("посторонние", "голоса", "фильтр", "мой голос", "speakers", "диаризация")}
-        <SwitchRow
-          checked={settings.speaker_filter}
-          title="Только мой голос (скоро)"
-          hint="Бета: отсекает посторонние голоса до распознавания. Джарвис и так слышит фразу-активацию от любого человека — это не влияет на отклик, только на ответы."
-          onchange={(value) => void patchSettings({ speaker_filter: value })}
-        />
         {#if voiceSamples !== null}
           <button
             class="row-item"

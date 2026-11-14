@@ -2042,7 +2042,10 @@ fn window_action_verb(action: &str) -> &'static str {
         "tab_close" => "закрыть вкладку",
         "tab_close_all" => "закрыть все вкладки",
         "tab_restore" => "вернуть вкладку",
+        "tab_new" => "открыть вкладку",
         "tab_next" | "tab_prev" => "переключить вкладку",
+        "desktop_next" | "desktop_prev" => "переключить стол",
+        "window_next" | "window_prev" => "переключить окно",
         _ => "выбрать",
     }
 }
@@ -3396,8 +3399,29 @@ pub fn tab_request_from_prompt(
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Option<ToolCall> {
     let t = prompt.to_lowercase();
-    if !t.contains("вкладк") {
+    if !t.contains("вкладк") && !t.contains(" таб") {
         return None;
+    }
+    // «Открой новую вкладку», «новая вкладка браузера» — Ctrl+T. Отличаем
+    // от «открой вкладку кинопоиск» (открыть сайт): в фразе только
+    // слова-заглушки, без названия сайта. Живой случай без этого: модель
+    // планировала OpenApp{Foot} — открывался терминал.
+    const NEW_TAB_FILLER: &[&str] = &[
+        "открой", "открыть", "открывай", "создай", "сделай", "давай", "новую", "новая", "новый",
+        "новое", "вкладку", "вкладка", "вкладке", "вкладки", "вкладок", "вкладк", "таб",
+        "браузер", "браузера", "браузере", "пожалуйста", "мне", "еще", "ещё", "быстро",
+    ];
+    let words: Vec<&str> = t
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .collect();
+    if !words.is_empty() && words.iter().all(|w| NEW_TAB_FILLER.contains(w)) {
+        return Some(ToolCall::Window {
+            action: "tab_new".to_string(),
+            app: Some("активное".to_string()),
+            desktop: None,
+        });
     }
     let close_all = (t.contains("все") || t.contains("всё")) && !t.contains("верни");
     let action = if t.contains("верни") || t.contains("восстанови") || t.contains("открой обратно")
@@ -4643,6 +4667,21 @@ mod tests {
             Some(ToolCall::Window { action, .. }) => assert_eq!(action, "tab_next"),
             other => panic!("ждали tab_next, получили {other:?}"),
         }
+        // Живая жалоба: «открой новую вкладку браузера» открывала ТЕРМИНАЛ —
+        // фраза уезжала в LLM, а модель планировала OpenApp{Foot}.
+        match tab_request_from_prompt("открой новую вкладку браузера", fake_lookup) {
+            Some(ToolCall::Window { action, app, .. }) => {
+                assert_eq!(action, "tab_new");
+                assert_eq!(app.as_deref(), Some("активное"));
+            }
+            other => panic!("ждали tab_new, получили {other:?}"),
+        }
+        match tab_request_from_prompt("новая вкладка", fake_lookup) {
+            Some(ToolCall::Window { action, .. }) => assert_eq!(action, "tab_new"),
+            other => panic!("ждали tab_new, получили {other:?}"),
+        }
+        // С названием сайта — не новая вкладка: пусть ведёт модель.
+        assert!(tab_request_from_prompt("открой вкладку яндекс", fake_lookup).is_none());
         match tab_request_from_prompt("переключи на предыдущую вкладку", fake_lookup) {
             Some(ToolCall::Window { action, .. }) => assert_eq!(action, "tab_prev"),
             other => panic!("ждали tab_prev, получили {other:?}"),

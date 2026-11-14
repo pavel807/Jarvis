@@ -441,6 +441,7 @@ pub fn window_control_checked(
         verb,
         "desktop" | "minimizeall" | "movetodesktop" | "half_left" | "half_right"
         | "tab_close" | "tab_close_all" | "tab_restore" | "tab_next" | "tab_prev"
+        | "tab_new" | "desktop_next" | "desktop_prev" | "window_next" | "window_prev"
     ) {
         return WindowControlOutcome::Done(
             "Столы и раскладку окон я пока умею только на Hyprland (Linux)".to_string(),

@@ -620,7 +620,8 @@ fn hyprland_window_control(action: &str, app: Option<&str>) -> Option<String> {
     match verb {
         "close" | "minimize" | "maximize" | "fullscreen" | "restore" | "focus"
         | "movetodesktop" | "half_left" | "half_right" | "tab_close" | "tab_close_all"
-        | "tab_restore" | "tab_next" | "tab_prev" => {}
+        | "tab_restore" | "tab_next" | "tab_prev" | "tab_new" | "window_next"
+        | "window_prev" => {}
         _ => return None,
     }
     let is_self = app.is_some() && crate::platform::is_self_window_target(app.unwrap_or(""));
@@ -824,14 +825,41 @@ fn hyprland_window_action(window: &LinuxWindow, action: &str) -> String {
             }
         }
         "half_left" | "half_right" => hypr_window_half(&addr, &title, action == "half_left"),
+        // «Переключи окно» — перенос фокуса по направлению, как alt-tab.
+        // Успех = активным стал ДРУГОЙ адрес окна.
+        "window_next" | "window_prev" => {
+            let dir = if verb == "window_next" { "r" } else { "l" };
+            let before = run("hyprctl", &["-j", "activewindow"])
+                .ok()
+                .and_then(|out| parse_hypr_single(&out))
+                .map(|w| w.id);
+            run_ok(
+                "hyprctl",
+                &["dispatch", &format!("hl.dsp.focus({{ direction = \"{dir}\" }})")],
+            );
+            for _ in 0..5 {
+                let now = run("hyprctl", &["-j", "activewindow"])
+                    .ok()
+                    .and_then(|out| parse_hypr_single(&out))
+                    .map(|w| w.id);
+                if let Some(now) = now
+                    && now != before.as_deref().unwrap_or("")
+                {
+                    return "Переключил окно".to_string();
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            "Соседнее окно не нашлось".to_string()
+        }
         // Вкладки браузера — не действие композитора, а сочетания клавиш
         // в целевое окно. Работает с любым браузером: это их стандартные
         // хоткеи, названий терминалов и браузеров не требуется.
-        "tab_close" | "tab_close_all" | "tab_restore" | "tab_next" | "tab_prev" => {
+        "tab_close" | "tab_close_all" | "tab_restore" | "tab_next" | "tab_prev" | "tab_new" => {
             let keys: &[&str] = match verb {
                 "tab_close" => &["CTRL", "W"],
                 "tab_close_all" => &["CTRL", "SHIFT", "W"],
                 "tab_restore" => &["CTRL", "SHIFT", "T"],
+                "tab_new" => &["CTRL", "T"],
                 "tab_next" => &["CTRL", "TAB"],
                 _ => &["CTRL", "SHIFT", "TAB"],
             };
@@ -877,8 +905,19 @@ fn hyprland_window_action(window: &LinuxWindow, action: &str) -> String {
                     return match verb {
                         "tab_close" => format!("Закрыл вкладку — теперь открыта «{now}»"),
                         "tab_restore" => format!("Вернул закрытую вкладку — открылась «{now}»"),
+                        "tab_new" => format!("Открыл новую вкладку «{now}»"),
                         _ => format!("Переключил вкладку — открыта «{now}»"),
                     };
+                }
+            }
+            // Открытие вкладки может не менять заголовок: если активная
+            // вкладка уже «Новая вкладка», новая выглядит так же (проверено
+            // живьём на Chromium). Тогда сочетание доставлено — считаем
+            // успех; заголовок не про «новую вкладку» — честный отказ.
+            if verb == "tab_new" {
+                let t = title.to_lowercase();
+                if t.contains("новая вкладка") || t.contains("new tab") {
+                    return format!("Открыл новую вкладку в {title}");
                 }
             }
             "Вкладка не изменилась: окно на месте, заголовок прежний".to_string()
@@ -924,6 +963,43 @@ fn hypr_desktop_switch(number: Option<&str>) -> String {
         std::thread::sleep(Duration::from_millis(200));
     }
     format!("Не переключился на стол {target}")
+}
+
+/// Соседний стол: «следующий/предыдущий». Вперёд — селектор r+1
+/// композитора, назад — номер минус единица (l+1 в 0.56 не работает).
+fn hypr_desktop_step(step: i64) -> String {
+    let current = run("hyprctl", &["-j", "activeworkspace"])
+        .ok()
+        .and_then(|out| serde_json::from_str::<serde_json::Value>(&out).ok())
+        .and_then(|v| v.get("id")?.as_i64());
+    let Some(current) = current else {
+        return "Не смог узнать текущий стол".to_string();
+    };
+    if step < 0 && current <= 1 {
+        return "Ты уже на первом столе".to_string();
+    }
+    let target = if step > 0 {
+        "r+1".to_string()
+    } else {
+        (current - 1).to_string()
+    };
+    run_ok(
+        "hyprctl",
+        &["dispatch", &format!("hl.dsp.focus({{ workspace = \"{target}\" }})")],
+    );
+    for _ in 0..5 {
+        let active = run("hyprctl", &["-j", "activeworkspace"])
+            .ok()
+            .and_then(|out| serde_json::from_str::<serde_json::Value>(&out).ok())
+            .and_then(|v| v.get("id")?.as_i64());
+        if let Some(active) = active
+            && active != current
+        {
+            return format!("Переключился на стол {active}");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    "Соседний стол не переключился".to_string()
 }
 
 /// «Сверни все окна»: каждое видимое окно уезжает в special:hidden —
@@ -1568,10 +1644,12 @@ pub fn window_control_checked(
     // Действия без выбора окна: переключение столов и «свернуть всё».
     // Разбор «глагол номер» — номер приезжает внутри строки действия.
     let (verb, desktop) = split_action_number(action);
-    if matches!(verb, "desktop" | "minimizeall") {
+    if matches!(verb, "desktop" | "minimizeall" | "desktop_next" | "desktop_prev") {
         if in_wayland_session() && command_exists("hyprctl") {
             let result = match verb {
                 "desktop" => hypr_desktop_switch(desktop),
+                "desktop_next" => hypr_desktop_step(1),
+                "desktop_prev" => hypr_desktop_step(-1),
                 _ => hypr_minimize_all(),
             };
             return WindowControlOutcome::Done(result);

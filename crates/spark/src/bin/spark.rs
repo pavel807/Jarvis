@@ -117,13 +117,18 @@ fn main() {
         std::process::exit(1);
     }
 
-    let mut output_name = "app";
+    // Без -o бинарник раньше писался в текущий каталог как «app» — в репо
+    // Джарвиса это конфликтовало с каталогом app/. Дефолт — временный файл.
+    let mut output_name = std::env::temp_dir()
+        .join(format!("spark_app_{}", std::process::id()))
+        .to_string_lossy()
+        .to_string();
     let mut should_run = false;
     let mut opt_level = 1;
 
     for i in 1..args.len() {
         if args[i] == "-o" && i + 1 < args.len() {
-            output_name = &args[i + 1];
+            output_name = args[i + 1].clone();
         }
         if args[i] == "--run" {
             should_run = true;
@@ -155,14 +160,21 @@ fn main() {
         }
     };
 
-    if let Err(e) = codegen::compile_to_binary(resolved, output_name, opt_level) {
+    if let Err(e) = codegen::compile_to_binary(resolved, &output_name, opt_level) {
         eprintln!("❌ Ошибка компиляции:\n{e}");
         std::process::exit(1);
     }
 
     if should_run {
         println!("🏃 Запуск {}...", output_name);
-        let mut child = Command::new(format!("./{}", output_name))
+        // Абсолютный путь (дефолт во temp) запускаем как есть, относительный
+        // (-o app) — через ./, как раньше.
+        let run_path = if output_name.contains('/') {
+            output_name.clone()
+        } else {
+            format!("./{output_name}")
+        };
+        let mut child = Command::new(run_path)
             .spawn()
             .expect("❌ Не удалось запустить программу");
         child.wait().expect("❌ Программа завершилась с ошибкой");
