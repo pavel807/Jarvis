@@ -10,7 +10,6 @@
 //! - патчи коалесцируют в окне ~16 мс — шторм анимации не съедает CPU.
 
 use crate::simhash::SimHash;
-use crate::smi::{self, PathSeg};
 use std::collections::{HashMap, HashSet};
 use xa11y::Role;
 
@@ -291,34 +290,6 @@ pub struct Shadow {
     pub roots: Vec<Smi>,
 }
 
-/// Сегменты пути от корня к узлу capture: роль + позиция среди соседей.
-/// Повторяющиеся роли помечаются — позиция в SMI не попадает.
-fn chain_for(capture: &xa11y::capture::Capture, index: usize) -> Vec<PathSeg> {
-    let mut chain = Vec::new();
-    let mut idx = Some(index);
-    while let Some(i) = idx {
-        let node = &capture.nodes[i];
-        // Позиция среди соседей — из списка детей родителя.
-        let sibling_idx = node
-            .parent
-            .map(|p| {
-                capture.nodes[p]
-                    .children
-                    .iter()
-                    .position(|c| *c == i)
-                    .unwrap_or(0) as u16
-            })
-            .unwrap_or(0);
-        chain.push(PathSeg {
-            role: node.role,
-            sibling_idx,
-            repeating: smi::is_repeating_role(node.role),
-        });
-        idx = node.parent;
-    }
-    chain.reverse();
-    chain
-}
 
 #[cfg(test)]
 mod tests {

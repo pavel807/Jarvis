@@ -301,10 +301,12 @@ pub(crate) fn spark_mouse_move(x: i64, y: i64) -> String {
 /// Прокрутка: spark_mouse_scroll("down", 3).
 #[allow(dead_code)]
 pub(crate) fn spark_mouse_scroll(direction: impl AsRef<str>, amount: i64) -> String {
-    let dir = direction.as_ref().to_lowercase();
-    let n = amount.clamp(1, 20);
     #[cfg(target_os = "linux")]
     {
+        // Переменные внутри cfg-блока: на macOS/Windows они не нужны,
+        // а объявление снаружи давало unused-предупреждения в CI.
+        let dir = direction.as_ref().to_lowercase();
+        let n = amount.clamp(1, 20);
         let button = if dir.starts_with("вверх") || dir == "up" { "4" } else { "5" };
         for _ in 0..n {
             spark_out("ydotool", &["click", button]);
@@ -313,11 +315,12 @@ pub(crate) fn spark_mouse_scroll(direction: impl AsRef<str>, amount: i64) -> Str
     }
     #[cfg(target_os = "macos")]
     {
-        spark_out("cliclick", &["w:100"]);
-        return "ok".to_string();
+        let _ = (direction, amount);
+        return "прокрутка на macOS — жесты трекпада".to_string();
     }
     #[cfg(target_os = "windows")]
     {
+        let _ = (direction, amount);
         return "прокрутка на Windows — через колесо мыши вручную".to_string();
     }
 }
@@ -663,9 +666,9 @@ pub(crate) fn spark_volume_mute() -> String {
 /// Яркость экрана: spark_brightness_set(70). 0–100.
 #[allow(dead_code)]
 pub(crate) fn spark_brightness_set(percent: i64) -> String {
-    let p = percent.clamp(1, 100);
     #[cfg(target_os = "linux")]
     {
+        let p = percent.clamp(1, 100);
         spark_out("brightnessctl", &["set", &format!("{p}%")]);
         return "ok".to_string();
     }

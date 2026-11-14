@@ -34,7 +34,6 @@ pub enum Reaction {
 
 /// Классификация ошибки: доставка + что делать (§6, таблица).
 pub fn reaction(err: &Error) -> Reaction {
-    use xa11y::StaleReason::*;
     match err {
         Error::PermissionDenied { instructions } => Reaction::Permissions(instructions.clone()),
         Error::Unsupported { feature } => Reaction::Unsupported(feature.clone()),
@@ -97,7 +96,7 @@ impl Runner {
     pub fn press(&self, root: Option<&Element>, selector: &str) -> Outcome {
         let act = Action::UiAction { target: selector.to_string() };
         let verdict = classify(&self.policy, &act);
-        if let Verdict::Ask { reason } | Verdict::Deny { reason } = &verdict {
+        if matches!(&verdict, Verdict::Ask { .. } | Verdict::Deny { .. }) {
             return Outcome {
                 ok: false,
                 summary: "действие остановлено политикой".into(),
