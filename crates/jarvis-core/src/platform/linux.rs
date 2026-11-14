@@ -1609,9 +1609,15 @@ pub fn window_control_checked(
         let wanted = app.unwrap_or_default();
         let mut hits = windows_matching(wanted);
         if hits.is_empty() {
-            return WindowControlOutcome::Done(format!(
-                "Приложение {wanted} не найдено среди открытых{}",
+            // На Wayland окна ищутся через Hyprland IPC: лекция про X11
+            // здесь вводит в заблуждение (живая жалоба из лога).
+            let why = if in_wayland_session() && command_exists("hyprctl") {
+                ""
+            } else {
                 wayland_limitation()
+            };
+            return WindowControlOutcome::Done(format!(
+                "Приложение {wanted} не найдено среди открытых{why}"
             ));
         }
         // «Верни окно»: если какие-то окна свёрнуты, выбор — только среди

@@ -3409,7 +3409,13 @@ pub fn tab_request_from_prompt(
         } else {
             "tab_close"
         }
+    } else if t.contains("предыдущ") && t.contains("вкладк") {
+        "tab_prev"
     } else if t.contains("переключи") || t.contains("следующ") {
+        "tab_next"
+    } else if t.contains("друг") && t.contains("вкладк") {
+        // «Перейди на другую вкладку» — живой случай: раньше уезжало в
+        // window focus несуществующего приложения.
         "tab_next"
     } else {
         return None;
@@ -4631,6 +4637,20 @@ mod tests {
         match tab_request_from_prompt("закрой все вкладки", fake_lookup) {
             Some(ToolCall::Window { action, .. }) => assert_eq!(action, "tab_close_all"),
             other => panic!("ждали tab_close_all, получили {other:?}"),
+        }
+        // «Перейди на другую вкладку» — переключение, не фокус чужого окна.
+        match tab_request_from_prompt("перейди на другую вкладку", fake_lookup) {
+            Some(ToolCall::Window { action, .. }) => assert_eq!(action, "tab_next"),
+            other => panic!("ждали tab_next, получили {other:?}"),
+        }
+        match tab_request_from_prompt("переключи на предыдущую вкладку", fake_lookup) {
+            Some(ToolCall::Window { action, .. }) => assert_eq!(action, "tab_prev"),
+            other => panic!("ждали tab_prev, получили {other:?}"),
+        }
+        // «Верни» без «закрытую» — по-прежнему восстановление закрытой.
+        match tab_request_from_prompt("верни закрытую вкладку", fake_lookup) {
+            Some(ToolCall::Window { action, .. }) => assert_eq!(action, "tab_restore"),
+            other => panic!("ждали tab_restore, получили {other:?}"),
         }
         // Не вкладки — не наша: «закрой окно» остаётся окном.
         assert!(tab_request_from_prompt("закрой окно телеграма", fake_lookup).is_none());

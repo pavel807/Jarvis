@@ -177,6 +177,46 @@ fn is_multi_intent(phrase: &str) -> bool {
         .any(|m| t.contains(m))
 }
 
+/// Вежливость и заполняющие слова: они не отличают команды.
+const TOKEN_STOP: &[&str] = &[
+    "пожалуйста", "давай", "давайте", "мне", "сэр", "джарвис", "ну", "вот",
+    "быстро", "сейчас", "ещё", "еще", "снова", "опять", "только",
+];
+
+/// Отличительные слова фразы: существительные, названия сайтов и
+/// приложений, числа. Глагол-обёртка («открой») тоже отличает действие.
+fn significant_tokens(phrase: &str) -> Vec<String> {
+    normalize(phrase)
+        .split(' ')
+        .filter(|w| {
+            !w.is_empty()
+                && !TOKEN_STOP.contains(w)
+                && (w.chars().any(|c| c.is_ascii_digit()) || w.chars().count() >= 5)
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// Ствол слова: первые 5 букв — склеивают падежи (вкладку/вкладки,
+/// музыка/музыку), не склеивают разные названия.
+fn stem_of(token: &str) -> String {
+    token.chars().take(5).collect()
+}
+
+/// Каждый отличительный токен заученной фразы обязан присутствовать в
+/// новой. Реальный случай без этой охраны: «открой вкладку яндекс» имела
+/// cosine 0.70 к заученному «...кинпоиск» — открылся Кинопоиск. У ютуба
+/// было 0.72: порогом это не лечится, лечение — совпадение объекта.
+fn stems_match(stored: &str, new: &str) -> bool {
+    let req = significant_tokens(stored);
+    if req.is_empty() {
+        return true;
+    }
+    let have: Vec<String> = significant_tokens(new);
+    req.iter()
+        .all(|r| have.iter().any(|h| stem_of(h) == stem_of(r)))
+}
+
 /// Запомнить успешное действие. `raw_tool_text` — сырой ответ модели с
 /// tool-блоком; при воспроизведении он разбирается тем же парсером.
 /// Возвращает true, если запись принята.
@@ -229,8 +269,13 @@ fn lookup_at(path: &std::path::Path, phrase: &str) -> Option<ToolCall> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let list = read_entries_at(path);
     let target = featurize(phrase);
+    // Охрана объекта: чужие сайты/приложения/числа не воспроизводятся,
+    // как бы близко ни казались по эмбеддингу.
     let mut best: Option<(f32, &Entry)> = None;
     for e in &list {
+        if !stems_match(&e.phrase, &norm) {
+            continue;
+        }
         let s = cosine(&target, &e.vec);
         if best.map(|(b, _)| s > b).unwrap_or(true) {
             best = Some((s, e));
@@ -313,5 +358,28 @@ mod tests {
         assert!(matches!(call, ToolCall::OpenApp { .. }));
         // Несвязанная фраза — отказ памяти (пойдёт обычным путём).
         assert!(lookup_at(&file, "поставь будильник на восемь").is_none());
+
+        // Живая жалоба: «открой вкладку яндекс» имела 0.70 к заученному
+        // «открой вкладку кинопоиск» — открылся чужой сайт. Объект
+        // (название сайта) обязан совпадать, как бы близко ни было.
+        let mut sites = temp_dir("sites");
+        sites.push("learned_commands.json");
+        assert!(remember_at(
+            &sites,
+            "открой вкладку кинопоиск",
+            r#"<tool>{"name":"open_url","args":{"url":"https://www.kinopoisk.ru"}}</tool>"#,
+        ));
+        assert!(lookup_at(&sites, "открой вкладку яндекс").is_none());
+        assert!(lookup_at(&sites, "открой вкладку ютуб").is_none());
+        // Числа тоже отличительные: стол 2 не воспроизводится за стол 3.
+        let mut desks = temp_dir("desks");
+        desks.push("learned_commands.json");
+        assert!(remember_at(
+            &desks,
+            "открой стол 2",
+            r#"<tool>{"name":"window","args":{"action":"desktop","desktop":"2"}}</tool>"#,
+        ));
+        assert!(lookup_at(&desks, "открой стол 3").is_none());
+        assert!(lookup_at(&desks, "открой стол 2").is_some());
     }
 }
