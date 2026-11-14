@@ -1907,6 +1907,33 @@ mod tests {
     }
 
     #[test]
+    fn planner_opens_new_tab_without_llm_in_any_word_order() {
+        // Реальный лог: «Открой вкладку в браузере новую» уходило в LLM
+        // (падавший с 401) — порядок слов не мешает: сравниваются слова,
+        // а не подстрока. Названия сайтов не покрыты — они для LLM.
+        for phrase in [
+            "открой новую вкладку браузера",
+            "открой вкладку в браузере новую",
+            "открой вкладку в браузере",
+            "еще одну вкладку пожалуйста",
+            "новая вкладка",
+        ] {
+            match plan(phrase) {
+                Some(crate::tools::ToolCall::Window { action, app, .. }) => {
+                    assert_eq!(action, "tab_new", "{phrase}");
+                    assert_eq!(app.as_deref(), Some("активное"), "{phrase}");
+                }
+                other => panic!("{phrase}: ждали tab_new, получили {other:?}"),
+            }
+        }
+        // С названием сайта — не быстрый путь: сайт знает LLM/память.
+        assert!(matches!(
+            plan("открой вкладку яндекс"),
+            Some(crate::tools::ToolCall::OpenUrl { .. })
+        ) || plan("открой вкладку яндекс").is_none());
+    }
+
+    #[test]
     fn planner_minimizes_all_windows_not_own_window() {
         // Реальная жалоба: «сверни все окна» сворачивало окно Джарвиса,
         // потому что app=None означало «своё».
