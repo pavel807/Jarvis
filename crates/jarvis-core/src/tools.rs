@@ -4224,7 +4224,10 @@ pub fn glob_in_path(root: &str, pattern: &str) -> std::io::Result<String> {
 }
 
 fn home_dir() -> Option<String> {
-    std::env::var("HOME").ok()
+    // Windows не задаёт HOME — там дом USERPROFILE (как в paths.rs).
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| h.to_string_lossy().to_string())
 }
 
 pub(crate) fn temp_path(filename: &str) -> String {
@@ -5312,20 +5315,27 @@ mod tests {
     fn resolve_path_uses_cwd_and_home() {
         // Глобальную рабочую директорию не трогаем: тесты идут параллельно,
         // и подмена общего состояния ломала бы соседние проверки.
-        let base = "/tmp/jarvis-base";
+        // Сравниваем через Path: разделители на Windows свои.
+        use std::path::Path;
+        let base = std::env::temp_dir().join("jarvis-resolve-test");
+        let base_s = base.to_string_lossy().to_string();
         assert_eq!(
-            resolve_path_from("note.txt", base),
-            "/tmp/jarvis-base/note.txt"
+            Path::new(&resolve_path_from("note.txt", &base_s)),
+            base.join("note.txt")
         );
         assert_eq!(
-            resolve_path_from("src/main.rs", base),
-            "/tmp/jarvis-base/src/main.rs"
+            Path::new(&resolve_path_from("src/main.rs", &base_s)),
+            base.join("src").join("main.rs")
         );
-        // Абсолютный путь не трогаем.
-        assert_eq!(resolve_path_from("/etc/hosts", base), "/etc/hosts");
+        // Абсолютный путь не трогаем (на Windows абсолютный — с диском).
+        let abs = if cfg!(windows) { "C:\\Windows" } else { "/etc/hosts" };
+        assert_eq!(
+            Path::new(&resolve_path_from(abs, &base_s)),
+            Path::new(abs)
+        );
         // `~` разворачивается до домашнего каталога, а не до базы.
-        let home = resolve_path_from("~/Documents", base);
-        assert!(!home.starts_with('~') && !home.starts_with(base), "{home}");
+        let home = resolve_path_from("~/Documents", &base_s);
+        assert!(!home.starts_with('~') && !home.starts_with(&base_s), "{home}");
     }
 
     #[test]
