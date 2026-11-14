@@ -1,6 +1,6 @@
 [package]
 name = "spark"
-version = "0.4.0"
+version = "6.1.0"
 edition = "2024"
 description = "Spark Lang: скриптовый язык с питон-like синтаксисом, компиляция в Rust. Вендор из github.com/pavel807/Spark"
 license = "MIT"

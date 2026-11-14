@@ -417,6 +417,17 @@ pub fn window_control(action: &str, app: Option<&str>) -> String {
     }
 }
 
+/// Заголовок переднего окна: для подтверждения вкладочных хоткеев.
+/// Нет Универсального доступа — None, подтверждение честно отложится.
+fn mac_front_window_title() -> Option<String> {
+    osascript(
+        r#"tell application "System Events" to get name of front window of (first application process whose frontmost is true)"#,
+    )
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+}
+
 /// Оконная команда без молчаливого выбора первого окна.
 /// Категорий .desktop на macOS нет: терминал ищется по именам (запасной
 /// путь в mod.rs).
@@ -435,13 +446,24 @@ pub fn window_control_checked(
         return WindowControlOutcome::Done(window_list());
     }
 
-    // Столы, раскладка и вкладки браузера — пока только Hyprland на Linux.
+    // Вкладки браузера — клавиатура активному приложению (Cmd+W/T…),
+    // оконная система не нужна: кроссплатформенно через хоткеи.
     let (verb, _) = action.trim().split_once(' ').unwrap_or((action.trim(), ""));
     if matches!(
         verb,
+        "tab_close" | "tab_close_all" | "tab_restore" | "tab_next" | "tab_prev" | "tab_new"
+    ) {
+        return WindowControlOutcome::Done(super::tab_action_via_hotkey(
+            verb,
+            &mac_front_window_title,
+        ));
+    }
+
+    // Столы и раскладка окон — пока только Hyprland на Linux.
+    if matches!(
+        verb,
         "desktop" | "minimizeall" | "movetodesktop" | "half_left" | "half_right"
-        | "tab_close" | "tab_close_all" | "tab_restore" | "tab_next" | "tab_prev"
-        | "tab_new" | "desktop_next" | "desktop_prev" | "window_next" | "window_prev"
+        | "desktop_next" | "desktop_prev" | "window_next" | "window_prev"
     ) {
         return WindowControlOutcome::Done(
             "Столы и раскладку окон я пока умею только на Hyprland (Linux)".to_string(),

@@ -142,7 +142,7 @@
     <div class="row-item">
       <span class="row-item__icon"><AppIcon name="info" size={16} /></span>
       <span class="row-item__text">
-        <span class="row-item__title">{name} 0.2 · Mark V</span>
+        <span class="row-item__title">{name} 6.1 · Mark V</span>
         <span class="row-item__hint">
           Голосовой ассистент: речь распознаётся и синтезируется локально.
           Ответы готовит модель на выбор — локальная на диске или облачная

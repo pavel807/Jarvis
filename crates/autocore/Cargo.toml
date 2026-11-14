@@ -1,6 +1,6 @@
 [package]
 name = "autocore"
-version = "0.1.0"
+version = "6.1.0"
 edition = "2024"
 description = "Ядро автопилота десктопа: наблюдает интерфейс через accessibility-API, действует как человек, проверяет результат. Без LLM и скриншотов в основном цикле."
 license = "MIT"

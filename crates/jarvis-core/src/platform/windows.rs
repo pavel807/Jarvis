@@ -120,6 +120,20 @@ $hit=@($procs | Where-Object { $p=$_; $pn=$p.ProcessName.ToLower(); $tt=(''+$p.M
 // Win32: общий заголовок P/Invoke для окон
 // =========================================================================
 
+/// Заголовок переднего окна: подтверждение вкладочных хоткеев.
+fn windows_front_window_title() -> Option<String> {
+    let script = r#"
+Add-Type -Namespace JT -Name W -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder t, int c);' | Out-Null
+$h=[JT.W]::GetForegroundWindow();
+if ($h -eq [IntPtr]::Zero) { '' }
+else { $b=New-Object System.Text.StringBuilder 512; [void][JT.W]::GetWindowText($h,$b,512); $b.ToString() }
+"#;
+    ps_run(script)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 const WIN32_HEADER: &str = r#"
 Add-Type @'
 using System;
@@ -585,6 +599,15 @@ fn window_list() -> String {
 pub fn window_control(action: &str, app: Option<&str>) -> String {
     if action == "list" {
         return window_list();
+    }
+    // Вкладки браузера — клавиатура активному окну (Ctrl+W/T…),
+    // оконная система не нужна: кроссплатформенно через SendInput.
+    let (verb, _) = action.trim().split_once(' ').unwrap_or((action.trim(), ""));
+    if matches!(
+        verb,
+        "tab_close" | "tab_close_all" | "tab_restore" | "tab_next" | "tab_prev" | "tab_new"
+    ) {
+        return super::tab_action_via_hotkey(verb, &windows_front_window_title);
     }
     if sw_flag(action).is_none() && action != "close" && action != "focus" {
         return format!("Не могу выполнить действие с окном: {action}");

@@ -101,6 +101,66 @@ pub const COMMON_ALIASES: &[(&str, &str)] = &[
     ("дэвинсинк", "DaVinci Resolve"),
 ];
 
+/// Сочетание вкладочной команды: клавиатура активному приложению,
+/// не оконная система. Ctrl-вариант — универсальный; macOS «Command»
+/// подставляет нормализация ключей (cmd → super → cliclick cmd).
+pub(crate) fn tab_hotkey(verb: &str) -> &'static [&'static str] {
+    match verb {
+        "tab_close" => &["CTRL", "W"],
+        "tab_close_all" => &["CTRL", "SHIFT", "W"],
+        "tab_restore" => &["CTRL", "SHIFT", "T"],
+        "tab_new" => &["CTRL", "T"],
+        "tab_next" => &["CTRL", "TAB"],
+        _ => &["CTRL", "SHIFT", "TAB"],
+    }
+}
+
+/// Вкладка — хоткей активному приложению + подтверждение сменой заголовка
+/// переднего окна. Кроссплатформенно: механизм хоткеев платформенный
+/// (macOS cliclick, Windows SendInput), Hyprland не требуется.
+/// `title` — платформовый читатель заголовка переднего окна.
+#[allow(dead_code)] // на Linux вкладки идут через Hyprland, helper не зовётся
+pub(crate) fn tab_action_via_hotkey(verb: &str, title: &dyn Fn() -> Option<String>) -> String {
+    use crate::platform::desktop::{self, DesktopAction};
+
+    let before = title();
+    let keys: Vec<String> = tab_hotkey(verb).iter().map(|s| s.to_string()).collect();
+    if let Err(e) = desktop::execute(&DesktopAction::Hotkey { keys }) {
+        return format!("Не смог отправить сочетание клавиш: {e}");
+    }
+    // Подтверждение следствием — заголовок переднего окна (как на Linux).
+    let mut now: Option<String> = None;
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        now = title();
+        if now.is_some() && now != before {
+            let open = now.clone().unwrap_or_default();
+            return match verb {
+                "tab_close" => format!("Закрыл вкладку — теперь открыта «{open}»"),
+                "tab_restore" => format!("Вернул закрытую вкладку — открылась «{open}»"),
+                "tab_new" => format!("Открыл новую вкладку «{open}»"),
+                _ => format!("Переключил вкладку — открыта «{open}»"),
+            };
+        }
+    }
+    // Открытие вкладки может не менять заголовок: активная вкладка уже
+    // «Новая вкладка» (проверено живьём на Chromium).
+    if verb == "tab_new"
+        && let Some(t) = &before
+    {
+        let l = t.to_lowercase();
+        if l.contains("новая вкладка") || l.contains("new tab") {
+            return format!("Открыл новую вкладку в {t}");
+        }
+    }
+    if before.is_none() && now.is_none() {
+        // Заголовок не читается (например, не выдан Универсальный доступ) —
+        // сочетание доставлено, но подтвердить нечем: честно и без выдумок.
+        return "Отправил сочетание активному приложению — не смог прочитать заголовок окна, чтобы подтвердить".to_string();
+    }
+    "Вкладка не изменилась: окно на месте, заголовок прежний".to_string()
+}
+
 /// Просьба открыть терминал («терминал», «консоль», «командная строка»).
 /// Терминал нельзя маппить на одно имя приложения: на разных системах
 /// это foot, kitty, alacritty, Terminal… Поэтому просьба — категория,
