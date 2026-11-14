@@ -21,10 +21,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Node 20
-        uses: actions/setup-node@v4
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: "20"
+          bun-version: "1.4.3"
 
       # Зависимости Tauri/Linux: webkit2gtk и GTK нужны для сборки jarvis-app.
       - name: Install Linux system deps
@@ -47,11 +47,13 @@ jobs:
 
       # Фронтенд собирается ДО cargo: tauri::generate_context! встраивает
       # содержимое app/dist при компиляции jarvis-app.
+      # Bun вместо npm: npm ci на GitHub-раннерах регулярно падает с
+      # ECONNRESET, bun ставит зависимости из bun.lock быстрее и надёжнее.
       - name: Build frontend
         working-directory: app
         run: |
-          npm ci
-          npm run build
+          bun install --frozen-lockfile
+          bun run build
 
       - name: Build workspace
         run: cargo build --workspace --locked

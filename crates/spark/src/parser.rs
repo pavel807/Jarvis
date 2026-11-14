@@ -491,33 +491,25 @@ impl Parser {
     }
 
     fn parse_block(&mut self) -> Vec<Stmt> {
+        // Границы блока — Indent/Dedent (их вливает parse_source).
+        // Внутри блока допускаются вложенные блоки любой глубины.
         let mut statements = Vec::new();
         while !self.is_at_end() {
             match self.peek() {
-                Some(Token::Return) => {
-                    statements.push(self.parse_return());
-                    break;
-                }
-                Some(Token::Else) | Some(Token::Elif) => {
-                    break;
-                }
-                Some(Token::Newline) => {
+                // return — обычный оператор: после него в блоке могут быть
+                // ещё строки, а Dedent честно закроет блок. Прежний break
+                // здесь съедал Dedent, и хвост функции уезжал наружу.
+                Some(Token::Else) | Some(Token::Elif) => break,
+                Some(Token::Newline) | Some(Token::Indent) => {
                     self.advance();
-                    if statements.len() == 0 {
-                        continue;
-                    }
-                    if let Some(Token::Else) | Some(Token::Elif) = self.peek() {
-                        break;
-                    }
                 }
-                Some(Token::Def) | Some(Token::For) | Some(Token::While) | Some(Token::If) => {
+                Some(Token::Dedent) => {
+                    self.advance();
                     break;
                 }
                 _ => {
                     if let Some(stmt) = self.parse_statement() {
                         statements.push(stmt);
-                    } else if self.peek() == Some(Token::Newline) {
-                        self.advance();
                     } else {
                         break;
                     }

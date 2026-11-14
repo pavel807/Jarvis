@@ -182,4 +182,11 @@ pub enum Token {
 
     #[regex(r"\n|(\r\n)")]
     Newline,
+
+    /// Отступы в токены вливает parse_source: сам лексер их пропускает.
+    /// Паттерны недостижимы в исходниках — служебные символы \u{1}.
+    #[token("\u{1}SPARK-INDENT")]
+    Indent,
+    #[token("\u{1}SPARK-DEDENT")]
+    Dedent,
 }

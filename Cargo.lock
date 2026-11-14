@@ -7355,7 +7355,7 @@ dependencies = [
 
 [[package]]
 name = "spark"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "logos 0.16.1",
  "tempfile",

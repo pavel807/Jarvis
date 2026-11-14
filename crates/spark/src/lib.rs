@@ -7,6 +7,8 @@
 
 pub mod ast;
 pub mod codegen;
+pub mod interp;
+pub mod prelude;
 pub mod lexer;
 pub mod parser;
 
@@ -21,8 +23,63 @@ pub fn parse_source(source: &str) -> Result<Vec<ast::Stmt>, String> {
         let line = source[..span.start].bytes().filter(|b| *b == b'\n').count() + 1;
         tokens.push(res.map_err(|_| format!("строка {line}: не понял символ"))?);
     }
+    let tokens = inject_indents(source, tokens)?;
     let mut parser = parser::Parser::new(tokens);
     Ok(parser.parse())
+}
+
+/// Отступы в токены: лексер пропускает пробелы, поэтому границы блоков для
+/// него невидимы — раньше блок `for`/`while` «глотал» все строки после себя
+/// до первой строки, начинающейся с def/for/while/if. По первому токену
+/// каждой строки вычисляем отступ и вставляем Indent/Dedent, как в Python.
+/// Пустые строки и строки-комментарии отступ не меняют.
+pub(crate) fn inject_indents(
+    source: &str,
+    tokens: Vec<lexer::Token>,
+) -> Result<Vec<lexer::Token>, String> {
+    let mut out = Vec::with_capacity(tokens.len() + 16);
+    let mut stack: Vec<usize> = vec![0];
+    let mut spans = lexer::Token::lexer(source).spanned();
+    for token in tokens {
+        let span = match spans.next() {
+            Some((Ok(_), span)) => span,
+            _ => break,
+        };
+        if !matches!(token, lexer::Token::Newline) {
+            let line_start = source[..span.start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let leading = &source[line_start..span.start];
+            // Пустой leading = токен в колонке 0: это тоже отступ (Dedent).
+            // Токен в середине строки окружён не-пробелами — его пропускаем.
+            if leading.bytes().all(|b| b == b' ' || b == b'\t') {
+                let col: usize = leading
+                    .bytes()
+                    .map(|b| if b == b'\t' { 4 } else { 1 })
+                    .sum();
+                let top = *stack.last().unwrap_or(&0);
+                if col > top {
+                    stack.push(col);
+                    out.push(lexer::Token::Indent);
+                } else if col < top {
+                    while *stack.last().unwrap_or(&0) > col {
+                        stack.pop();
+                        out.push(lexer::Token::Dedent);
+                    }
+                    if *stack.last().unwrap_or(&0) != col {
+                        return Err(format!(
+                            "строка {}: отступ не сходится с предыдущими блоками",
+                            source[..span.start].bytes().filter(|b| *b == b'\n').count() + 1
+                        ));
+                    }
+                }
+            }
+        }
+        out.push(token);
+    }
+    while stack.len() > 1 {
+        stack.pop();
+        out.push(lexer::Token::Dedent);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -115,6 +172,79 @@ mod tests {
         }
     }
 
+    /// Прогнать скрипт интерпретатором: рантайм без rustc.
+    fn run(script: &str, args: &[&str]) -> Result<(Vec<String>, Vec<String>), String> {
+        let ast = parse_source(script)?;
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        interp::interpret(&ast, &args)
+            .map(|out| (out.say, out.prints))
+    }
+
+    #[test]
+    fn interpreter_runs_plugin_subset() {
+        // Ветки, аргументы, методы, конкатенация.
+        let (say, _) = run(
+            "т = arg(1)\nif т == \"\":\n    say(\"пусто\")\nelif т == \"мир\":\n    say(\"мир-мир\")\nelse:\n    say(\"привет \" + т.upper())\n",
+            &["Павел"],
+        )
+        .unwrap();
+        assert_eq!(say, vec!["привет ПАВЕЛ".to_string()]);
+        let (say, _) = run(
+            "т = arg(1)\nif т == \"\":\n    say(\"пусто\")\nelif т == \"мир\":\n    say(\"мир-мир\")\nelse:\n    say(\"другое\")\n",
+            &["мир"],
+        )
+        .unwrap();
+        assert_eq!(say, vec!["мир-мир".to_string()]);
+    }
+
+    #[test]
+    fn interpreter_loops_and_functions() {
+        // for с break/else, while, рекурсия, значения по умолчанию.
+        let (say, prints) = run(
+            "for i in [1, 2, 3]:\n    if i == 3:\n        break\n    print(i)\n\ndef сумма(a, b=0):\n    if a <= 0:\n        return b\n    return сумма(a - 1, b + a)\n\nprint(сумма(4))\nsay(\"готово\")\n",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(prints, vec!["1".to_string(), "2".to_string(), "10".to_string()]);
+        assert_eq!(say, vec!["готово".to_string()]);
+        // Блок for не глотает строки после себя: dedent-границы.
+        let (_, prints) = run("for i in [1, 2]:\n    print(i)\nprint(\"хвост\")\n", &[]).unwrap();
+        assert_eq!(prints, vec!["1", "2", "хвост"]);
+    }
+
+    #[test]
+    fn interpreter_builtins_and_os_automation() {
+        let (say, _) = run("say(\"заряд \" + battery() + \"%\")", &[]).unwrap();
+        assert!(say[0].starts_with("заряд "), "{say:?}");
+        // Буфер обмена зависит от окружения (wl-paste без Wayland пуст):
+        // для теста обход через файлы — те же built-ins.
+        let tmp = std::env::temp_dir().join(format!("spark-interp-{}", std::process::id()));
+        let tmps = tmp.to_string_lossy().to_string();
+        let (say, _) = run(
+            &format!("write_file(\"{tmps}\", \"тест\")\nsay(\"файл: \" + read_file(\"{tmps}\"))"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(say[0], "файл: тест");
+        let _ = std::fs::remove_file(&tmp);
+        // range и len и in.
+        let (_, prints) = run("for i in range(3):\n    print(i)\nprint(\"ab\".len())\nprint(\"оп\" in \"снегопад\")", &[]).unwrap();
+        assert_eq!(prints, vec!["0", "1", "2", "2", "True"]);
+    }
+
+    #[test]
+    fn interpreter_try_except_and_honest_gaps() {
+        let (say, _) = run(
+            "try:\n    x = 1 / 0\nexcept:\n    say(\"поймала\")\n",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(say, vec!["поймала".to_string()]);
+        // Словари и классы честно требуют rustc, а не молча ломаются.
+        assert!(run("d = {\"a\": 1}\n", &[]).is_err());
+        assert!(run("class Точка:\n    x = 1\n", &[]).is_err());
+    }
+
     #[test]
     fn generated_os_plugin_code_is_valid_rust() {
         // Полный мини-плагин: сгенерированный код должен компилироваться
@@ -128,7 +258,7 @@ mod tests {
         let rs = dir.join("plugin.rs");
         std::fs::write(&rs, &rust).unwrap();
         let out = std::process::Command::new("rustc")
-            .arg("--edition").arg("2021")
+            .arg("--edition").arg("2024")
             .arg("--crate-name").arg("plugin")
             .arg("--emit").arg("metadata")
             .arg(rs.to_str().unwrap())
@@ -143,3 +273,4 @@ mod tests {
         );
     }
 }
+

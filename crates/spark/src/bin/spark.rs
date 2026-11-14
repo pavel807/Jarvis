@@ -105,7 +105,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        println!("Использование: spark <файл.sk> [-o выходной_файл] [--run] [--release[=1|2|3] | --dev[=1|2|3]]");
+        println!("Использование: spark <файл.sk> [-o выходной_файл] [--run] [--interpret] [--release[=1|2|3] | --dev[=1|2|3]]");
         return;
     }
 
@@ -124,6 +124,7 @@ fn main() {
         .to_string_lossy()
         .to_string();
     let mut should_run = false;
+    let mut force_interpret = false;
     let mut opt_level = 1;
 
     for i in 1..args.len() {
@@ -132,6 +133,9 @@ fn main() {
         }
         if args[i] == "--run" {
             should_run = true;
+        }
+        if args[i] == "--interpret" {
+            force_interpret = true;
         }
         if args[i].starts_with("--release") || args[i] == "-r" {
             opt_level = 3;
@@ -145,12 +149,16 @@ fn main() {
 
     let source = fs::read_to_string(input_file).expect("❌ Файл не найден");
 
-    let tokens: Vec<lexer::Token> = lexer::Token::lexer(&source)
-        .map(|res| res.expect("Ошибка лексера"))
-        .collect();
-
-    let mut parser = parser::Parser::new(tokens);
-    let ast = parser.parse();
+    // parse_source вливает отступы в токены (границы блоков) — лексер
+    // сам их пропускает. Раньше CLI лексировал напрямую и блоки
+    // for/while «глотали» всё после себя до конца файла.
+    let ast = match spark::parse_source(&source) {
+        Ok(ast) => ast,
+        Err(e) => {
+            eprintln!("❌ Ошибка разбора: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let resolved = match resolve_imports(ast, input_file) {
         Ok(ast) => ast,
@@ -160,6 +168,52 @@ fn main() {
         }
     };
 
+    let rustc_ok = std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if force_interpret || !rustc_ok {
+        // Без rustc язык обязан работать: интерпретатор выполняет тот же AST.
+        if force_interpret {
+            println!("🧩 Режим интерпретатора (--interpret)");
+        } else {
+            println!("🧩 rustc не найден — запускаю интерпретатором (без компиляции)");
+        }
+        // Аргументы скрипта — всё после имени файла, кроме флагов CLI
+        // (и значения после -o).
+        let mut script_args: Vec<String> = Vec::new();
+        let mut skip_next = false;
+        for a in args.iter().skip(2) {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if a == "-o" {
+                skip_next = true;
+                continue;
+            }
+            if a.starts_with('-') {
+                continue;
+            }
+            script_args.push(a.clone());
+        }
+        match spark::interp::interpret(&resolved, &script_args) {
+            Ok(out) => {
+                for line in out.prints {
+                    println!("{line}");
+                }
+                for line in out.say {
+                    println!("SAY: {line}");
+                }
+            }
+            Err(e) => {
+                eprintln!("❌ Ошибка исполнения: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if let Err(e) = codegen::compile_to_binary(resolved, &output_name, opt_level) {
         eprintln!("❌ Ошибка компиляции:\n{e}");
         std::process::exit(1);

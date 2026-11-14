@@ -174,14 +174,39 @@ pub fn mic_request_access() -> &'static str {
     mic_permission::request_access()
 }
 
+/// На Linux системного диалога доступа нет: «разрешён» = есть устройство
+/// ввода. Запрос доступа — та же проверка: спрашивать нечего, кроме
+/// наличия самого микрофона.
 #[cfg(not(target_os = "macos"))]
 pub fn mic_status() -> &'static str {
-    "unknown"
+    mic_probe()
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn mic_request_access() -> &'static str {
-    "unknown"
+    mic_probe()
+}
+
+/// Есть ли микрофон: pactl (PipeWire/PulseAudio), исключая источники
+/// `.monitor` — это петля вывода, а не вход. Отсутствие pactl — «не
+/// удалось определить», не ложное «разрешён».
+#[cfg(not(target_os = "macos"))]
+fn mic_probe() -> &'static str {
+    let Ok(out) = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("pactl list sources short 2>/dev/null")
+        .output()
+    else {
+        return "unknown";
+    };
+    let has_mic = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|l| !l.trim().is_empty() && !l.contains(".monitor"));
+    if has_mic {
+        "authorized"
+    } else {
+        "unknown"
+    }
 }
 
 pub fn calculate_rms(samples: &[f32]) -> f32 {

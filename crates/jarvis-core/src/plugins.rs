@@ -149,6 +149,12 @@ fn compile(source: &str, _file: &Path) -> Result<PathBuf, String> {
         Ok(Err(e)) => return Err(e),
         Err(_) => return Err("не разобрал исходник (синтаксическая ошибка)".into()),
     };
+    // Без rustc язык обязан работать: плагин пойдёт через интерпретатор
+    // (пустой binary — признак). Разбор исходника всё равно обязателен:
+    // сломанный плагин честно помечается ошибкой.
+    if !rustc_available() {
+        return Ok(PathBuf::new());
+    }
     let cache = paths::plugins_cache_dir();
     std::fs::create_dir_all(&cache).map_err(|e| format!("не создать кэш плагинов: {e}"))?;
     let binary = cache.join(format!("{:016x}.bin", source_hash(source)));
@@ -160,7 +166,7 @@ fn compile(source: &str, _file: &Path) -> Result<PathBuf, String> {
     std::fs::write(&rs_path, &rust_code)
         .map_err(|e| format!("не записать генерацию: {e}"))?;
     let out = std::process::Command::new("rustc")
-        .args(["-C", "opt-level=2"])
+        .args(["--edition", "2024", "-C", "opt-level=2"])
         .arg(&rs_path)
         .arg("-o")
         .arg(&binary)
@@ -183,6 +189,72 @@ fn compile(source: &str, _file: &Path) -> Result<PathBuf, String> {
         });
     }
     Ok(binary)
+}
+
+/// Есть ли rustc: компиляция плагинов требует тулчейна. Нет — плагины
+/// работают через интерпретатор Spark, язык не ломается.
+fn rustc_available() -> bool {
+    std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Выполнить плагин интерпретатором без компиляции: тот же протокол,
+/// что у бинарника (SAY: → озвучка). В потоке с таймаутом: зависший
+/// плагин не должен подвесить ассистента.
+fn run_interpreted(source: &Path, argv: &[String], timeout: std::time::Duration) -> PluginRun {
+    let source = source.to_path_buf();
+    let argv = argv.to_vec();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = (|| -> Result<(Option<String>, String), String> {
+            let text = std::fs::read_to_string(&source)
+                .map_err(|e| format!("не прочитать исходник: {e}"))?;
+            let parsed = std::panic::catch_unwind(|| spark::parse_source(&text));
+            let ast = match parsed {
+                Ok(Ok(ast)) => ast,
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err("не разобрал исходник (синтаксическая ошибка)".into()),
+            };
+            let out = spark::interp::interpret(&ast, &argv)?;
+            let speech = out.say.last().cloned();
+            let mut detail = out.prints.join("\n");
+            if out.say.len() > 1 {
+                if !detail.is_empty() {
+                    detail.push('\n');
+                }
+                detail.push_str(&out.say[..out.say.len() - 1].join("\n"));
+            }
+            Ok((speech, detail))
+        })();
+        let _ = tx.send(outcome);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok((speech, detail))) => PluginRun {
+            ok: true,
+            speech,
+            detail: if detail.is_empty() {
+                "плагин выполнен интерпретатором".into()
+            } else {
+                detail
+            },
+            timed_out: false,
+        },
+        Ok(Err(e)) => PluginRun {
+            ok: false,
+            speech: None,
+            detail: e,
+            timed_out: false,
+        },
+        Err(_) => PluginRun {
+            ok: false,
+            speech: None,
+            detail: "плагин не уложился в таймаут — остановлен".into(),
+            timed_out: true,
+        },
+    }
 }
 
 /// Загрузить все плагины из каталогов: скан, разбор шапки, компиляция
@@ -417,6 +489,9 @@ pub fn execute(tool: &str, args: &serde_json::Value) -> PluginRun {
         };
     }
     let argv = argv_from(args);
+    if plugin.binary.as_os_str().is_empty() {
+        return run_interpreted(&plugin.source, &argv, std::time::Duration::from_secs(30));
+    }
     run_binary(&plugin.binary, &argv, std::time::Duration::from_secs(30))
 }
 
@@ -486,6 +561,26 @@ mod tests {
         assert_eq!(argv_from(&v), vec!["одно"]);
         let v: serde_json::Value = serde_json::from_str(r#"{}"#).unwrap();
         assert!(argv_from(&v).is_empty());
+    }
+
+    #[test]
+    fn interpreted_plugin_runs_without_rustc() {
+        let dir = tempfile::tempdir().unwrap();
+        let sk = dir.path().join("т.sk");
+        std::fs::write(
+            &sk,
+            "т = arg(1)\nif т == \"\":\n    say(\"пусто\")\nelse:\n    say(\"привет \" + т)\n",
+        )
+        .unwrap();
+        let run = run_interpreted(
+            &sk,
+            &["мир".to_string()],
+            std::time::Duration::from_secs(5),
+        );
+        assert!(run.ok, "{}", run.detail);
+        assert_eq!(run.speech.as_deref(), Some("привет мир"));
+        let empty = run_interpreted(&sk, &[], std::time::Duration::from_secs(5));
+        assert_eq!(empty.speech.as_deref(), Some("пусто"));
     }
 
     #[test]

@@ -670,6 +670,7 @@ fn tts_test(shared: State<'_, Arc<Shared>>, text: String, voice: Option<String>)
 /// Начиная с Ventura Настройки переписаны: старый путь панели молча не
 /// открывается, поэтому пробуем новый адрес, затем старый, затем само
 /// приложение.
+#[cfg(target_os = "macos")]
 fn open_mic_pane() -> Result<(), String> {
     let urls = [
         "x-apple.systempreferences:com.apple.settings.privacy?Privacy_Microphone",
@@ -681,6 +682,17 @@ fn open_mic_pane() -> Result<(), String> {
         }
     }
     open::that("/System/Applications/System Settings.app").map_err(|e| e.to_string())
+}
+
+/// На Linux системного запроса доступа к микрофону нет: доступ не
+/// ограничивается. Кнопка «Открыть настройки» честно об этом говорит —
+/// молча делать вид, что открыли, нельзя.
+#[cfg(not(target_os = "macos"))]
+fn open_mic_pane() -> Result<(), String> {
+    Err(
+        "На Linux доступ к микрофону системой не ограничивается — проверьте устройство ввода в настройках звука"
+            .to_string(),
+    )
 }
 
 /// Открывает панель «Конфиденциальность → Микрофон» в Системных настройках —

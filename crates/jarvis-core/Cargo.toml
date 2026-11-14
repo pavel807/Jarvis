@@ -70,6 +70,10 @@ candle-nn = { workspace = true}
 atspi = { version = "0.30", default-features = true, features = ["tokio", "zbus"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows считает на CPU, как Linux: без этого speakrs падает на сборке
+# с «needs an inference backend».
+speakrs = { workspace = true, features = ["cpu"] }
 
 [dev-dependencies]
 tempfile = "3"

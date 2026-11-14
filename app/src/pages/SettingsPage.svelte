@@ -64,11 +64,20 @@
     }
   }
 
+  // Вебвью сообщает платформу в UA: «Mac» — macOS, иначе Linux/Windows.
+  const IS_MAC = /Mac/.test(navigator.userAgent);
+
   const MIC_STATUS_TEXT: Record<MicStatus, string> = {
     authorized: "Разрешён — Джарвис слышит вас",
-    denied: "Запрещён macOS — включите вручную в Системных настройках",
-    pending: "Ждёт ответа на системный запрос",
-    unknown: "Не удалось определить",
+    denied: IS_MAC
+      ? "Запрещён macOS — включите вручную в Системных настройках"
+      : "Заблокирован — проверьте настройки звука и устройство ввода",
+    pending: IS_MAC
+      ? "Ждёт ответа на системный запрос"
+      : "Микрофон занят другим приложением",
+    unknown: IS_MAC
+      ? "Не удалось определить"
+      : "Микрофон не найден — проверьте подключение устройства ввода",
   };
 
   const micStatusText = $derived(MIC_STATUS_TEXT[micStatus]);
@@ -92,7 +101,12 @@
       } else if (status === "authorized") {
         toast("Доступ к микрофону уже разрешён", "ok");
       } else if (status === "denied") {
-        toast("Повторный запрос macOS не показывает — включите в настройках", "err");
+        toast(
+          IS_MAC
+            ? "Повторный запрос macOS не показывает — включите в настройках"
+            : "Запрос не удался — проверьте настройки звука",
+          "err",
+        );
       } else {
         toast("Статус определить не удалось", "err");
       }
@@ -467,14 +481,18 @@
         <button class="row-item" disabled={micBusy} onclick={requestMic}>
           <span class="row-item__text">
             <span class="row-item__title">Запросить доступ</span>
-            <span class="row-item__hint">Показать системный запрос macOS ещё раз</span>
+            <span class="row-item__hint">{IS_MAC
+              ? "Показать системный запрос macOS ещё раз"
+              : "На Linux отдельного разрешения не нужно — проверим микрофон"}</span>
           </span>
           <span class="row-item__chevron"><AppIcon name="mic" size={15} /></span>
         </button>
         <button class="row-item" onclick={openMicSettings}>
           <span class="row-item__text">
-            <span class="row-item__title">Открыть Системные настройки</span>
-            <span class="row-item__hint">Конфиденциальность и безопасность → Микрофон</span>
+            <span class="row-item__title">{IS_MAC ? "Открыть Системные настройки" : "Открыть настройки звука"}</span>
+            <span class="row-item__hint">{IS_MAC
+              ? "Конфиденциальность и безопасность → Микрофон"
+              : "Уровни ввода и выбор устройства"}</span>
           </span>
           <span class="row-item__chevron"><AppIcon name="gear" size={15} /></span>
         </button>
