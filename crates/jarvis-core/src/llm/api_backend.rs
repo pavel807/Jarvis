@@ -162,7 +162,11 @@ impl ApiEngine {
             "max_tokens": 8,
             "temperature": 0.0,
         });
-        let agent = llm_agent();
+        let agent = if self.preset == "gigachat" {
+            gigachat_agent()
+        } else {
+            llm_agent()
+        };
         let response = agent
             .post(&url)
             .header("Authorization", &self.auth_header(false)?)
@@ -239,7 +243,13 @@ impl ApiEngine {
         let url = format!("{}/chat/completions", self.base_url);
         on_progress("запрос…");
 
-        let agent = llm_agent();
+        // GigaChat — свой агент с бандлом НУЦ: Mozilla-корни цепочку
+        // sber-эндпоинтов не знают (живой лог: «не удалось соединиться»).
+        let agent = if self.preset == "gigachat" {
+            gigachat_agent()
+        } else {
+            llm_agent()
+        };
         // http_status_as_error(false): 4xx/5xx приходят обычным ответом —
         // тогда текст ошибки провайдера ({"error":{"message":..}}) можно
         // вычитать и показать пользователю честно.
