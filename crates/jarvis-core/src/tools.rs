@@ -138,6 +138,11 @@ pub enum ToolCall {
     WebSearch {
         query: String,
     },
+    /// Прочитать страницу целиком (текст статьи без меню и скриптов):
+    /// «что написано на …», «прочитай, что там» — модель пересказывает.
+    ReadPage {
+        url: String,
+    },
     TimerStop,
     /// Управление окнами приложений: развернуть, свернуть, закрыть, список,
     /// а также столы (воркспейсы) и геометрия: desktop/movetodesktop +
@@ -852,6 +857,8 @@ fn resolve_tool(name: &str, args: &Value) -> Option<String> {
         return None;
     }
     // Плагины — динамические имена: знает только реестр плагинов.
+    // iOS: плагинов нет (см. mod plugins в lib.rs).
+    #[cfg(not(target_os = "ios"))]
     if crate::plugins::is_plugin_tool(&norm) {
         if crate::plugins::find(&norm).is_some() {
             return Some(norm);
@@ -1078,6 +1085,7 @@ fn truncation_repair_ok(call: &ToolCall) -> bool {
         call,
         ToolCall::OpenUrl { .. }
             | ToolCall::WebSearch { .. }
+            | ToolCall::ReadPage { .. }
             | ToolCall::FileRead { .. }
             | ToolCall::FileList { .. }
             | ToolCall::FileSearch { .. }
@@ -1163,6 +1171,7 @@ pub fn strip_tool_blocks(text: &str) -> String {
 fn build_call(name: &str, args: &Value) -> Option<Result<ToolCall, String>> {
     // Плагины — динамическая часть реестра: имя вида plugin_<имя>,
     // состав известен только загрузчику плагинов.
+    #[cfg(not(target_os = "ios"))]
     if crate::plugins::is_plugin_tool(name) {
         if crate::plugins::find(name).is_none() {
             return None;
@@ -1267,6 +1276,11 @@ fn build(name: &str, args: &Value) -> Result<ToolCall, String> {
             ])
             .map(|q| q.to_string())
             .unwrap_or_default(),
+        },
+        "read_page" => ToolCall::ReadPage {
+            url: get_str(&["url", "ссылка", "адрес", "page", "link"])
+                .map(|u| u.to_string())
+                .unwrap_or_default(),
         },
         "open_path" => ToolCall::OpenPath {
             path: get_str(&["path", "folder", "dir", "directory", "папка"])?,
@@ -1810,6 +1824,7 @@ fn tool_name(call: &ToolCall) -> String {
         ToolCall::OpenUrl { .. } => "open_url".to_string(),
         ToolCall::OpenPath { .. } => "open_path".to_string(),
         ToolCall::WebSearch { .. } => "web_search".to_string(),
+        ToolCall::ReadPage { .. } => "read_page".to_string(),
         ToolCall::Remember { .. } => "remember".to_string(),
         ToolCall::ScheduleAdd { .. } => "schedule_add".to_string(),
         ToolCall::ScheduleList => "schedule_list".to_string(),
@@ -1880,6 +1895,7 @@ fn tool_summary(call: &ToolCall) -> String {
         ToolCall::OpenUrl { url, .. } => url.chars().take(120).collect(),
         ToolCall::OpenPath { path } => path.clone(),
         ToolCall::WebSearch { query } => query.chars().take(120).collect(),
+        ToolCall::ReadPage { url } => url.chars().take(120).collect(),
         ToolCall::TimerStop => "остановить таймер".to_string(),
         ToolCall::AlarmStop => "остановить будильник".to_string(),
         ToolCall::OpenUtils { tab } => match tab.as_deref() {
@@ -2330,6 +2346,28 @@ fn execute_inner(
             }
         }
 
+        ToolCall::ReadPage { url } => {
+            println!("📄 read_page: {url}");
+            log(format!("📄 read_page: {url}"));
+            if url.trim().is_empty() {
+                return ToolOutcome::fail("read_page: пустой адрес страницы");
+            }
+            match crate::web::fetch_article(&url) {
+                Ok((title, text)) => {
+                    let head = if title.is_empty() {
+                        String::new()
+                    } else {
+                        format!("Страница: {title}\n\n")
+                    };
+                    ToolOutcome::with_detail(
+                        "Страница прочитана".to_string(),
+                        format!("{head}{text}"),
+                    )
+                }
+                Err(e) => ToolOutcome::fail(format!("Страница не читается: {e:#}")),
+            }
+        }
+
         ToolCall::SetTimer { seconds, label } => {
             println!("🔧 set_timer: {seconds}s");
             log(format!("🔧 set_timer: {seconds}s"));
@@ -2508,6 +2546,7 @@ fn execute_inner(
                 Err(e) => ToolOutcome::fail(format!("{server}/{tool} не удался: {e:#}")),
             }
         }
+        #[cfg(not(target_os = "ios"))]
         ToolCall::PluginRun { tool, args } => {
             let name = tool.strip_prefix(crate::plugins::TOOL_PREFIX).unwrap_or(&tool);
             println!("🔌 plugin: {name}");
@@ -2546,6 +2585,13 @@ fn execute_inner(
                 "ненулевой код выхода".to_string()
             });
             outcome
+        }
+        // На iOS плагинов нет (spark не входит в сборку): парсер такие вызовы
+        // не пропускает, сюда дойти нельзя — но матч обязан быть полным, и
+        // ответ честный: платформа не поддерживает.
+        #[cfg(target_os = "ios")]
+        ToolCall::PluginRun { tool, .. } => {
+            ToolOutcome::fail(format!("Плагины недоступны на этой платформе: {tool}"))
         }
         ToolCall::SetVolume { percent } => {
             println!("🔧 set_volume: {percent}");
@@ -4383,6 +4429,11 @@ mod tests {
     /// schedule_execute: полный круг add → list → remove через execute.
     #[test]
     fn schedule_tools_roundtrip() {
+        // schedule.json пишется в JARVIS_HOME, который параллельные тесты
+        // временно подменяют: держим общий env-замок на весь тест.
+        let _env_guard = crate::test_support::FS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let outcome = exec_for_test(ToolCall::ScheduleAdd {
             prompt: "Тестовая задача из теста".into(),
             daily_at: Some("07:30".into()),

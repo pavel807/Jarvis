@@ -8,15 +8,17 @@
 //! Здесь только счётчик. Потолки проверяет `tests/prompt_budget.rs`: это
 //! интеграционный тест, он сам выставляет `JARVIS_HOME` и не зависит от того,
 //! откуда запущен `cargo test`.
+//!
+//! Счётчик одинаков на всех платформах (включая iOS — candle-бэкенд там
+//! работает, токенизатор приходит с моделью): модели нет на диске — None.
 
 use std::path::Path;
 use std::sync::OnceLock;
-use tokenizers::Tokenizer;
 
-static TOKENIZER: OnceLock<Option<Tokenizer>> = OnceLock::new();
+static TOKENIZER: OnceLock<Option<tokenizers::Tokenizer>> = OnceLock::new();
 
 /// Токенизатор активной модели. `None` — модели нет на диске.
-fn tokenizer() -> Option<&'static Tokenizer> {
+fn tokenizer() -> Option<&'static tokenizers::Tokenizer> {
     TOKENIZER
         .get_or_init(|| {
             let models = crate::paths::models_dir();
@@ -31,7 +33,7 @@ fn tokenizer() -> Option<&'static Tokenizer> {
                 return Some(tok);
             }
             // Точная модель не скачана (например, в тестах применён дефолт
-            // статика, а не settings.toml). Для счёта бюджета подходит
+            // статики, а не settings.toml). Для счёта бюджета подходит
             // токенизатор любой скачанной модели той же семьи — беру первый
             // найденный в models/uzu/*/.
             let uzu = models.join("uzu");
@@ -49,12 +51,12 @@ fn tokenizer() -> Option<&'static Tokenizer> {
         .as_ref()
 }
 
-fn load_from(dir: &Path) -> Option<Tokenizer> {
+fn load_from(dir: &Path) -> Option<tokenizers::Tokenizer> {
     let path = dir.join("tokenizer.json");
     if !path.exists() {
         return None;
     }
-    Tokenizer::from_file(&path).ok()
+    tokenizers::Tokenizer::from_file(&path).ok()
 }
 
 /// Сколько токенов занимает текст. `None` — токенизатора нет.

@@ -92,6 +92,9 @@ pub struct Settings {
     pub tts_voice: String,
     /// Скорость речи: 1.0 — естественно, меньше — медленнее.
     pub tts_speed: f32,
+    /// Мобильная озвучка: интерфейс (iPhone/iPad) читает ответы системным
+    /// голосом. На десктопе озвучкой занимается Silero — поле не действует.
+    pub tts_speak_answers: bool,
 
     // --- Отклик ---
     /// Звук-подтверждение перед ответом LLM. Выключен по умолчанию:
@@ -162,13 +165,16 @@ impl Default for Settings {
             // Модель по умолчанию — родная для бэкенда: uzu живёт в каталоге
             // Mirai (macOS), candle качается из релиза jarvis-models и на
             // Linux выбран по умолчанию.
-            llm_model: if cfg!(target_os = "macos") {
+            #[cfg(target_os = "macos")]
+            llm_model: {
                 // 8-бит (mirai-l) вместо 4-бит: та же Qwen3.5 2B, но вдвое меньше
                 // квантизационных повреждений весов — заметно меньше выдумывает.
                 "qwen3.5-2b-mirai-l".to_string()
-            } else {
-                crate::llm::qwen35::LOCAL_DIR_NAME.to_string()
             },
+            #[cfg(target_os = "ios")]
+            llm_model: "qwen3.5-0.8b".to_string(),
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+            llm_model: crate::llm::qwen35::LOCAL_DIR_NAME.to_string(),
             llm_temperature: 0.6,
             // 0 — без искусственного лимита (длинные ответы не обрываются).
             llm_max_tokens: 0,
@@ -182,6 +188,7 @@ impl Default for Settings {
             weather_city: "Москва".to_string(),
             tts_voice: "ru_eduard".to_string(),
             tts_speed: 1.0,
+            tts_speak_answers: true,
             ack_before_llm: false,
             barge_in: true,
             // Фильтр включён по умолчанию: если профиль ещё не построен,
@@ -346,12 +353,20 @@ mod tests {
         // Linux дефолт указывал на mirai-имя, которое candle не грузит.
         let s = Settings::load(&std::path::PathBuf::from("/nonexistent/settings.toml"))
             .unwrap_or_else(|_| Settings::load(&crate::paths::settings_file()).unwrap());
-        if cfg!(target_os = "macos") {
-            assert_eq!(s.llm_backend, "uzu");
-            assert_eq!(s.llm_model, "qwen3.5-2b-mirai-l");
-        } else {
+        #[cfg(target_os = "ios")]
+        {
+            // Локальные модели на телефон не собираются — qwen35 недоступен.
             assert_eq!(s.llm_backend, "candle");
-            assert_eq!(s.llm_model, crate::llm::qwen35::LOCAL_DIR_NAME);
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            if cfg!(target_os = "macos") {
+                assert_eq!(s.llm_backend, "uzu");
+                assert_eq!(s.llm_model, "qwen3.5-2b-mirai-l");
+            } else {
+                assert_eq!(s.llm_backend, "candle");
+                assert_eq!(s.llm_model, crate::llm::qwen35::LOCAL_DIR_NAME);
+            }
         }
     }
 

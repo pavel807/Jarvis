@@ -222,14 +222,10 @@ fn wait_for_tts(
     guard.clone()
 }
 
-pub enum AudioMessage {
-    PlayWav(String),
-    SynthesizeAndPlay(String),
-    /// Превью голоса в интерфейсе: фраза синтезируется указанным диктором,
-    /// но выбранный голос приложения не меняет. В кэш не пишется.
-    PreviewVoice { text: String, voice: String },
-    Stop,
-}
+/// Сообщения аудио-конвейера. Определение живёт в `llm`, чтобы разговорный
+/// конвейер (ask/ask_web) компилировался и там, где голосового стека нет
+/// (iOS): канал существует, озвучку делает интерфейс, реплики не теряются.
+pub use crate::llm::AudioMessage;
 
 fn needs_neural_normalize(text: &str) -> bool {
     text.chars().any(|c| c.is_ascii_digit())

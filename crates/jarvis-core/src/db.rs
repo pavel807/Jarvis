@@ -16,10 +16,14 @@ use std::sync::{Mutex, OnceLock};
 
 /// Шутки: номер → текст.
 const JOKES: TableDefinition<u64, &str> = TableDefinition::new("jokes");
+/// Факты: номер → текст. Та же схема, что у шуток: мгновенный ответ без
+/// интернета и модели, без немедленного повтора.
+const FACTS: TableDefinition<u64, &str> = TableDefinition::new("facts");
 /// Служебные значения: имя → число.
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
 const LAST_JOKE: &str = "last_joke_id";
+const LAST_FACT: &str = "last_fact_id";
 
 /// Открытая база. Один экземпляр на процесс: redb не разрешает открывать
 /// один и тот же файл дважды, а глобальный `Mutex` сериализует короткие
@@ -51,6 +55,12 @@ impl Store {
                     jokes.insert((index as u64) + 1, *text)?;
                 }
             }
+            let mut facts = write.open_table(FACTS)?;
+            if facts.iter()?.count() == 0 {
+                for (index, text) in crate::facts::SEED.iter().enumerate() {
+                    facts.insert((index as u64) + 1, *text)?;
+                }
+            }
             // Таблица создаётся даже в пустой базе: чтение `meta` не должно
             // падать с «table does not exist».
             let _meta = write.open_table(META)?;
@@ -64,6 +74,13 @@ impl Store {
         let read = self.db.begin_read()?;
         let jokes = read.open_table(JOKES)?;
         Ok(jokes.iter()?.count())
+    }
+
+    /// Сколько фактов в базе.
+    pub fn fact_count(&self) -> anyhow::Result<usize> {
+        let read = self.db.begin_read()?;
+        let facts = read.open_table(FACTS)?;
+        Ok(facts.iter()?.count())
     }
 
     /// Последняя показанная шутка (0 — ещё ни одной).
@@ -100,6 +117,49 @@ impl Store {
         // показываем её, а не молчим.
         let candidates: Vec<&(u64, String)> =
             all.iter().filter(|(id, _)| *id != avoid).collect();
+        let pool = if candidates.is_empty() {
+            all.iter().collect::<Vec<_>>()
+        } else {
+            candidates
+        };
+    use rand::Rng;
+    let index = rand::thread_rng().gen_range(0..pool.len());
+    let (id, text) = pool[index];
+    Ok(Some((*id, text.clone())))
+    }
+
+    /// Последний показанный факт (0 — ещё ни одного).
+    pub fn last_fact(&self) -> anyhow::Result<u64> {
+        let read = self.db.begin_read()?;
+        let meta = read.open_table(META)?;
+        Ok(meta.get(LAST_FACT)?.map(|v| v.value()).unwrap_or(0))
+    }
+
+    /// Запомнить показанный факт.
+    pub fn set_last_fact(&self, id: u64) -> anyhow::Result<()> {
+        let write = self.db.begin_write()?;
+        {
+            let mut meta = write.open_table(META)?;
+            meta.insert(LAST_FACT, id)?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
+    /// Выбрать случайный факт, не равный `avoid` (если есть альтернатива).
+    /// Та же логика, что у шуток: немедленный повтор запрещён.
+    pub fn pick_fact(&self, avoid: u64) -> anyhow::Result<Option<(u64, String)>> {
+        let read = self.db.begin_read()?;
+        let facts = read.open_table(FACTS)?;
+        let mut all: Vec<(u64, String)> = Vec::new();
+        for entry in facts.iter()? {
+            let (id, text) = entry?;
+            all.push((id.value(), text.value().to_string()));
+        }
+        if all.is_empty() {
+            return Ok(None);
+        }
+        let candidates: Vec<&(u64, String)> = all.iter().filter(|(id, _)| *id != avoid).collect();
         let pool = if candidates.is_empty() {
             all.iter().collect::<Vec<_>>()
         } else {
@@ -148,6 +208,23 @@ pub fn next_joke() -> Result<String, String> {
     Ok(text)
 }
 
+/// Взять случайный факт из базы, не повторяя предыдущий.
+pub fn next_fact() -> Result<String, String> {
+    let store = global_store()?;
+    let store = store.lock().unwrap_or_else(|e| e.into_inner());
+    let last = store
+        .last_fact()
+        .map_err(|e| format!("не удалось прочитать базу: {e:#}"))?;
+    let (id, text) = store
+        .pick_fact(last)
+        .map_err(|e| format!("не удалось выбрать факт: {e:#}"))?
+        .ok_or_else(|| "в базе пока нет ни одного факта".to_string())?;
+    store
+        .set_last_fact(id)
+        .map_err(|e| format!("не удалось сохранить выбор: {e:#}"))?;
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,6 +256,23 @@ mod tests {
             assert_ne!(next, store.last_joke().expect("мета"));
             assert!(!text.trim().is_empty());
             store.set_last_joke(next).expect("запись");
+        }
+    }
+
+    #[test]
+    fn seeds_facts_and_avoids_repeat() {
+        let (_dir, store) = temp_store();
+        assert_eq!(store.fact_count().expect("счёт"), crate::facts::SEED.len());
+        let (first, _) = store.pick_fact(0).expect("выбор").expect("факт");
+        store.set_last_fact(first).expect("запись");
+        for _ in 0..20 {
+            let (next, text) = store
+                .pick_fact(store.last_fact().expect("мета"))
+                .expect("выбор")
+                .expect("факт");
+            assert_ne!(next, store.last_fact().expect("мета"));
+            assert!(!text.trim().is_empty());
+            store.set_last_fact(next).expect("запись");
         }
     }
 }

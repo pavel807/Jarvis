@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { settings, patchSettings, toast, go, store, type Settings } from "../store.svelte";
+  import { settings, patchSettings, toast, go, store, activeModelLabel, type Settings } from "../store.svelte";
   import { voiceName } from "../voices";
   import SwitchRow from "../components/SwitchRow.svelte";
   import AppIcon from "../components/AppIcon.svelte";
@@ -155,6 +155,69 @@
     }
   }
 
+  // ---------- Модели речи: ASR и озвучка в отдельной папке ----------
+
+  /** Карточка модели из models_status: роль, установка, размер, действия. */
+  type ModelCard = {
+    name: string;
+    title: string;
+    kind: "llm" | "asr" | "tts";
+    installed: boolean;
+    sizeMb: number | null;
+    downloadable: boolean;
+    removable: boolean;
+  };
+
+  let speechModels = $state<ModelCard[]>([]);
+
+  async function loadSpeechModels() {
+    try {
+      const cards = await invoke<ModelCard[]>("models_status");
+      speechModels = cards.filter((c) => c.kind !== "llm");
+    } catch (e) {
+      console.warn("models_status:", e);
+    }
+  }
+
+  // Загрузка закончилась (индикатор сброшен) — перечитываем статусы.
+  $effect(() => {
+    if (store.download === null) void loadSpeechModels();
+  });
+
+  async function downloadSpeech(name: string, title: string) {
+    try {
+      await invoke("model_download", { name });
+      toast(`Скачиваю ${title} — прогресс внизу списка`, "ok");
+    } catch (e) {
+      toast(`Не удалось начать загрузку: ${e}`, "err");
+    }
+  }
+
+  async function removeModel(m: ModelCard) {
+    const warn =
+      m.kind === "tts"
+        ? "Удалить модель озвучки? Голос замолчит, пока модель не скачают заново."
+        : m.kind === "asr"
+          ? "Удалить распознавание речи? Скачается заново по кнопке."
+          : "Удалить модель? Скачается заново по кнопке.";
+    if (!confirm(warn)) return;
+    try {
+      await invoke("model_remove", { name: m.name });
+      toast("Модель удалена", "ok");
+      void loadSpeechModels();
+    } catch (e) {
+      toast(`Не удалось удалить: ${e}`, "err");
+    }
+  }
+
+  async function openModelsDir() {
+    try {
+      await invoke("open_models_dir");
+    } catch (e) {
+      toast(`Не удалось открыть папку: ${e}`, "err");
+    }
+  }
+
   // ---------- Облачная модель ----------
 
   /** Облако выбрано? */
@@ -304,7 +367,9 @@
   async function pickQwen(choice: (typeof qwenChoices)[number]) {
     if (qwenPicked(choice)) return;
     await patchSettings({ llm_backend: isMac ? "uzu" : "candle", llm_model: choice.model });
-    toast("Модель сменится после перезапуска Джарвиса", "ok");
+    // Смена бэкенда/модели перезагружает движок сразу (save_settings видит
+    // разницу) — ждать перезапуска приложения не нужно.
+    toast("Меняю модель — загрузится на лету", "ok");
   }
 
   // ---------- Система ----------
@@ -531,7 +596,12 @@
 
   <!-- Модель -->
   <section class="settings-section" data-section="ai" bind:this={sectionEls.ai}>
-    <h2 class="section-title">Модель</h2>
+    <h2 class="section-title">
+      Модель
+      <span class="active-model" class:is-err={!store.status.llmBackend}>
+        · отвечает: {activeModelLabel(store.status)}
+      </span>
+    </h2>
     <div class="card card--flush">
       {#each llmVariants as variant (variant.key)}
         {#if hit(variant.title, variant.hint, "модель")}
@@ -697,6 +767,48 @@
         </div>
       {/if}
     </div>
+
+    <!-- Модели речи: отдельная папка вне приложения, качаются по кнопке -->
+    <div class="card card--flush speech-card">
+      {#each speechModels as m (m.name)}
+        <div class="row-item">
+          <span class="row-item__text">
+            <span class="row-item__title">{m.title}</span>
+            <span class="row-item__hint">
+              {m.installed
+                ? `Установлена${m.sizeMb ? ` — ${m.sizeMb} МБ` : ""} · лежит в папке моделей`
+                : "Не скачана — скачается в папку моделей"}
+            </span>
+          </span>
+          {#if m.installed}
+            <button
+              class="btn btn--secondary btn--sm"
+              disabled={!!store.download}
+              onclick={() => void removeModel(m)}
+            >
+              Удалить
+            </button>
+          {:else if m.downloadable}
+            <button
+              class="btn btn--secondary btn--sm"
+              disabled={!!store.download}
+              onclick={() => void downloadSpeech(m.name, m.title)}
+            >
+              Скачать
+            </button>
+          {/if}
+        </div>
+      {/each}
+      <div class="row-item">
+        <span class="row-item__text">
+          <span class="row-item__title">Папка моделей</span>
+          <span class="row-item__hint">Все модели живут отдельно от приложения — оно весит мало</span>
+        </span>
+        <button class="btn btn--secondary btn--sm" onclick={() => void openModelsDir()}>
+          Открыть папку
+        </button>
+      </div>
+    </div>
   </section>
 
   <!-- Telegram -->
@@ -784,5 +896,21 @@
     text-align: left;
     color: inherit;
     cursor: pointer;
+  }
+
+  /* Факт в заголовке: какая модель реально отвечает, а не выбрана. */
+  .active-model {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--cyan);
+  }
+
+  .active-model.is-err {
+    color: var(--danger);
+  }
+
+  /* Модели речи — вторая карточка под выбором мозга. */
+  .speech-card {
+    margin-top: 10px;
   }
 </style>

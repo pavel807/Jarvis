@@ -81,22 +81,9 @@ fn ensure_files() -> Result<PathBuf> {
         ),
     ];
 
-    let client = hf_hub::HFClientSync::new().context("Не удалось создать HuggingFace-клиент")?;
-    let repo = client.model("TigreGotico".to_string(), "stressonnx-models".to_string());
-
     for (remote, local_name) in files {
-        let dest = dir.join(local_name);
-        if dest.exists() {
-            continue;
-        }
-        println!("📥 Загрузка ударителя ({local_name})...");
-        let downloaded = repo
-            .download_file()
-            .filename(remote.to_string())
-            .send()
-            .with_context(|| format!("Не удалось скачать {remote}"))?;
-        std::fs::copy(&downloaded, &dest)
-            .with_context(|| format!("Не удалось сохранить {local_name}"))?;
+        crate::model_fetch::hf_file("TigreGotico", "stressonnx-models", remote, &dir.join(local_name))
+            .with_context(|| format!("Не удалось подготовить {local_name}"))?;
     }
 
     // Веса для candle. ONNX нужен только чтобы собрать их скриптом
@@ -105,13 +92,13 @@ fn ensure_files() -> Result<PathBuf> {
     if !weights.exists() {
         let onnx = dir.join("accent.onnx");
         if !onnx.exists() {
-            println!("📥 Загрузка ударителя (accent.onnx)...");
-            let downloaded = repo
-                .download_file()
-                .filename("ru_ruaccent/nn_accent/model.onnx".to_string())
-                .send()
-                .context("Не удалось скачать accent.onnx")?;
-            std::fs::copy(&downloaded, &onnx).context("Не удалось сохранить accent.onnx")?;
+            crate::model_fetch::hf_file(
+                "TigreGotico",
+                "stressonnx-models",
+                "ru_ruaccent/nn_accent/model.onnx",
+                &onnx,
+            )
+            .context("Не удалось скачать accent.onnx")?;
         }
         crate::nn::ensure_safetensors(&weights)?;
     }

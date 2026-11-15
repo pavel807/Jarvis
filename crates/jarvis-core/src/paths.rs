@@ -6,7 +6,8 @@
 //!   (нужно, когда процесс запущен не из корня репозитория).
 //! - **Модели** (`models_dir`): системная папка программы по правилам ОС —
 //!   macOS `~/Library/Application Support/Jarvis`, Linux
-//!   `~/.local/share/Jarvis` (XDG), Windows `%APPDATA%\Jarvis`. Одна папка
+//!   `~/.local/share/Jarvis` (XDG), Windows `%APPDATA%\Jarvis`,
+//!   iOS `Documents/Jarvis` (видна в приложении «Файлы»). Одна папка
 //!   на всю систему, все модели в одном месте; `JARVIS_MODELS_DIR`
 //!   переопределяет целиком.
 
@@ -53,7 +54,20 @@ pub fn app_data_dir() -> PathBuf {
             .map(|d| d.join("Jarvis"))
             .unwrap_or_else(|| base_dir())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    // iOS: сэндбокс приложения; Documents доступен пользователю через
+    // «Файлы» — модели в отдельной папке видны и управляемы, как на десктопе.
+    #[cfg(target_os = "ios")]
+    {
+        home_dir()
+            .map(|h| h.join("Documents/Jarvis"))
+            .unwrap_or_else(|| base_dir())
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "ios"
+    )))]
     {
         base_dir()
     }

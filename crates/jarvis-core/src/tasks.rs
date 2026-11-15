@@ -373,8 +373,9 @@ mod fs_tests {
 
     /// JARVIS_HOME — переменная процесса, поэтому тесты с файлами идут
     /// строго по одному и каждый работает в своей временной директории.
-    static FS_LOCK: Mutex<()> = Mutex::new(());
-
+    /// Замок общий с прочими env-мутирующими тестами (lib.rs test_support):
+    /// локальный защищал бы только tasks против tasks, а schedule продолжал
+    /// бы ловить чужую JARVIS_HOME.
     struct TempHome {
         dir: PathBuf,
         _guard: std::sync::MutexGuard<'static, ()>,
@@ -382,7 +383,9 @@ mod fs_tests {
 
     impl TempHome {
         fn new(tag: &str) -> Self {
-            let guard = FS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = crate::test_support::FS_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let dir = std::env::temp_dir().join(format!("jarvis-tasks-test-{tag}"));
             let _ = fs::remove_dir_all(&dir);
             unsafe { std::env::set_var("JARVIS_HOME", &dir) };

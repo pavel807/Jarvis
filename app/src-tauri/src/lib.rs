@@ -1,15 +1,24 @@
 //! Tauri-бэкенд Jarvis: запускает движок из jarvis-core, мостит события в UI
 //! и предоставляет IPC-команды (команды, настройки, wake word, TTS, LLM).
 
-use jarvis_core::commands::{CommandsConfig, spawn_config_watcher};
-use jarvis_core::engine::{EngineHandles, run_engine};
+use jarvis_core::commands::CommandsConfig;
 use jarvis_core::events::JarvisEvent;
 use jarvis_core::llm::{ChatTurn, SharedLlmState, spawn_llm_loader};
 use jarvis_core::paths;
-use jarvis_core::settings::{Settings, spawn_settings_watcher_with};
+// Наблюдатели конфигов используются в spawn_engine (десктоп); iOS перечитывает
+// настройки только при старте.
+#[cfg(not(target_os = "ios"))]
+use jarvis_core::commands::spawn_config_watcher;
+#[cfg(not(target_os = "ios"))]
+use jarvis_core::settings::spawn_settings_watcher_with;
+use jarvis_core::settings::Settings;
+#[cfg(not(target_os = "ios"))]
 use jarvis_core::stt::Stt;
 use jarvis_core::tts::{self, AudioMessage, SharedTtsState};
+#[cfg(not(target_os = "ios"))]
 use jarvis_core::wake_train;
+#[cfg(not(target_os = "ios"))]
+use jarvis_core::engine::{EngineHandles, run_engine};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
@@ -40,7 +49,9 @@ pub struct Shared {
     pub voice_stop: Arc<AtomicBool>,
     /// Ленивая инстанция FastConformer для проверки диктанта: движковый STT
     /// принадлежит своему воркеру, а вторая загрузка (mmap-веса) дешёвая.
-    pub train_stt: Mutex<Option<jarvis_core::stt::Stt>>,
+    /// iOS: STT-моделей нет — поле отсутствует.
+    #[cfg(not(target_os = "ios"))]
+    pub train_stt: Mutex<Option<Stt>>,
     pub audio_tx: std::sync::mpsc::Sender<AudioMessage>,
     /// Канал событий движка: нужен хабу таймеров для окна «Утилиты».
     pub utils_events: Mutex<Option<std::sync::mpsc::Sender<JarvisEvent>>>,
@@ -80,6 +91,7 @@ impl Shared {
             speaker_invalidate: Arc::new(AtomicBool::new(false)),
             voice_recording: Arc::new(AtomicBool::new(false)),
             voice_stop: Arc::new(AtomicBool::new(false)),
+            #[cfg(not(target_os = "ios"))]
             train_stt: Mutex::new(None),
             audio_tx,
             utils_events: Mutex::new(None),
@@ -106,7 +118,9 @@ impl Shared {
 /// Распаковывает подготовленный архив из ресурсов приложения в каталог данных
 /// при первом запуске (звуки, конфиги, крошечные wake word-модели).
 /// Тяжёлые модели (LLM/STT/TTS) в архив не входят и качаются отдельно при
-/// первом обращении. Идемпотентно по файлу-маркеру.
+/// первом обращении. Идемпотентно по файлу-маркеру. Только десктоп: на iOS
+/// ни архива в ресурсах, ни /usr/bin/tar в сэндбоксе нет.
+#[cfg(not(target_os = "ios"))]
 fn provision_data(events: &std::sync::mpsc::Sender<JarvisEvent>, resource_dir: Option<&Path>) {
     let home = paths::base_dir();
     // Маркер — собственная метка, которую ставим после успешной распаковки.
@@ -153,12 +167,16 @@ fn provision_data(events: &std::sync::mpsc::Sender<JarvisEvent>, resource_dir: O
 }
 
 /// Ищет подготовленный архив в `Contents/Resources/payload`.
+#[cfg(not(target_os = "ios"))]
 fn find_payload(resource_dir: Option<&Path>) -> Option<PathBuf> {
     let candidate = resource_dir?.join("payload/jarvis-data.tar.gz");
     candidate.exists().then_some(candidate)
 }
 
 /// Загружает модели и запускает движок ассистента в фоновом потоке.
+/// iOS: полный движок (микрофон, wake-слово, локальные модели) на телефон
+/// не собирается — вместо него в setup поднимается jarvis_core::mobile.
+#[cfg(not(target_os = "ios"))]
 fn spawn_engine(
     shared: &Arc<Shared>,
     events_tx: std::sync::mpsc::Sender<JarvisEvent>,
@@ -295,6 +313,11 @@ struct Status {
     /// Рабочая директория агента: от неё считаются относительные пути
     /// файловых инструментов, её же меняет `cd` в shell.
     cwd: String,
+    /// Какая модель **фактически** загружена и отвечает — источник правды
+    /// для бейджа UI. None / пустые — движок ещё не готов или упал.
+    llm_backend: Option<String>,
+    llm_preset: Option<String>,
+    llm_model: Option<String>,
 }
 
 // =========================================================================
@@ -466,8 +489,280 @@ fn llm_reload(app: tauri::AppHandle, shared: State<'_, Arc<Shared>>) -> Result<S
     Ok("Перезагружаю модель".into())
 }
 
+// =========================================================================
+// Менеджер моделей: мозг, распознавание речи и озвучка в одной папке models/
+// =========================================================================
+
+/// Карточка модели для менеджера в настройках.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelCard {
+    name: String,
+    title: String,
+    /// Роль: "llm" | "asr" | "tts".
+    kind: String,
+    installed: bool,
+    size_mb: Option<u64>,
+    downloadable: bool,
+    removable: bool,
+}
+
+/// Все модели в отдельной папке `models/` — приложение само ничего не
+/// несёт в бандле: речь (распознавание/озвучка) и мозг скачиваются при
+/// первом запуске или кнопкой из настроек, в папку данных приложения.
+#[tauri::command]
+async fn models_status() -> Vec<ModelCard> {
+    let mut out = Vec::new();
+
+    for m in llm_models_status().await {
+        let name = m.name;
+        let removable = name == "qwen3.5-0.8b";
+        out.push(ModelCard {
+            title: format!("Мозг (LLM) — {name}"),
+            name,
+            kind: "llm".into(),
+            installed: m.installed,
+            size_mb: m.size_mb,
+            downloadable: m.downloadable,
+            removable,
+        });
+    }
+
+    let fastconformer = jarvis_core::model_fetch::fastconformer_status();
+    out.push(ModelCard {
+        name: "fastconformer".into(),
+        title: "Распознавание речи — FastConformer RU (~460 МБ)".into(),
+        kind: "asr".into(),
+        installed: fastconformer.is_some(),
+        size_mb: fastconformer.map(|b| b / 1_048_576),
+        downloadable: true,
+        removable: true,
+    });
+
+    let silero = jarvis_core::model_fetch::silero_status();
+    out.push(ModelCard {
+        name: "silero".into(),
+        title: "Озвучка — Silero v5, русские голоса".into(),
+        kind: "tts".into(),
+        installed: silero.is_some(),
+        size_mb: silero.map(|b| b / 1_048_576),
+        downloadable: true,
+        removable: true,
+    });
+
+    out
+}
+
+/// Скачивание модели речи (Silero/FastConformer) по кнопке из настроек.
+/// Прогресс — теми же событиями download_progress, что и у LLM.
+#[tauri::command]
+fn model_download(
+    app: tauri::AppHandle,
+    shared: State<'_, Arc<Shared>>,
+    name: String,
+) -> Result<String, String> {
+    if !matches!(name.as_str(), "silero" | "fastconformer") {
+        return Err(format!(
+            "Модель «{name}» качается из раздела «Модель» (LLM) или не скачивается из приложения"
+        ));
+    }
+    // Общий флаг с llm_download_model: две параллельных загрузки моделей
+    // не нужны ни пользователю, ни каналу.
+    if LLM_DOWNLOADING.swap(true, Ordering::SeqCst) {
+        return Err("Загрузка уже идёт — дождись окончания".into());
+    }
+
+    let app2 = app.clone();
+    let name2 = name.clone();
+    let shared_tts = Arc::clone(&shared.shared_tts);
+    let tts_failed = Arc::clone(&shared.tts_failed);
+    std::thread::spawn(move || {
+        let name = name2;
+        let mut last: u8 = 0;
+        let mut progress = |pct: u8| {
+            if pct >= last + 2 || pct >= 100 {
+                last = pct;
+                let _ = app2.emit(
+                    "engine-event",
+                    &JarvisEvent::DownloadProgress {
+                        what: if name == "silero" {
+                            "Голос (Silero)".into()
+                        } else {
+                            "Распознавание речи".into()
+                        },
+                        percent: pct,
+                    },
+                );
+            }
+        };
+        let result = if name == "silero" {
+            jarvis_core::model_fetch::ensure_silero_with_progress(&mut progress)
+        } else {
+            jarvis_core::model_fetch::ensure_fastconformer_with_progress(&mut progress)
+        };
+        let _ = app2.emit(
+            "engine-event",
+            &JarvisEvent::DownloadProgress {
+                what: if name == "silero" {
+                    "Голос (Silero)".into()
+                } else {
+                    "Распознавание речи".into()
+                },
+                percent: 100,
+            },
+        );
+        match result {
+            Ok(()) => {
+                let _ = app2.emit(
+                    "engine-event",
+                    &JarvisEvent::Log {
+                        message: if name == "silero" {
+                            "Голос скачан — перезагружаю озвучку".into()
+                        } else {
+                            "Распознавание скачано — подхватится при следующем запуске".into()
+                        },
+                    },
+                );
+                // Silero живёт в отдельном движке: перезагружаем его сразу,
+                // без перезапуска приложения.
+                if name == "silero" {
+                    tts::set_voice(&shared_tts, &tts_failed, &tts::current_voice());
+                }
+            }
+            Err(e) => {
+                let _ = app2.emit(
+                    "engine-event",
+                    &JarvisEvent::Error {
+                        message: format!("Загрузка модели не удалась: {e:#}"),
+                    },
+                );
+            }
+        }
+        LLM_DOWNLOADING.store(false, Ordering::SeqCst);
+    });
+    Ok(format!("Скачиваю {name} — прогресс появится в интерфейсе"))
+}
+
+/// Удаление скачанной модели (для повторной загрузки или экономии места).
+#[tauri::command]
+fn model_remove(name: String) -> Result<(), String> {
+    jarvis_core::model_fetch::model_dir_remove(&name).map_err(|e| format!("{e:#}"))
+}
+
+/// Открыть папку моделей в системном файловом менеджере: пользователь видит,
+/// где лежат скачанные модели (отдельная папка вне приложения).
+#[tauri::command]
+fn open_models_dir() -> Result<(), String> {
+    let dir = paths::models_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    open::that(dir).map_err(|e| e.to_string())
+}
+
+/// Tap-to-talk (iOS): начать слушать микрофоном. Возвращает статус:
+/// "listening" | "pending" (показан системный запрос разрешения) |
+/// "speaking" (остановили озвучку предыдущего ответа) | "denied:<причина>".
+#[tauri::command]
+#[cfg(target_os = "ios")]
+fn listen_start(state: State<'_, jarvis_core::mobile::MobileHandles>) -> String {
+    jarvis_core::mobile::listen_start(&state)
+}
+
+/// Остановить запись и распознать: результат приходит событием Transcript,
+/// дальше ответ идёт через общий ask() и озвучку Silero.
+#[tauri::command]
+#[cfg(target_os = "ios")]
+fn listen_stop(state: State<'_, jarvis_core::mobile::MobileHandles>) {
+    jarvis_core::mobile::listen_stop(&state)
+}
+
+/// Остановить озвучку (кнопка «стоп», пока Джарвис говорит).
+#[tauri::command]
+#[cfg(target_os = "ios")]
+fn speak_stop(state: State<'_, jarvis_core::mobile::MobileHandles>) {
+    jarvis_core::mobile::speak_stop(&state)
+}
+
+/// iOS: текстовая реплика через мобильный движок — его гейты
+/// (шутка/факт/дальше/почитай) и общий ask() с озвучкой Silero.
+/// Всегда отправляет реплику, возвращает true для совместимости по cfg.
+#[cfg(target_os = "ios")]
+fn send_chat_mobile(app: &tauri::AppHandle, shared: &Arc<Shared>, prompt: &str) -> bool {
+    use tauri::Manager;
+    // Отменяем предыдущую генерацию: новая реплика важнее старой.
+    shared.llm_cancel.store(true, Ordering::SeqCst);
+    let app2 = app.clone();
+    let prompt = prompt.to_string();
+    std::thread::spawn(move || {
+        // Пауза, чтобы «отмена» дошла до предыдущей генерации.
+        std::thread::sleep(Duration::from_millis(120));
+        let mobile = app2.state::<jarvis_core::mobile::MobileHandles>();
+        if !jarvis_core::mobile::handle_text(&mobile, &prompt) {
+            jarvis_core::mobile::answer(&mobile, &prompt);
+        }
+    });
+    true
+}
+
+/// Текстовая реплика (iOS): идёт через мобильный движок — гейты
+/// (шутка/факт/дальше/почитай) и общий ask() с озвучкой Silero.
+#[tauri::command]
+#[cfg(target_os = "ios")]
+fn send_chat(app: tauri::AppHandle, shared: State<'_, Arc<Shared>>, text: String) -> Result<(), String> {
+    let prompt = text.trim().to_string();
+    if !prompt.is_empty() {
+        send_chat_mobile(&app, &shared, &prompt);
+    }
+    Ok(())
+}
+
+/// Текстовая реплика в тот же конвейер, что и голосовой транскрипт: та
+/// обработка llm::ask (роутер действие/вопрос, веб-поиск, чат), та история
+/// диалога и та озвучка. Нужен мобильным (iPhone/iPad) и печатать удобнее,
+/// чем говорить, на любом устройстве.
+#[tauri::command]
+#[cfg(not(target_os = "ios"))]
+fn send_chat(app: tauri::AppHandle, shared: State<'_, Arc<Shared>>, text: String) -> Result<(), String> {
+    let prompt = text.trim().to_string();
+    if prompt.is_empty() {
+        return Ok(());
+    }
+
+    // Отменяем предыдущую генерацию: новая реплика важнее старой.
+    shared.llm_cancel.store(true, Ordering::SeqCst);
+
+    let llm = Arc::clone(&shared.shared_llm);
+    let history = Arc::clone(&shared.chat_history);
+    let audio_tx = shared.audio_tx.clone();
+    let cancel = Arc::clone(&shared.llm_cancel);
+
+    let (tx, rx) = channel::<JarvisEvent>();
+    std::thread::spawn(move || {
+        for ev in rx {
+            let _ = app.emit("engine-event", &ev);
+        }
+    });
+
+    std::thread::spawn(move || {
+        // Небольшая пауза: отмена от «предыдущей реплики» успевает
+        // дойти до генерации, прежде чем новый запрос сбросит флаг.
+        std::thread::sleep(Duration::from_millis(120));
+        cancel.store(false, Ordering::SeqCst);
+        jarvis_core::llm::ask(
+            llm,
+            jarvis_core::llm::CHAT_SYSTEM_PROMPT,
+            prompt,
+            history,
+            audio_tx,
+            tx,
+            cancel,
+        );
+    });
+    Ok(())
+}
+
 #[tauri::command]
 fn status(shared: State<'_, Arc<Shared>>) -> Status {
+    let active = jarvis_core::llm::active_backend(&shared.shared_llm);
     Status {
         engine_running: shared.engine_running.load(Ordering::SeqCst),
         paused: shared.paused.load(Ordering::SeqCst),
@@ -479,6 +774,12 @@ fn status(shared: State<'_, Arc<Shared>>) -> Status {
             .unwrap_or_else(|e| e.into_inner())
             .is_some(),
         cwd: jarvis_core::tools::cwd(),
+        llm_backend: active.as_ref().map(|b| b.backend.clone()),
+        llm_preset: active
+            .as_ref()
+            .map(|b| b.preset.clone())
+            .filter(|p| !p.is_empty()),
+        llm_model: active.as_ref().map(|b| b.model.clone()),
     }
 }
 
@@ -546,13 +847,17 @@ fn save_settings(
             || cur.wake_detector != settings.wake_detector
             || cur.wake_window_ms != settings.wake_window_ms
     };
-    // Смена облачного провайдера (ключ, каталог, модель, адрес): живой
-    // ApiEngine захватил старые значения при загрузке — без перезагрузки
-    // он слал бы устаревший modelUri и облука отвечала «Failed to parse
-    // model URI» при верных новых настройках.
-    let api_changed = {
+    // Смена бэкенда или облачного провайдера (ключ, каталог, модель, адрес):
+    // живой ApiEngine захватил старые значения при загрузке — без
+    // перезагрузки он слал бы устаревший modelUri, а смена «локальная →
+    // облако» вообще не доходила до движка (перегружалась только через
+    // файловый watcher, а при неудачной загрузке облака продолжала отвечать
+    // прежняя локальная модель).
+    let llm_changed = {
         let cur = shared.settings.read().unwrap_or_else(|e| e.into_inner());
-        cur.api_preset != settings.api_preset
+        cur.llm_backend != settings.llm_backend
+            || cur.llm_model != settings.llm_model
+            || cur.api_preset != settings.api_preset
             || cur.api_base_url != settings.api_base_url
             || cur.api_key != settings.api_key
             || cur.api_model != settings.api_model
@@ -570,9 +875,10 @@ fn save_settings(
     if wake_changed {
         shared.wakeword_reload.store(true, Ordering::SeqCst);
     }
-    if api_changed {
+    if llm_changed {
         // Тот же путь, что и кнопка «Перезагрузить модель»: статусы
-        // перезагрузки видны в интерфейсе, облачные поля применяются сразу.
+        // перезагрузки видны в интерфейсе, бэкенд и облачные поля
+        // применяются сразу, без ожидания файлового watcher.
         let (tx, rx) = channel::<JarvisEvent>();
         let llm = Arc::clone(&shared.shared_llm);
         std::thread::spawn(move || {
@@ -702,7 +1008,8 @@ fn open_mic_settings() -> Result<(), String> {
     open_mic_pane()
 }
 
-/// Статус доступа к микрофону для строки в Настройках.
+/// Статус доступа к микрофону для строки в Настройках. Работает на всех
+/// платформах: macOS/Windows/Linux (TCC/pactl) и iOS (AVAudioSession).
 #[tauri::command]
 fn mic_status() -> String {
     jarvis_core::audio::mic_status().to_string()
@@ -816,12 +1123,14 @@ async fn llm_api_test() -> Result<String, String> {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(not(target_os = "ios"))]
 struct WwSamples {
     train: Vec<(String, f64)>,
     test: Vec<(String, f64)>,
 }
 
 #[tauri::command]
+#[cfg(not(target_os = "ios"))]
 async fn ww_samples() -> WwSamples {
     let (train_dir, test_dir) = wake_train::sample_dirs();
     let fmt = |dir: &std::path::Path| -> Vec<(String, f64)> {
@@ -841,6 +1150,7 @@ async fn ww_samples() -> WwSamples {
 }
 
 #[tauri::command]
+#[cfg(not(target_os = "ios"))]
 fn ww_record(
     shared: State<'_, Arc<Shared>>,
     app: AppHandle,
@@ -900,10 +1210,12 @@ fn ww_record(
     Ok(())
 }
 
+#[cfg(not(target_os = "ios"))]
 struct RecordGuard {
     flag: Arc<AtomicBool>,
 }
 
+#[cfg(not(target_os = "ios"))]
 impl Drop for RecordGuard {
     fn drop(&mut self) {
         self.flag.store(false, Ordering::SeqCst);
@@ -943,6 +1255,7 @@ fn ww_delete(path: String, shared: State<'_, Arc<Shared>>) -> Result<(), String>
 /// Асинхронная: загрузка ASR и 24 синтеза считаются секундами — на главном
 /// потоке они замораживали интерфейс на всё время проверки фразы.
 #[tauri::command]
+#[cfg(not(target_os = "ios"))]
 async fn wake_phrase_generate(
     phrase: String,
 ) -> Result<jarvis_core::wake_phrase::PhraseReport, String> {
@@ -957,10 +1270,12 @@ async fn wake_phrase_generate(
 /// Гвардия диктанта: на выходе (успех, ошибка, паника) снимает флаг записи
 /// и возвращает движок из паузы — чтение фразы не должно оставлять Джарвиса
 /// глухим, даже если что-то упало.
+#[cfg(not(target_os = "ios"))]
 struct VoiceRecordGuard {
     shared: Arc<Shared>,
 }
 
+#[cfg(not(target_os = "ios"))]
 impl Drop for VoiceRecordGuard {
     fn drop(&mut self) {
         self.shared.voice_recording.store(false, Ordering::SeqCst);
@@ -971,6 +1286,7 @@ impl Drop for VoiceRecordGuard {
 /// Начать запись диктанта: микрофон пишет, пока пользователь не нажмёт
 /// «Стоп» ([`voice_record_stop`]). Движок на время записи на паузе.
 #[tauri::command]
+#[cfg(not(target_os = "ios"))]
 fn voice_record_start(shared: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> {
     if shared.voice_recording.swap(true, Ordering::SeqCst) {
         return Err("Запись уже идёт".into());
@@ -1029,11 +1345,13 @@ fn voice_record_start(shared: State<'_, Arc<Shared>>, app: AppHandle) -> Result<
 
 /// Пользователь дочитал: остановить запись и проверить.
 #[tauri::command]
+#[cfg(not(target_os = "ios"))]
 fn voice_record_stop(shared: State<'_, Arc<Shared>>) {
     shared.voice_stop.store(true, Ordering::SeqCst);
 }
 
 /// Чем закончилась проверка диктанта.
+#[cfg(not(target_os = "ios"))]
 enum VoiceTakeError {
     /// Прочитано не то: совпадение ниже порога, запись удалена.
     Mismatch(f32, String),
@@ -1042,10 +1360,12 @@ enum VoiceTakeError {
 }
 
 /// Порог совпадения слов с фразой, ниже которого диктант не принимается.
+#[cfg(not(target_os = "ios"))]
 const VOICE_OVERLAP_MIN: f32 = 0.5;
 
 /// Записать до «Стоп», расшифровать FastConformer'ом, сверить с фразой.
 /// Успех — файл остаётся в `train/voice/`, профиль готов к пересборке.
+#[cfg(not(target_os = "ios"))]
 fn check_dictation_take(shared: &Shared) -> Result<(f32, String), VoiceTakeError> {
     let path = wake_train::record_until_stop(
         &wake_train::voice_samples_dir(),
@@ -1093,6 +1413,7 @@ fn check_dictation_take(shared: &Shared) -> Result<(f32, String), VoiceTakeError
 }
 
 #[tauri::command]
+#[cfg(not(target_os = "ios"))]
 fn ww_build(app: AppHandle) -> Result<(), String> {
     std::thread::spawn(move || {
         let (tx, rx) = channel::<JarvisEvent>();
@@ -1121,6 +1442,7 @@ fn ww_build(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[cfg(not(target_os = "ios"))]
 fn ww_apply(shared: State<'_, Arc<Shared>>, path: Option<String>) -> Result<(), String> {
     let trained = match path {
         Some(p) => ensure_under_dir(Path::new(&p), &paths::models_dir())
@@ -1142,6 +1464,7 @@ fn ww_apply(shared: State<'_, Arc<Shared>>, path: Option<String>) -> Result<(), 
 
 /// Асинхронная: тест поднимает модель и гоняет DTW — не на главном потоке.
 #[tauri::command]
+#[cfg(not(target_os = "ios"))]
 async fn ww_test(shared: State<'_, Arc<Shared>>, path: String) -> Result<f32, String> {
     let wav = ensure_under_dir(Path::new(&path), &paths::train_dir())?;
     let active = {
@@ -1153,10 +1476,15 @@ async fn ww_test(shared: State<'_, Arc<Shared>>, path: String) -> Result<f32, St
 
 // ---------- Трей и запуск ----------
 
+#[cfg(not(target_os = "ios"))]
 const TRAY_OPEN: &str = "open";
+#[cfg(not(target_os = "ios"))]
 const TRAY_TOGGLE: &str = "toggle";
+#[cfg(not(target_os = "ios"))]
 const TRAY_QUIT: &str = "quit";
 
+// Трей — системная панель десктопа: на iOS его не существует.
+#[cfg(not(target_os = "ios"))]
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::TrayIconBuilder;
@@ -1192,11 +1520,18 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "ios"))]
 fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+        // Разворачивание и фокус — десктопные операции: на iOS окна нет.
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+        #[cfg(target_os = "ios")]
+        let _ = &window;
     }
 }
 
@@ -1204,7 +1539,11 @@ fn app_data_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         #[cfg(target_os = "macos")]
         return home.join("Library/Application Support/Jarvis");
-        #[cfg(not(target_os = "macos"))]
+        // iOS-сэндбокс: данные живут в Documents приложения, модели —
+        // в отдельной папке рядом (paths::models_dir).
+        #[cfg(target_os = "ios")]
+        return home.join("Documents/Jarvis");
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         return home.join(".jarvis");
     }
     PathBuf::from(".")
@@ -1238,12 +1577,15 @@ pub fn run() {
         jarvis_core::tools::set_cwd(&home.to_string_lossy());
     }
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ))
-        .plugin(tauri_plugin_notification::init())
+    let builder = tauri::Builder::default();
+    // Автозапуск — только десктоп: на iOS приложение управляется системой.
+    #[cfg(not(target_os = "ios"))]
+    let builder = builder.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        None,
+    ));
+    let builder = builder.plugin(tauri_plugin_notification::init());
+    builder
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -1364,9 +1706,50 @@ pub fn run() {
             });
             tts::prune_tts_cache();
 
-            let resource_dir = handle.path().resource_dir().ok();
-            spawn_engine(&shared, events_tx, resource_dir);
-            build_tray(&handle)?;
+            // Движок: на десктопе — полный голосовой конвейер (микрофон,
+            // wake-слово, локальные модели, трей); на iOS — tap-to-talk из
+            // jarvis_core::mobile: тот же плеер Silero (шаг 3), тот же
+            // аудио-конвейер, STT грузится в фоне вместе с моделями.
+            #[cfg(target_os = "ios")]
+            {
+                let tts_voice = {
+                    let s = shared
+                        .settings
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner());
+                    s.tts_voice.clone()
+                };
+                // Озвучка — настоящая Silero (модель скачается при первом
+                // запуске в Documents/Jarvis/models), а не системный синтез.
+                tts::spawn_tts_loader(&shared.shared_tts, &shared.tts_failed, &tts_voice);
+                let _ = events_tx.send(JarvisEvent::Log {
+                    message: format!("Озвучка: silero v5, голос «{tts_voice}»"),
+                });
+                let mobile = jarvis_core::mobile::MobileHandles::new(
+                    Arc::clone(&shared.shared_llm),
+                    Arc::clone(&shared.chat_history),
+                    events_tx.clone(),
+                    Arc::clone(&shared.llm_cancel),
+                    shared.audio_tx.clone(),
+                    Arc::clone(&shared.is_speaking),
+                    Arc::clone(&shared.stop_audio_flag),
+                );
+                // FastConformer (распознавание) грузится в фоне: модель
+                // качается при первом запуске — честный прогресс в журнале.
+                jarvis_core::mobile::run(&mobile);
+                // Жизненный цикл хендлов: держим их в состоянии приложения.
+                app.manage(mobile);
+                // Загрузчик LLM (облако или локальный Qwen): статус
+                // ready/failed виден в UI.
+                spawn_llm_loader(&shared.shared_llm, &events_tx);
+                shared.engine_running.store(true, Ordering::SeqCst);
+            }
+            #[cfg(not(target_os = "ios"))]
+            {
+                let resource_dir = handle.path().resource_dir().ok();
+                spawn_engine(&shared, events_tx, resource_dir);
+                build_tray(&handle)?;
+            }
 
             Ok(())
         })
@@ -1384,8 +1767,6 @@ pub fn run() {
             get_commands,
             save_commands,
             llm_api_test,
-            voice_record_start,
-            voice_record_stop,
             get_settings,
             save_settings,
             choice_resolve,
@@ -1400,18 +1781,43 @@ pub fn run() {
             llm_models_status,
             llm_download_model,
             llm_reload,
+            models_status,
+            model_download,
+            model_remove,
+            open_models_dir,
+            send_chat,
             open_mic_settings,
             mic_status,
             mic_request,
+            // Tap-to-talk на iOS: слушание включается кнопкой (wake-слово —
+            // только десктоп, там постоянное слушание).
+            #[cfg(target_os = "ios")]
+            listen_start,
+            #[cfg(target_os = "ios")]
+            listen_stop,
+            #[cfg(target_os = "ios")]
+            speak_stop,
             timer_start,
             timer_cancel,
             utils_close,
-            ww_samples,
-            ww_record,
             ww_delete,
+            // Голосовые команды (wake-слово, диктант) — только на десктопе:
+            // на iOS их API не существует, а UI их и не показывает.
+            #[cfg(not(target_os = "ios"))]
+            voice_record_start,
+            #[cfg(not(target_os = "ios"))]
+            voice_record_stop,
+            #[cfg(not(target_os = "ios"))]
+            ww_samples,
+            #[cfg(not(target_os = "ios"))]
+            ww_record,
+            #[cfg(not(target_os = "ios"))]
             ww_build,
+            #[cfg(not(target_os = "ios"))]
             ww_apply,
+            #[cfg(not(target_os = "ios"))]
             ww_test,
+            #[cfg(not(target_os = "ios"))]
             wake_phrase_generate,
         ])
         .run(tauri::generate_context!())

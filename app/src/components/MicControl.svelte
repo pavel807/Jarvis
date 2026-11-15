@@ -1,23 +1,34 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { store } from "../store.svelte";
+  import { store, listenStart, listenStop } from "../store.svelte";
   import AppIcon from "./AppIcon.svelte";
 
   /**
    * Кнопка микрофона — главный прибор главной страницы. Кольцо по контуру
    * не украшение: его дуга заполняется реальным уровнем звука от движка,
-   * поэтому сразу видно, что микрофон слышит. Клик — прослушивание
-   * вкл/выкл (set_paused).
+   * поэтому сразу видно, что микрофон слышит.
+   *
+   * Два режима:
+   * - десктоп: клик включает/выключает постоянное прослушивание
+   *   (set_paused), wake-слово активирует Джарвиса сам;
+   * - тач (iPhone/iPad): tap-to-talk — первый тап открывает микрофон,
+   *   второй останавливает запись и отправляет фразу на распознавание
+   *   (FastConformer); wake-слова на телефоне нет.
    */
 
   let { size = 84 }: { size?: number } = $props();
 
   let busy = $state(false);
 
+  const touch =
+    typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+
   const running = $derived(store.status.engineRunning);
   const paused = $derived(store.status.paused);
   const denied = $derived(store.micPermission === false);
-  const listening = $derived(!paused && running && !denied);
+  const listening = $derived(
+    touch ? store.listening : !paused && running && !denied,
+  );
 
   /** Контурное кольцо: дуга уровня звука. */
   const R = 46;
@@ -26,18 +37,35 @@
     listening ? Math.max(0, Math.min(1, store.audioLevel)) : 0,
   );
 
-  const label = $derived(denied
-    ? "Нет доступа к микрофону"
-    : !running
-      ? "Движок запускается"
-      : paused
-        ? "Включить прослушивание"
-        : "Выключить прослушивание");
+  const label = $derived(touch
+    ? store.listening
+      ? "Остановить запись"
+      : "Говорить"
+    : denied
+      ? "Нет доступа к микрофону"
+      : !running
+        ? "Движок запускается"
+        : paused
+          ? "Включить прослушивание"
+          : "Выключить прослушивание");
 
-  const disabled = $derived(busy || !running);
+  const disabled = $derived(touch ? busy : busy || !running);
 
   async function toggle() {
-    if (busy || !running) return;
+    if (busy) return;
+    if (touch) {
+      // Tap-to-talk: повторный тап останавливает запись и запускает
+      // распознавание. Статусы «pending»/«denied» приносит listenStart.
+      busy = true;
+      try {
+        if (store.listening) listenStop();
+        else await listenStart();
+      } finally {
+        busy = false;
+      }
+      return;
+    }
+    if (!running) return;
     busy = true;
     const next = !paused;
     try {

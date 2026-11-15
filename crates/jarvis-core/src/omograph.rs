@@ -53,43 +53,37 @@ fn ensure_files() -> Result<PathBuf> {
         return Ok(dir);
     }
 
-    let client = hf_hub::HFClientSync::new().context("Не удалось создать HuggingFace-клиент")?;
+    // Файлы из двух репозиториев: токенизатор/модель — ruaccent/accentuator,
+    // словарь — TigreGotico/stressonnx-models (iOS идёт по прямым URL,
+    // см. model_fetch::hf_file).
+    crate::model_fetch::hf_file(
+        "ruaccent",
+        "accentuator",
+        "nn/nn_omograph/tiny2/tokenizer.json",
+        &tokenizer_file,
+    )
+    .context("Не удалось скачать tokenizer.json")?;
 
-    let accent = client.model("ruaccent".to_string(), "accentuator".to_string());
-    if !tokenizer_file.exists() {
-        println!("📥 Загрузка токенизатора омографов...");
-        let downloaded = accent
-            .download_file()
-            .filename("nn/nn_omograph/tiny2/tokenizer.json".to_string())
-            .send()
-            .context("Не удалось скачать tokenizer.json")?;
-        std::fs::copy(&downloaded, &tokenizer_file)
-            .context("Не удалось сохранить tokenizer.json")?;
-    }
-
-    if !omographs.exists() {
-        println!("📥 Загрузка словаря омографов...");
-        let stress = client.model("TigreGotico".to_string(), "stressonnx-models".to_string());
-        let downloaded = stress
-            .download_file()
-            .filename("ru_ruaccent/dictionary/omographs.json.gz".to_string())
-            .send()
-            .context("Не удалось скачать omographs.json.gz")?;
-        std::fs::copy(&downloaded, &omographs).context("Не удалось сохранить omographs.json.gz")?;
-    }
+    crate::model_fetch::hf_file(
+        "TigreGotico",
+        "stressonnx-models",
+        "ru_ruaccent/dictionary/omographs.json.gz",
+        &omographs,
+    )
+    .context("Не удалось скачать omographs.json.gz")?;
 
     // Веса для candle. ONNX — только источник для сборки safetensors,
     // поэтому держим его на диске лишь пока веса не собраны.
     if !model_file.exists() {
         let onnx = dir.join("model.onnx");
         if !onnx.exists() {
-            println!("📥 Загрузка контекстного ударителя (model.onnx)...");
-            let downloaded = accent
-                .download_file()
-                .filename("nn/nn_omograph/tiny2/model.onnx".to_string())
-                .send()
-                .context("Не удалось скачать model.onnx")?;
-            std::fs::copy(&downloaded, &onnx).context("Не удалось сохранить model.onnx")?;
+            crate::model_fetch::hf_file(
+                "ruaccent",
+                "accentuator",
+                "nn/nn_omograph/tiny2/model.onnx",
+                &onnx,
+            )
+            .context("Не удалось скачать model.onnx")?;
         }
         crate::nn::ensure_safetensors(&model_file)?;
     }

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/spark", "crates/autocore", "crates/jarvis-core", "crates/jarvis-cli", "app/src-tauri"]
 
 [workspace.package]
-version = "6.1.0"
+version = "6.2.0"
 edition = "2024"
 
 [workspace.dependencies]
@@ -26,6 +26,11 @@ tokenizers = "0.21"
 serde_json = "1"
 ureq = "3"
 regex = "1"
+# Распаковка архивов моделей в рантайме: tar.gz качается по HTTP и
+# распаковывается в процессе — внешние curl/tar не нужны ни на одной ОС
+# (на iOS их в сэндбоксе просто нет).
+tar = "0.4"
+flate2 = "1"
 # Встроенная база данных: чистый Rust, без системного sqlite и C-сборки.
 redb = "3.1.3"
 

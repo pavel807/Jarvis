@@ -666,6 +666,9 @@ pub(crate) fn spark_volume_mute() -> String {
 /// Яркость экрана: spark_brightness_set(70). 0–100.
 #[allow(dead_code)]
 pub(crate) fn spark_brightness_set(percent: i64) -> String {
+    // На macOS/Windows яркость клавишами — аргумент не используется.
+    let _ = percent;
+
     #[cfg(target_os = "linux")]
     {
         let p = percent.clamp(1, 100);

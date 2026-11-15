@@ -27,6 +27,34 @@ export interface EngineStatus {
   ttsReady: boolean;
   /** Рабочая папка агента: от неё считаются пути файловых инструментов. */
   cwd: string;
+  /** Какая модель фактически загружена (null — движок ещё не готов или упал). */
+  llmBackend: string | null;
+  llmPreset: string | null;
+  llmModel: string | null;
+}
+
+/**
+ * Подпись модели, которая **реально отвечает**: по факту загрузки движка,
+ * а не по настройкам. Настройка может говорить «облако», но пока оно не
+ * загрузилось — отвечать некому, и интерфейс показывает именно это.
+ */
+export function activeModelLabel(status: EngineStatus): string {
+  if (status.llmStatus === "loading") return "Модель загружается…";
+  if (status.llmStatus === "failed" || !status.llmBackend) return "Модель не готова";
+  switch (status.llmBackend) {
+    case "api":
+      return status.llmPreset === "yandex"
+        ? "Яндекс GPT"
+        : status.llmPreset === "gigachat"
+          ? "GigaChat"
+          : `API · ${status.llmModel || "своя модель"}`;
+    case "uzu":
+      return `Qwen (локально)`;
+    case "candle":
+      return `Qwen (локально, candle)`;
+    default:
+      return status.llmModel || status.llmBackend;
+  }
 }
 
 export interface Settings {
@@ -151,6 +179,9 @@ export const store = $state({
     llmStatus: "loading",
     ttsReady: false,
     cwd: "",
+    llmBackend: null,
+    llmPreset: null,
+    llmModel: null,
   } as EngineStatus,
   /** Что делает движок: wake_word | listening | processing. */
   engineState: "wake_word" as string,
@@ -180,6 +211,12 @@ export const store = $state({
   audioSource: "mic" as string,
   /** Джарвис сейчас озвучивает ответ. В этой фазе его можно перебить. */
   speaking: false as boolean,
+  /**
+   * Tap-to-talk (iOS): микрофон открыт, идёт запись. true — кнопка активна
+   * и превращается в «Стоп»; сбрасывается движком (state_changed) или
+   * повторным тапом.
+   */
+  listening: false as boolean,
   /** Команда, которую движок распознал дословно. */
   matchedCommand: "" as string,
   /** Ожидающий выбор цели: чипы на главной, ответ голосом тоже работает. */
@@ -309,6 +346,35 @@ export const settings = $state<Settings>({
   api_folder_id: "",
 });
 
+/**
+ * Tap-to-talk на iOS: слушание включается кнопкой — микрофон открыт, пока
+ * пользователь не отпустит (нажмёт «стоп»), затем текст распознаёт
+ * FastConformer и Джарвис отвечает голосом Silero, как на десктопе.
+ */
+export async function listenStart() {
+  try {
+    const status = await invoke<string>("listen_start");
+    if (status === "listening") {
+      store.listening = true;
+    } else if (status.startsWith("denied:")) {
+      toast(status.slice("denied:".length), "err");
+    }
+  } catch (e) {
+    toast(String(e), "err");
+  }
+}
+
+export function listenStop() {
+  if (!store.listening) return;
+  store.listening = false;
+  invoke("listen_stop").catch(() => {});
+}
+
+/** Остановить озвучку (iOS-кнопка «стоп» во время ответа). */
+export function speakStop() {
+  invoke("speak_stop").catch(() => {});
+}
+
 export async function loadSettings() {
   try {
     Object.assign(settings, await invoke<Settings>("get_settings"));
@@ -365,6 +431,9 @@ export async function initEvents() {
         store.engineState = state;
         if (state === "processing") store.processing = true;
         else if (state === "wake_word" || state === "listening") store.processing = false;
+        // Tap-to-talk: движок сам сообщил о начале/конце сессии записи.
+        if (state === "listening") store.listening = true;
+        else if (state === "recognizing") store.listening = false;
         break;
       }
       case "wake_word_detected":
@@ -454,6 +523,8 @@ export async function initEvents() {
         store.chat.error = "";
         store.processing = false;
         completeReply(store.chat.done);
+        // Озвучка единая на всех платформах: Silero в Rust-движке. UI лишь
+        // показывает фазу «говорит» (событие speech) и кнопку «Стоп».
         break;
       case "audio_level":
         store.audioLevel = (ev.level as number) ?? 0;

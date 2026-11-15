@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { store, settings, clearHistory, go, resolveChoice } from "../store.svelte";
+  import { invoke } from "@tauri-apps/api/core";
+  import { store, settings, clearHistory, go, resolveChoice, activeModelLabel, pushTurn, toast } from "../store.svelte";
   import { getAssistant, voiceStatusLabel } from "../assistant";
   import ArcReactor from "../components/ArcReactor.svelte";
   import MicControl from "../components/MicControl.svelte";
@@ -15,6 +16,11 @@
 
   const assistant = $derived(getAssistant());
   const statusLabel = $derived(voiceStatusLabel());
+  /** Какая модель реально отвечает — по факту загрузки, не по настройкам. */
+  const modelLabel = $derived(activeModelLabel(store.status));
+  const modelReady = $derived(
+    store.status.llmStatus === "ready" && Boolean(store.status.llmBackend),
+  );
 
   /** Последние реплики для «передачи»: вопрос и ответ. */
   const lastUser = $derived.by(() => {
@@ -37,6 +43,39 @@
 
   const hasExchange = $derived(Boolean(lastUser || lastReply));
   const wakeWord = $derived(settings.wake_word || "Джарвис");
+
+  // ---------- Текстовый ввод ----------
+
+  /** На тач-устройствах поле открыто сразу: набрать вопрос проще, чем говорить. */
+  const isTouch = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+  let textOpen = $state(isTouch);
+  let draft = $state("");
+  let textEl: HTMLTextAreaElement | undefined = $state();
+
+  function toggleText() {
+    textOpen = !textOpen;
+    if (textOpen) setTimeout(() => textEl?.focus(), 50);
+  }
+
+  async function sendText() {
+    const text = draft.trim();
+    if (!text || busy) return;
+    draft = "";
+    pushTurn({ role: "user", text, source: "text" });
+    try {
+      await invoke("send_chat", { text });
+    } catch (e) {
+      toast(`Не удалось отправить: ${e}`, "err");
+    }
+  }
+
+  /** Enter — отправить, Shift+Enter — перенос строки. */
+  function onTextKey(event: KeyboardEvent) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void sendText();
+    }
+  }
 </script>
 
 <div class="home">
@@ -99,7 +138,42 @@
     <span class="voice-status" class:is-live={assistant.tone === "live"} class:is-busy={busy} class:is-off={store.status.paused} class:is-err={assistant.tone === "error"}>
       {statusLabel}
     </span>
+    <!-- Бейдж активной модели: видно подмену облака локальной моделью. -->
+    <span
+      class="model-badge"
+      class:is-ok={modelReady}
+      class:is-err={!modelReady}
+      title="Модель, которая сейчас отвечает"
+    >
+      <span class="model-badge__dot"></span>
+      {modelLabel}
+    </span>
     <MicControl />
+    <!-- Печать вместо голоса: на тач-устройствах открыто сразу. -->
+    <button class="icon-btn text-toggle" title={textOpen ? "Скрыть ввод" : "Написать текстом"} aria-label={textOpen ? "Скрыть ввод" : "Написать текстом"} onclick={toggleText}>
+      <AppIcon name="pencil" size={15} />
+    </button>
+    {#if textOpen}
+      <div class="text-row">
+        <textarea
+          class="input text-row__field"
+          rows="1"
+          bind:this={textEl}
+          bind:value={draft}
+          onkeydown={onTextKey}
+          placeholder="Спросите что угодно — как у Алисы"
+          enterkeyhint="send"
+        ></textarea>
+        <button
+          class="btn btn--primary text-row__send"
+          aria-label="Отправить"
+          disabled={!draft.trim() || busy}
+          onclick={() => void sendText()}
+        >
+          <AppIcon name="send" size={16} />
+        </button>
+      </div>
+    {/if}
     <Waveform />
     {#if store.history.length}
       <div class="voice-links">
@@ -122,6 +196,72 @@
 
 <style>
   .transmission.is-empty {
+    justify-content: center;
+  }
+
+  .model-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    padding: 3px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 11px;
+    color: var(--text-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .model-badge__dot {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.7;
+  }
+
+  .model-badge.is-ok {
+    color: var(--cyan);
+    border-color: var(--cyan-ring);
+  }
+
+  .model-badge.is-err {
+    color: var(--danger);
+    border-color: var(--danger-soft);
+  }
+
+  /* Текстовый ввод: растягивается по ширине пульта, кнопка — к нему. */
+  .text-toggle {
+    flex: none;
+  }
+
+  .text-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    width: 100%;
+    max-width: 560px;
+    margin-top: 2px;
+  }
+
+  .text-row__field {
+    flex: 1;
+    min-width: 0;
+    resize: none;
+    max-height: 120px;
+    line-height: 1.4;
+  }
+
+  .text-row__send {
+    flex: none;
+    width: 42px;
+    height: 42px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
     justify-content: center;
   }
 

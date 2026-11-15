@@ -616,6 +616,7 @@ const CORE_TOOLS: &str = "\
   file_edit {\"path\":\"src/main.rs\",\"old\":\"было\",\"new\":\"стало\"} — заменить фрагмент; old бери из file_read
   file_list {\"path\":\".\"} / file_search {\"query\":\"текст\",\"path\":\".\"} / file_glob {\"pattern\":\"*.rs\",\"path\":\".\"} — файлы
   web_search {\"query\":\"курс доллара\"} — найти в интернете
+  read_page {\"url\":\"…\"} — прочитать страницу: что там написано
   system_info — система; notify {\"title\":\"..\",\"body\":\"..\"} — уведомление; clipboard_write {\"text\":\"..\"} — буфер
   desktop_input {\"action\":\"type_text\",\"text\":\"Привет\"} — клавиатура/мышь: type_text | press_key | hotkey | click | move | scroll
   ui_read — прочитать экран: приложение, окна, кнопки, поля, меню
@@ -887,6 +888,10 @@ pub fn action_prompt_for(prompt: &str) -> String {
 
     // Плагины-автоматизации на Spark: динамические инструменты из
     // внешних .sk-файлов; блок появляется, только если что-то загрузилось.
+    // iOS: плагинов нет.
+    #[cfg(target_os = "ios")]
+    let plugins_block = String::new();
+    #[cfg(not(target_os = "ios"))]
     let plugins_block = crate::plugins::prompt_block();
     let plugins_block = if plugins_block.is_empty() {
         String::new()

@@ -18,6 +18,14 @@ pub fn init_tuning() {
     });
 }
 
+/// Тесты, которые мутируют глобальное окружение (`JARVIS_HOME`), обязаны
+/// держать этот мьютекс: параллельный тест, читающий пути, иначе поймает
+/// чужую временную папку (реальный случай — schedule против tasks).
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) static FS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
 pub mod agent;
 pub mod applescript;
 pub mod asr;
@@ -25,8 +33,12 @@ pub mod audio;
 pub mod choice;
 pub mod commands;
 pub mod db;
+// Полный движок с wake-словом — десктопный: на iOS tap-to-talk без
+// постоянного прослушивания, его место занимает mobile.
+#[cfg(not(target_os = "ios"))]
 pub mod engine;
 pub mod events;
+pub mod facts;
 pub mod jokes;
 pub mod learned;
 pub mod llm;
@@ -39,6 +51,9 @@ pub mod omograph;
 pub mod paths;
 pub mod permissions;
 pub mod platform;
+// Плагины Spark автоматизируют десктоп (окна, клавиатура, мышь) — на
+// iPhone/iPad им нечего автоматизировать, и крейт на iOS не собирается.
+#[cfg(not(target_os = "ios"))]
 pub mod plugins;
 
 /// Текущее время в RFC3339 без внешних зависимостей: дата из `date +%F`,
@@ -90,6 +105,8 @@ pub fn warm_startup() {
         }
     });
     // Плагины на Spark: скан каталогов, компиляция с кэшем — в своём потоке.
+    // iOS: плагинов нет (см. mod plugins).
+    #[cfg(not(target_os = "ios"))]
     plugins::warm();
 }
 pub mod prompt_budget;
@@ -99,6 +116,9 @@ pub mod settings;
 pub mod site_cache;
 pub mod stress;
 pub mod telegram;
+// Фильтр говорящего (speakrs) — десктопная фича: без постоянного
+// прослушивания на телефоне профилю голоса неоткуда взяться.
+#[cfg(not(target_os = "ios"))]
 pub mod speaker;
 pub mod stt;
 pub mod tasks;
@@ -111,9 +131,18 @@ pub mod tts;
 pub mod tts_normalizer;
 pub mod tts_silero;
 pub mod auto;
+// Wake-слово (RustPotter) — десктоп: на iOS слушание включается кнопкой.
+#[cfg(not(target_os = "ios"))]
 pub mod wake;
+#[cfg(not(target_os = "ios"))]
 pub mod wake_ctc;
+#[cfg(not(target_os = "ios"))]
 pub mod wake_phrase;
+#[cfg(not(target_os = "ios"))]
 pub mod wake_train;
 pub mod weather;
 pub mod web;
+/// Мобильный движок iOS: tap-to-talk (микрофон → FastConformer → LLM →
+/// Silero) на тех же моделях, что и десктоп, без wake-слова и автоматизации.
+#[cfg(target_os = "ios")]
+pub mod mobile;

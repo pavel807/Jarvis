@@ -65,6 +65,19 @@
 
   onMount(() => {
     void initEvents();
+
+    // Клавиатура на телефоне: визуальный вьюпорт сжимается, когда она
+    // открыта — разницу ставим в --kb, каркас поднимается над ней.
+    const vv = window.visualViewport;
+    if (vv) {
+      const apply = () => {
+        const kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+        document.documentElement.style.setProperty("--kb", `${kb.toFixed(0)}px`);
+      };
+      vv.addEventListener("resize", apply);
+      vv.addEventListener("scroll", apply);
+      apply();
+    }
   });
 
   $effect(() => {

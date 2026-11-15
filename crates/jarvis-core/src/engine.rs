@@ -1713,6 +1713,26 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
         return Outcome::Followup;
     }
 
+    // Полезный факт — из той же локальной базы: мгновенно, без LLM и сети,
+    // без немедленного повтора (как шутки).
+    if crate::facts::is_fact_request(text) {
+        match crate::facts::tell() {
+            Ok(fact) => {
+                println!("💡 Факт: {fact}");
+                llm::speak(&h.audio_tx, &h.events, &fact);
+            }
+            Err(reason) => {
+                let speech = format!("Не могу рассказать факт: {reason}");
+                println!("⚠️ {speech}");
+                let _ = h.events.send(JarvisEvent::Error {
+                    message: speech.clone(),
+                });
+                llm::speak(&h.audio_tx, &h.events, &speech);
+            }
+        }
+        return Outcome::Followup;
+    }
+
     // Джарвис только что спросил «задача выполнена?» — короткий ответ закрывает
     // галочку, не уходя в LLM.
     if crate::tasks::expecting_done()
@@ -1880,7 +1900,86 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
             // «Какой сегодня день недели» вычисляется из даты в промпте —
             // поиск был бы тратой пары секунд.
             && !router::calendar_question(&prompt);
-        let web_auto = fresh_info || explicit_web;
+        // Универсальный факт-вопрос («почему море солёное», «чем отличается…»):
+        // не про свежесть — про точность. Маленькая модель выдумывает, поиск
+        // отвечает верно. Календарь по-прежнему считаем сами.
+        let factual = intent == router::Intent::Chat
+            && !fresh_info
+            && crate::web::looks_like_factual_question(&prompt)
+            && !router::calendar_question(&prompt);
+        let web_auto = fresh_info || factual || explicit_web;
+
+        // «Читай дальше» / «дальше» — следующий кусок статьи. Работает только
+        // когда статья открыта, поэтому «дальше» в других смыслах не задеваем.
+        let wants_more = {
+            let t = prompt.to_lowercase().replace('ё', "е");
+            (t.contains("читай дальше")
+                || t.contains("продолжай читат")
+                || t.contains("читай еще")
+                || t.split_whitespace().all(|w| w == "дальше" || w == "пожалуйста")
+                    && !t.is_empty())
+                && crate::web::last_article_title().is_some()
+        };
+        if wants_more {
+            match crate::web::next_article_chunk() {
+                Some(chunk) => {
+                    println!("📖 Читаю дальше ({}, символов осталось: {})", chunk.chars().count(), crate::web::article_remaining());
+                    llm::speak(&h.audio_tx, &h.events, &chunk);
+                }
+                None => {
+                    llm::speak(&h.audio_tx, &h.events, "Статья дочитана до конца.");
+                }
+            }
+            return Outcome::Followup;
+        }
+
+        // «Почитай статью про X» / «прочитай по ссылке» — явное чтение вслух.
+        // Страница качается секундами, поэтому всё в фоне: поиск топ-статьи,
+        // извлечение текста, первый кусок в озвучку; «дальше» продолжает.
+        if intent == router::Intent::Chat
+            && let Some(target) = crate::web::read_article_target(&prompt)
+        {
+            let audio_tx = h.audio_tx.clone();
+            let events = h.events.clone();
+            let cancel = Arc::clone(&h.llm_cancel);
+            println!("📖 Читаю: {target}");
+            std::thread::spawn(move || {
+                if !llm::is_current_request(req_id) || cancel.load(Ordering::SeqCst) {
+                    return;
+                }
+                let url = if target.starts_with("http") {
+                    Some(target.clone())
+                } else {
+                    crate::web::search(&target, 1)
+                        .ok()
+                        .and_then(|hits| hits.into_iter().next().map(|hit| hit.url))
+                };
+                let Some(url) = url else {
+                    llm::speak(&audio_tx, &events, "Не нашёл подходящей статьи.");
+                    return;
+                };
+                match crate::web::fetch_article(&url) {
+                    Ok((title, text)) => {
+                        let first = crate::web::start_reading(&title, &text);
+                        let lead = if title.is_empty() {
+                            "Читаю.".to_string()
+                        } else {
+                            format!("Читаю: {title}.")
+                        };
+                        llm::speak(&audio_tx, &events, &format!("{lead} {first}"));
+                    }
+                    Err(e) => {
+                        println!("⚠️ Страница не читается: {e:#}");
+                        llm::speak(
+                            &audio_tx,
+                            &events,
+                            "Страница не открылась или без текста — не смог прочитать.",
+                        );
+                    }
+                }
+            });
+            return Outcome::Followup;
+        }
 
         if web_auto && crate::weather::is_weather_question(&prompt) {
             // Погода — данные, а не рассуждение: детерминированный ответ из
@@ -1948,20 +2047,48 @@ fn handle_transcript(text: &str, h: &EngineHandles, rng: &mut impl Rng) -> Outco
                             );
                         }
                         None => {
-                            // Пустая выдача (анти-бот заглушка, блокировка) —
-                            // честный отказ вместо выдуманного ответа.
-                            println!("🌐 Выдача пуста — честный отказ");
-                            let _ = events.send(JarvisEvent::Log {
-                                message: "Поиск не дал результатов — честный отказ".into(),
-                            });
-                            llm::speak(&audio_tx, &events, "Не нашёл ответа в интернете.");
+                            // Пустая выдача (анти-бот заглушка, блокировка).
+                            // Явная просьба «посмотри в интернете» — честный
+                            // отказ; для авто-фактов честнее ответить своими
+                            // знаниями, чем отказываться на ровном месте.
+                            if explicit_web {
+                                println!("🌐 Выдача пуста — честный отказ");
+                                let _ = events.send(JarvisEvent::Log {
+                                    message: "Поиск не дал результатов — честный отказ".into(),
+                                });
+                                llm::speak(&audio_tx, &events, "Не нашёл ответа в интернете.");
+                            } else {
+                                println!("🌐 Выдача пуста — отвечаю из своих знаний");
+                                llm::ask(
+                                    llm,
+                                    llm::CHAT_SYSTEM_PROMPT,
+                                    query,
+                                    history,
+                                    audio_tx,
+                                    events,
+                                    cancel,
+                                );
+                            }
                         }
                     }
                 }
                 Err(e) => {
                     eprintln!("⚠️ Веб-поиск не удался: {e}");
                     if llm::is_current_request(req_id) && !cancel.load(Ordering::SeqCst) {
-                        llm::speak(&audio_tx, &events, "Интернет не отвечает, не смог найти.");
+                        if explicit_web {
+                            llm::speak(&audio_tx, &events, "Интернет не отвечает, не смог найти.");
+                        } else {
+                            println!("🌐 Поиск не удался — отвечаю из своих знаний");
+                            llm::ask(
+                                llm,
+                                llm::CHAT_SYSTEM_PROMPT,
+                                query,
+                                history,
+                                audio_tx,
+                                events,
+                                cancel,
+                            );
+                        }
                     }
                 }
             });

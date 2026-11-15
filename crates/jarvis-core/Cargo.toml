@@ -4,29 +4,47 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-spark = { path = "../spark" }
 anyhow.workspace = true
+# Голосовой стек: микрофон (cpal/CoreAudio), Silero TTS и FastConformer STT
+# на candle-CPU, wav-чтение (hound), токенизаторы. Всё это работает и на
+# iOS: tap-to-talk вместо wake-слова, модели качаются в отдельную папку.
 cpal.workspace = true
-hf-hub.workspace = true
 hound.workspace = true
+candle-core.workspace = true
+candle-nn.workspace = true
+tokenizers.workspace = true
 rand.workspace = true
-rustpotter.workspace = true
-speakrs.workspace = true
 serde.workspace = true
 toml.workspace = true
 urlencoding.workspace = true
 open.workspace = true
-candle-core.workspace = true
-candle-nn.workspace = true
-tokenizers.workspace = true
 serde_json.workspace = true
-flate2 = "1"
-ureq.workspace = true
+tar.workspace = true
+flate2.workspace = true
+ureq = { workspace = true, features = ["json"] }
 # Локальное время для планировщика («каждое утро в 8»).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 regex.workspace = true
 redb.workspace = true
-image = { version = "0.25", default-features = false, features = ["png"] }
+
+# spark (плагины с десктопной автоматизацией) и wake-слово (RustPotter) —
+# только не-iOS: на телефоне нет окон/клавиатуры/мыши, а слушание включается
+# кнопкой (tap-to-talk) без постоянного детектора фразы.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+spark = { path = "../spark" }
+rustpotter.workspace = true
+# hf-hub тянет xet-стек с sysinfo, который не компилируется под iOS
+# (libc ограничивает RTM_IFINFO2 macOS) — на iOS файлы HuggingFace качает
+# собственный загрузчик model_fetch (см. stress.rs / omograph.rs).
+hf-hub.workspace = true
+
+# iOS: активация аудио-сессии (микрофон + динамик) через AVFAudio.
+# objc2-* — собственная версия 0.3.x, совместимая с objc2 0.6;
+# block2 — блок-обработчик запроса разрешения на микрофон.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2-avf-audio = "0.3"
+objc2 = "0.6"
+block2 = "0.6"
 
 # macOS: AppleScript прямо в процессе приложения (NSAppleScript), а не через
 # порождение osascript. Так запрос разрешения на автоматизацию приходит от

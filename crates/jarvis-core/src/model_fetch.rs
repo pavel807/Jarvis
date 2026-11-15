@@ -9,14 +9,13 @@
 //! внутри должны лежать пути относительно него (`silero/…`, `qwen3.5-0.8b/…`).
 
 use anyhow::{Context, Result, bail};
+use std::io::Read;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 const DEFAULT_BASE_URL: &str =
     "https://github.com/pavel807/jarvis-models/releases/download/models-v1";
-
-/// Как часто сообщать о прогрессе при скачивании, мс.
-const PROGRESS_STEP: Duration = Duration::from_millis(500);
 
 /// Базовый URL релиза с моделями (без имени ассета).
 pub fn base_url() -> String {
@@ -99,11 +98,18 @@ pub fn ensure_qwen35_with_progress(dir: &Path, progress: &mut dyn FnMut(u8)) -> 
 /// Источник один: архив `fastconformer.tar.gz` (~460 МБ) из GitHub-релиза —
 /// модель распознавания речи встроена в программу, настройка не нужна.
 pub fn ensure_fastconformer() -> Result<()> {
+    let mut noop = |_pct: u8| {};
+    ensure_fastconformer_with_progress(&mut noop)
+}
+
+/// Как [`ensure_fastconformer`], но с отчётом о прогрессе (0..=100).
+pub fn ensure_fastconformer_with_progress(progress: &mut dyn FnMut(u8)) -> Result<()> {
     let dir = crate::paths::models_dir().join("fastconformer");
     if fastconformer_ready(&dir) {
+        progress(100);
         return Ok(());
     }
-    ensure_archive("fastconformer.tar.gz", &mut |_| {})?;
+    ensure_archive("fastconformer.tar.gz", progress)?;
     if fastconformer_ready(&dir) {
         Ok(())
     } else {
@@ -118,6 +124,29 @@ pub fn ensure_fastconformer() -> Result<()> {
 pub fn fastconformer_status() -> Option<u64> {
     let dir = crate::paths::models_dir().join("fastconformer");
     fastconformer_ready(&dir).then(|| dir_size(&dir))
+}
+
+/// Размер файлов Silero, если модель озвучки на месте; иначе `None`.
+pub fn silero_status() -> Option<u64> {
+    let dir = crate::paths::models_dir().join("silero");
+    silero_ready(&dir).then(|| dir_size(&dir))
+}
+
+/// Удаляет каталог модели по имени — те, что приложение само скачивает.
+/// Пользовательские каталоги LLM (положенные в models/ руками) не трогаем.
+pub fn model_dir_remove(name: &str) -> Result<()> {
+    match name {
+        "qwen3.5-0.8b" | "silero" | "fastconformer" => {}
+        other => bail!(
+            "Модель «{other}» не удаляется из приложения: каталог пользовательский"
+        ),
+    }
+    let dir = crate::paths::models_dir().join(name);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)
+            .with_context(|| format!("Не удалось удалить {}", dir.display()))?;
+    }
+    Ok(())
 }
 
 fn fastconformer_ready(dir: &Path) -> bool {
@@ -181,106 +210,152 @@ fn ensure_archive(asset: &str, progress: &mut dyn FnMut(u8)) -> Result<()> {
     Ok(())
 }
 
-/// Качает `url` в `dest`, дёргая `progress(pct)` по мере роста файла.
-/// `expected` — ожидаемый размер в байтах (0, если неизвестен).
-fn download(url: &str, dest: &Path, expected: u64, progress: &mut dyn FnMut(u8)) -> Result<()> {
-    let mut child = std::process::Command::new(curl_bin())
-        .args(["-fL", "--retry", "3", "--connect-timeout", "20", "-o"])
-        .arg(dest)
-        .arg(url)
-        .spawn()
-        .context("Не удалось запустить curl")?;
+/// Агент загрузок: таймауты на соединение, но без глобального — файлы по
+/// 460 МБ на медленном канале живут дольше любого разумного лимита.
+fn agent_download() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_resolve(Some(Duration::from_secs(3)))
+            .timeout_connect(Some(Duration::from_secs(20)))
+            .max_idle_connections_per_host(2)
+            .build()
+            .new_agent()
+    })
+}
 
+/// Размер ассета в релизе (Content-Length) и признак его существования.
+/// 0 — ассета нет (не выложен) или размер неизвестен: опциональный файл
+/// пропускается без ошибки.
+fn remote_size(url: &str) -> u64 {
+    match agent_download().head(url).call() {
+        Ok(response) => {
+            if response.status().as_u16() != 200 {
+                return 0;
+            }
+            content_length(&response).unwrap_or(0)
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Последний Content-Length из заголовков ответа (после редиректов — итог).
+fn content_length(response: &ureq::http::Response<ureq::Body>) -> Option<u64> {
+    let mut length = None;
+    for (name, value) in response.headers() {
+        if name.as_str().eq_ignore_ascii_case("content-length")
+            && let Ok(text) = value.to_str()
+            && let Ok(parsed) = text.trim().parse::<u64>()
+        {
+            length = Some(parsed);
+        }
+    }
+    length
+}
+
+/// Качает один файл по прямому URL в `dest` — для источников, которые не
+/// ходят через GitHub-релиз. Используется только на iOS (там нет hf-hub,
+/// см. Cargo.toml); десктоп качает файлы HuggingFace крейтом hf-hub.
+#[cfg(target_os = "ios")]
+pub(crate) fn download_url(url: &str, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("не создать каталог {}", parent.display()))?;
+    }
+    let expected = remote_size(url);
+    download(url, dest, expected, &mut |pct| {
+        println!(
+            "📥 {} — {pct}%",
+            dest.file_name().unwrap_or_default().to_string_lossy()
+        )
+    })
+}
+
+/// Файл `filename` из репозитория HuggingFace `owner/name` в `dest`.
+///
+/// Десктоп — крейт hf-hub (он же делает кэш/проверки); iOS — прямые
+/// resolve-URL через собственный загрузчик, потому что hf-hub тянет
+/// xet-стек с sysinfo, не собирающимся под iOS (см. Cargo.toml).
+pub(crate) fn hf_file(owner: &str, name: &str, filename: &str, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        return Ok(());
+    }
+    println!("📥 Загрузка {filename}...");
+    #[cfg(not(target_os = "ios"))]
+    {
+        let client =
+            hf_hub::HFClientSync::new().context("Не удалось создать HuggingFace-клиент")?;
+        let model = client.model(owner.to_string(), name.to_string());
+        let downloaded = model
+            .download_file()
+            .filename(filename.to_string())
+            .send()
+            .with_context(|| format!("Не удалось скачать {filename}"))?;
+        std::fs::copy(&downloaded, dest)
+            .with_context(|| format!("Не удалось сохранить {}", dest.display()))?;
+        Ok(())
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let url = format!("https://huggingface.co/{owner}/{name}/resolve/main/{filename}");
+        download_url(&url, dest).with_context(|| format!("Не удалось скачать {filename}"))
+    }
+}
+
+/// Качает `url` в `dest`, дёргая `progress(pct)` по мере роста файла.
+/// HTTP-загрузка в процессе: ureq проходит редиректы GitHub, размер берём
+/// из Content-Length ответа. Внешние curl/tar не нужны ни на одной ОС —
+/// на iOS их в сэндбоксе просто нет.
+fn download(url: &str, dest: &Path, _expected: u64, progress: &mut dyn FnMut(u8)) -> Result<()> {
+    let response = agent_download()
+        .get(url)
+        .call()
+        .with_context(|| format!("запрос {url} не удался"))?;
+    if response.status().as_u16() != 200 {
+        bail!("{} вернул HTTP {}", url, response.status());
+    }
+    let expected = content_length(&response).unwrap_or(0);
+
+    let mut reader = response.into_body().into_reader();
+    let mut file = std::fs::File::create(dest)
+        .with_context(|| format!("не создать файл {}", dest.display()))?;
+
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total: u64 = 0;
     let mut last = 0u8;
     loop {
-        match child.try_wait().context("curl: ошибка ожидания")? {
-            Some(status) => {
-                if !status.success() {
-                    bail!("curl завершился с кодом {status}");
-                }
-                break;
-            }
-            None => {
-                if expected > 0 {
-                    let cur = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
-                    let pct = ((cur.min(expected) as f64 / expected as f64) * 100.0) as u8;
-                    if pct != last {
-                        last = pct;
-                        progress(pct.min(99));
-                    }
-                }
-                std::thread::sleep(PROGRESS_STEP);
+        let n = reader.read(&mut buf).context("обрыв при скачивании")?;
+        if n == 0 {
+            break;
+        }
+        std::io::Write::write_all(&mut file, &buf[..n]).context("запись файла модели")?;
+        total += n as u64;
+        if expected > 0 {
+            let pct = ((total.min(expected) as f64 / expected as f64) * 100.0) as u8;
+            if pct != last {
+                last = pct;
+                progress(pct.min(99));
             }
         }
+    }
+    std::io::Write::flush(&mut file).ok();
+    if expected > 0 && total < expected {
+        bail!("скачано {total} из {expected} байт — файл оборвался");
     }
     progress(100);
     Ok(())
 }
 
-/// Размер ассета в релизе через `Content-Length` (0, если не удалось узнать).
-fn remote_size(url: &str) -> u64 {
-    let out = std::process::Command::new(curl_bin())
-        .args([
-            "-sIL",
-            "--connect-timeout",
-            "20",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-        ])
-        .arg(url)
-        .output();
-    let Ok(out) = out else {
-        return 0;
-    };
-    let status = String::from_utf8_lossy(&out.stdout);
-    // Ассета может не быть в релизе (например, .rpw давно не выкладывается):
-    // это не ошибка, а отсутствие опционального файла. Без проверки кода
-    // curl отдавал бы длину страницы 404, движок пробовал скачать её и
-    // печатал «curl: (22) ... 404» при каждом старте.
-    if status.trim() != "200" {
-        return 0;
-    }
-    // Content-Length берём вторым запросом: -o /dev/null съел заголовки.
-    let out = std::process::Command::new(curl_bin())
-        .args(["-sIL", "--connect-timeout", "20"])
-        .arg(url)
-        .output();
-    let Ok(out) = out else {
-        return 0;
-    };
-    parse_content_length(&String::from_utf8_lossy(&out.stdout))
-}
-
-/// Последний `Content-Length` из заголовков (после редиректов — итоговый).
-fn parse_content_length(headers: &str) -> u64 {
-    headers
-        .lines()
-        .filter_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                value.trim().parse::<u64>().ok()
-            } else {
-                None
-            }
-        })
-        .last()
-        .unwrap_or(0)
-}
-
+/// Распаковка tar.gz в процессе: flate2 разворачивает поток, tar раскладывает
+/// файлы. Внешние бинарники не нужны — в iOS-сэндбоксе их и не бывает.
 fn extract(archive: &Path, dest: &Path) -> Result<()> {
-    let status = std::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(archive)
-        .arg("-C")
-        .arg(dest)
-        .status()
-        .context("Не удалось запустить tar")?;
-    if !status.success() {
-        bail!("tar завершился с кодом {status}");
-    }
-    Ok(())
+    let file = std::fs::File::open(archive)
+        .with_context(|| format!("не открыть {}", archive.display()))?;
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut ar = tar::Archive::new(gz);
+    ar.set_preserve_permissions(true);
+    ar.unpack(dest)
+        .with_context(|| format!("распаковка в {} не удалась", dest.display()))
 }
 
 /// Суммарный размер файлов в каталоге (рекурсивно).
@@ -298,32 +373,36 @@ fn dir_size(dir: &Path) -> u64 {
         .sum()
 }
 
-/// Первый существующий curl, иначе полагаемся на PATH.
-fn curl_bin() -> &'static str {
-    for p in [
-        "/usr/bin/curl",
-        "/opt/homebrew/bin/curl",
-        "/usr/local/bin/curl",
-    ] {
-        if Path::new(p).exists() {
-            return p;
-        }
-    }
-    "curl"
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn content_length_takes_last_header() {
-        let headers = "HTTP/2 302\r\ncontent-length: 10\r\nHTTP/2 200\r\nContent-Length: 42\r\n";
-        assert_eq!(parse_content_length(headers), 42);
-    }
-
-    #[test]
-    fn content_length_missing_is_zero() {
-        assert_eq!(parse_content_length("HTTP/2 200\r\n"), 0);
+    fn extract_packs_tar_gz_back() {
+        // Круг: каталог → tar.gz (системного tar нет, пакуем тем же tar-крейтом)
+        // → extract() → содержимое на месте.
+        let dir = tempfile::tempdir().expect("временный каталог");
+        std::fs::write(dir.path().join("qwen3.5-0.8b_marker.txt"), "внутри").unwrap();
+        let gz_path = dir.path().join("test.tar.gz");
+        let gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(&gz_path).unwrap(),
+            flate2::Compression::default(),
+        );
+        {
+            let mut builder = tar::Builder::new(gz);
+            builder
+                .append_dir_all("models", dir.path())
+                .expect("архив собирается");
+            builder.into_inner().expect("gz закрывается");
+        }
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        extract(&gz_path, &out).expect("распаковка успешна");
+        let marker = out.join("models/qwen3.5-0.8b_marker.txt");
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap(),
+            "внутри",
+            "файл после круга распаковки на месте"
+        );
     }
 }

@@ -85,14 +85,18 @@
 
   const apiActive = $derived(settings.llm_backend === "api");
   const yandexActive = $derived(apiActive && settings.api_preset === "yandex");
+  const gigachatActive = $derived(apiActive && settings.api_preset === "gigachat");
 
-  async function pickApi(preset: "yandex" | "openai") {
+  async function pickApi(preset: "yandex" | "openai" | "gigachat") {
     if (apiActive && settings.api_preset === preset) return;
     const base =
       preset === "yandex"
         ? "https://llm.api.cloud.yandex.net/v1"
-        : "https://api.openai.com/v1";
-    const model = preset === "yandex" ? "yandexgpt-lite" : "gpt-4o-mini";
+        : preset === "gigachat"
+          ? "https://gigachat.devices.sberbank.ru/api/v1"
+          : "https://api.openai.com/v1";
+    const model =
+      preset === "yandex" ? "yandexgpt-lite" : preset === "gigachat" ? "GigaChat" : "gpt-4o-mini";
     await patchSettings({ llm_backend: "api", api_preset: preset, api_base_url: base, api_model: model });
   }
 
@@ -211,16 +215,41 @@
             <span class="row-item__value"><AppIcon name="check" size={15} /></span>
           {/if}
         </button>
+        <button class="row-item" onclick={() => pickApi("gigachat")}>
+          <span class="row-item__text">
+            <span class="row-item__title">GigaChat (Сбер) — облако</span>
+            <span class="row-item__hint">Нужен только ключ авторизации — access-токен Джарвис получает сам</span>
+          </span>
+          {#if gigachatActive}
+            <span class="row-item__value"><AppIcon name="check" size={15} /></span>
+          {/if}
+        </button>
         <button class="row-item" onclick={() => pickApi("openai")}>
           <span class="row-item__text">
             <span class="row-item__title">Своя модель (API) — облако</span>
             <span class="row-item__hint">Любой OpenAI-совместимый сервис: ключ, адрес и модель ниже</span>
           </span>
-          {#if apiActive && !yandexActive}
+          {#if apiActive && settings.api_preset === "openai"}
             <span class="row-item__value"><AppIcon name="check" size={15} /></span>
           {/if}
         </button>
-        {#if apiActive && yandexActive}
+        {#if apiActive && !settings.api_key}
+          <p class="ob-warn">Ключ провайдера не введён — модель не сможет отвечать. Введите ключ и нажмите «Проверить».</p>
+        {/if}
+        {#if apiActive && gigachatActive}
+          <div class="ob-api">
+            <input
+              class="input"
+              type="password"
+              value={settings.api_key}
+              placeholder="Ключ авторизации (Basic-ключ из личного кабинета GigaChat)"
+              onchange={(e) => void saveApiField({ api_key: e.currentTarget.value })}
+            />
+            <button class="btn btn--secondary btn--sm" disabled={apiChecking} onclick={checkApi}>
+              {apiChecking ? "Проверяю…" : "Проверить ключ"}
+            </button>
+          </div>
+        {:else if apiActive && yandexActive}
           <div class="ob-api">
             <input
               class="input"
@@ -403,6 +432,15 @@
     flex-direction: column;
     gap: 8px;
     padding: 12px 14px;
+    border-top: 1px solid rgba(128, 128, 128, 0.12);
+  }
+
+  .ob-warn {
+    margin: 0;
+    padding: 8px 14px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--warn);
     border-top: 1px solid rgba(128, 128, 128, 0.12);
   }
 

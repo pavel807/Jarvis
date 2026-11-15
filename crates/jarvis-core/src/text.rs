@@ -1502,7 +1502,35 @@ fn parse_num(raw: &str) -> (u64, bool) {
     (int_part, has_frac)
 }
 
-fn number_words(raw: &str) -> String {
+/// Цифры по отдельности — для телефонов, кодов и длинных номеров, где
+/// кардинал («восемь миллиардов девятьсот…») нечитаем: каждая цифра важна.
+const DIGIT_WORDS: [&str; 10] = [
+    "ноль",
+    "один",
+    "два",
+    "три",
+    "четыре",
+    "пять",
+    "шесть",
+    "семь",
+    "восемь",
+    "девять",
+];
+
+/// «89161234567» → «восемь девять один шесть …» (нецифровые символы
+/// пропускаются — удобно звать на результате regex-капчеров).
+pub(crate) fn digits_one_by_one(s: &str) -> String {
+    s.chars()
+        .filter_map(|c| c.to_digit(10))
+        .map(|d| DIGIT_WORDS[d as usize])
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Число словами: «1500» → «тысяча пятьсот», «2,5» → «две целых пять».
+/// Нужна и соседнему `tts_normalizer` — цифры внутри слов («qwen3») не
+/// ловятся regex-границами и добираются там вручную.
+pub(crate) fn number_words(raw: &str) -> String {
     let cleaned = raw.replace(',', ".");
     match cleaned.split_once('.') {
         Some((int_part, frac)) => {
@@ -1525,7 +1553,7 @@ pub fn normalize_for_tts(input: &str) -> String {
     use std::sync::LazyLock;
 
     static SIGN_RE: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"(?i)([+\-−])\s*(\d)").unwrap());
+        LazyLock::new(|| regex::Regex::new(r"(?:^|\s)([+\-−])\s*(\d)").unwrap());
 
     static UNIT_RULES: LazyLock<Vec<(regex::Regex, [&'static str; 3])>> = LazyLock::new(|| {
         [
@@ -1554,6 +1582,22 @@ pub fn normalize_for_tts(input: &str) -> String {
                 ["процент", "процента", "процентов"],
             ),
             (
+                r"(?i)(\d+(?:[.,]\d+)?)\s*тб\b",
+                ["терабайт", "терабайта", "терабайтов"],
+            ),
+            (
+                r"(?i)(\d+(?:[.,]\d+)?)\s*гб\b",
+                ["гигабайт", "гигабайта", "гигабайтов"],
+            ),
+            (
+                r"(?i)(\d+(?:[.,]\d+)?)\s*мб\b",
+                ["мегабайт", "мегабайта", "мегабайтов"],
+            ),
+            (
+                r"(?i)(\d+(?:[.,]\d+)?)\s*кб\b",
+                ["килобайт", "килобайта", "килобайтов"],
+            ),
+            (
                 r"(?i)(\d+(?:[.,]\d+)?)\s*кг\b",
                 ["килограмм", "килограмма", "килограммов"],
             ),
@@ -1575,8 +1619,10 @@ pub fn normalize_for_tts(input: &str) -> String {
     static TIME_RE: LazyLock<regex::Regex> =
         LazyLock::new(|| regex::Regex::new(r"\b(\d{1,2}):(\d{2})\b").unwrap());
 
+    // Хвостового \b нет специально: «0.8b» — это ноль целых восемь и «b»,
+    // а с \b regex срезал бы только «0», оставив висячую точку перед «b».
     static NUM_RE: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"\b\d+(?:[.,]\d+)?\b").unwrap());
+        LazyLock::new(|| regex::Regex::new(r"\b\d+(?:[.,]\d+)?").unwrap());
 
     // Даты с опциональным годом: «24 октября», «24 октября 2026»,
     // «24 октября 2026 года», «3-го мая 2026 г.». Год всегда превращается
@@ -1598,15 +1644,41 @@ pub fn normalize_for_tts(input: &str) -> String {
 
     let mut s = input.to_string();
 
-    // Знаки чисел: «+» не произносим, «−» читаем как «минус».
+    // Телефоны и длинные номера — по цифрам, и раньше всего: иначе
+    // NUM_RE прочитает «89161234567» кардиналом («восемь миллиардов…»),
+    // а SIGN_RE нагородит «минусов» внутри «8-916-123-45-67».
+    // Телефон: +7/8 и группы 3-3-2-2; без префикса — 3-3-2-2 или 3-2-2
+    // через дефисы; сплошной номер — от 11 цифр (миллионы вроде «1000000»
+    // остаются кардиналом, так читаются правильнее).
+    static PHONE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(concat!(
+            r"(?:\+7|8)[\s-]?\d{3}[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}\b",
+            r"|\b\d{11,}\b",
+            r"|\b\d{3}-\d{3}-\d{2}-\d{2}\b",
+            r"|\b\d{3}-\d{2}-\d{2}\b",
+        ))
+        .unwrap()
+    });
+    s = PHONE_RE
+        .replace_all(&s, |caps: &regex::Captures| digits_one_by_one(&caps[0]))
+        .to_string();
+
+    // Разряды через пробел «1 000 000» — одно число: иначе NUM_RE
+    // разложит его на куски («один … ноль рублей»).
+    static THOUSANDS_RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\b\d{1,3}(?: \d{3})+\b").unwrap());
+    s = THOUSANDS_RE
+        .replace_all(&s, |caps: &regex::Captures| caps[0].replace(' ', ""))
+        .to_string();
+
+    // Знаки чисел: «+» не произносим, «−» читаем как «минус». Знак должен
+    // быть отделён пробелом или стоять в начале строки — иначе он часть
+    // идентификатора («qwen3.5-0.8b», диапазон «5-7»), а не минус.
     s = SIGN_RE
         .replace_all(&s, |caps: &regex::Captures| {
             let sign = caps[1].chars().next().unwrap();
-            if sign == '+' {
-                caps[2].to_string()
-            } else {
-                format!("минус {}", &caps[2])
-            }
+            let prefix = if sign == '+' { " " } else { " минус " };
+            format!("{prefix}{}", &caps[2])
         })
         .to_string();
 
@@ -1716,6 +1788,65 @@ mod tts_normalize_tests {
         assert_eq!(normalize_for_tts("1000 рублей"), "тысяча рублей");
         assert_eq!(normalize_for_tts("12:30"), "двенадцать тридцать");
         assert_eq!(normalize_for_tts("2,5 км"), "две целых пять километра");
+    }
+
+    #[test]
+    fn phones_and_codes_are_digit_by_digit() {
+        // Каждая цифра важна — кардинал «восемь миллиардов…» нечитаем.
+        assert_eq!(
+            normalize_for_tts("звони 8 916 123-45-67"),
+            "звони восемь девять один шесть один два три четыре пять шесть семь"
+        );
+        assert_eq!(
+            normalize_for_tts("телефон +79161234567"),
+            "телефон семь девять один шесть один два три четыре пять шесть семь"
+        );
+        assert_eq!(
+            normalize_for_tts("номер 89161234567"),
+            "номер восемь девять один шесть один два три четыре пять шесть семь"
+        );
+        assert_eq!(
+            normalize_for_tts("код 495-123-45-67"),
+            "код четыре девять пять один два три четыре пять шесть семь"
+        );
+        assert_eq!(
+            normalize_for_tts("добавочный 123-45-67"),
+            "добавочный один два три четыре пять шесть семь"
+        );
+    }
+
+    #[test]
+    fn quantities_are_not_read_digit_by_digit() {
+        // Миллионные количества — кардиналом, а не «один ноль ноль…».
+        assert_eq!(
+            normalize_for_tts("1000000 просмотров"),
+            "один миллион просмотров"
+        );
+        assert_eq!(normalize_for_tts("200 000 строк"), "двести тысяч строк");
+    }
+
+    #[test]
+    fn grouped_thousands_read_as_one_number() {
+        assert_eq!(
+            normalize_for_tts("цена 1 000 000 рублей"),
+            "цена один миллион рублей"
+        );
+        assert_eq!(
+            normalize_for_tts("бюджет 1 500 рублей"),
+            "бюджет одна тысяча пятьсот рублей"
+        );
+    }
+
+    #[test]
+    fn byte_units_are_spoken() {
+        assert_eq!(
+            normalize_for_tts("модель весит 2,2 ГБ"),
+            "модель весит две целых две гигабайта"
+        );
+        assert_eq!(
+            normalize_for_tts("файл 150 мб"),
+            "файл сто пятьдесят мегабайтов"
+        );
     }
 
     #[test]

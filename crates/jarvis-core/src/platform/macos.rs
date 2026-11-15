@@ -138,27 +138,28 @@ pub(crate) fn applescript_escape(s: &str) -> String {
 // Приложения
 // =========================================================================
 
-/// Запущено ли приложение: pgrep по имени процесса, затем по пути бандла —
-/// у части приложений имя процесса не совпадает с названием
-/// («Code» vs «Visual Studio Code»).
+/// Запущено ли приложение: pgrep по имени процесса, затем по пути главного
+/// исполняемого файла бандла — у части приложений имя процесса не совпадает
+/// с названием («Code» vs «Visual Studio Code»).
+///
+/// Искать просто `{name}.app` нельзя: `pgrep -f` матчит и аргументы, а внутри
+/// бандла почти всегда висят фоновые расширения (`Notes.app/Contents/PlugIns/
+/// …appex`) — из-за них закрытые Заметки считались «уже открытыми», и окно
+/// не появлялось. Приложением считаем только главный исполняемый файл:
+/// `…/{name}.app/Contents/MacOS/…`.
 pub fn app_running(name: &str) -> bool {
     let name = name.trim();
     if name.is_empty() {
         return false;
     }
-    let exact = Command::new("pgrep")
-        .args(["-x", name])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if exact {
-        return true;
-    }
-    Command::new("pgrep")
-        .args(["-f", &format!("{name}.app")])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let pgrep = |args: &[&str]| {
+        Command::new("pgrep")
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    pgrep(&["-x", name]) || pgrep(&["-f", &format!("/{name}\\.app/Contents/MacOS/")])
 }
 
 /// Список установленных приложений: сканируем каталоги бандлов.
@@ -271,16 +272,21 @@ pub fn app_resolve(name: &str) -> String {
 /// процессом); `Err` — честная причина.
 pub fn app_open(name: &str) -> Result<String, String> {
     let name = app_resolve(name);
-    if app_running(&name) {
-        return Ok(format!("{name} уже открыт"));
-    }
-    // `open -a` завершается ошибкой, если приложения нет, — статус честный.
+    let was_running = app_running(&name);
+    // `open -a` и запускает закрытое приложение, и выводит на передний план
+    // запущенное: окно закрывают, процесс живёт — «уже открыт» без окна
+    // оставлял бы пользователя с пустым экраном (как на Linux: просьба
+    // «открой» при запущенном приложении значит «покажи окно»).
     match Command::new("open").args(["-a", &name]).status() {
         Ok(s) if s.success() => {
             // Статус «ок» ещё не гарантия: ждём появления процесса до 3 сек.
             for _ in 0..6 {
                 if app_running(&name) {
-                    return Ok(format!("Открыл {name}"));
+                    return Ok(if was_running {
+                        format!("{name} уже открыт — вывел на передний план")
+                    } else {
+                        format!("Открыл {name}")
+                    });
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
@@ -411,9 +417,7 @@ pub fn window_control(action: &str, app: Option<&str>) -> String {
     use crate::platform::WindowControlOutcome;
     match window_control_checked(action, app) {
         WindowControlOutcome::Done(text) => text,
-        WindowControlOutcome::Ambiguous(targets) => {
-            ambiguous_window_speech(action, app, &targets)
-        }
+        WindowControlOutcome::Ambiguous(targets) => ambiguous_window_speech(action, app, &targets),
     }
 }
 
@@ -462,8 +466,15 @@ pub fn window_control_checked(
     // Столы и раскладка окон — пока только Hyprland на Linux.
     if matches!(
         verb,
-        "desktop" | "minimizeall" | "movetodesktop" | "half_left" | "half_right"
-        | "desktop_next" | "desktop_prev" | "window_next" | "window_prev"
+        "desktop"
+            | "minimizeall"
+            | "movetodesktop"
+            | "half_left"
+            | "half_right"
+            | "desktop_next"
+            | "desktop_prev"
+            | "window_next"
+            | "window_prev"
     ) {
         return WindowControlOutcome::Done(
             "Столы и раскладку окон я пока умею только на Hyprland (Linux)".to_string(),
@@ -478,8 +489,7 @@ pub fn window_control_checked(
                 Some(me) => (me, "Джарвис".to_string()),
                 None => {
                     return WindowControlOutcome::Done(
-                        "Моё окно не запущено — я в фоне. Скажи, чьё окно свернуть"
-                            .to_string(),
+                        "Моё окно не запущено — я в фоне. Скажи, чьё окно свернуть".to_string(),
                     );
                 }
             }
@@ -517,8 +527,7 @@ pub fn window_control_checked(
                 Ok(Some(me)) => (me, "Джарвис".to_string()),
                 Ok(None) => {
                     return WindowControlOutcome::Done(
-                        "Моё окно не запущено — я в фоне. Скажи, чьё окно свернуть"
-                            .to_string(),
+                        "Моё окно не запущено — я в фоне. Скажи, чьё окно свернуть".to_string(),
                     );
                 }
                 Err(e) => {
@@ -578,10 +587,7 @@ pub fn window_control_target(action: &str, app: &str, title: &str) -> String {
     let windows = match window_targets(&process) {
         Ok(windows) => windows,
         Err(e) => {
-            return format!(
-                "Не могу управлять окнами: {}",
-                friendly_access_error(&e)
-            );
+            return format!("Не могу управлять окнами: {}", friendly_access_error(&e));
         }
     };
     let index = windows
@@ -609,10 +615,7 @@ pub fn window_control_target(action: &str, app: &str, title: &str) -> String {
 
 /// Список окон процесса: заголовок и состояние «свёрнуто».
 fn window_targets(process: &str) -> Result<Vec<crate::platform::WindowTarget>, String> {
-    let p = format!(
-        "\"{}\"",
-        process.replace('\\', "\\\\").replace('"', "\\\"")
-    );
+    let p = format!("\"{}\"", process.replace('\\', "\\\\").replace('"', "\\\""));
     let script = format!(
         r#"tell application "System Events" to tell process {p}
 set out to ""
@@ -874,9 +877,9 @@ end tell"#
                 Ok(out) if out.trim() == "готово" => {
                     format!("вернул окно {name} из Dock")
                 }
-                Ok(_) => format!(
-                    "Не удалось вернуть окно {name}: macOS не подтвердил разворачивание"
-                ),
+                Ok(_) => {
+                    format!("Не удалось вернуть окно {name}: macOS не подтвердил разворачивание")
+                }
                 Err(e) => format!("Ошибка: {}", friendly_access_error(&e)),
             }
         }
@@ -983,7 +986,9 @@ pub fn get_volume() -> Option<u8> {
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    text.parse::<f64>().ok().map(|v| v.round().clamp(0.0, 100.0) as u8)
+    text.parse::<f64>()
+        .ok()
+        .map(|v| v.round().clamp(0.0, 100.0) as u8)
 }
 
 pub fn set_brightness(percent: u8) -> bool {
@@ -1537,6 +1542,57 @@ mod tests {
         // границу слова не должен совпадать с алиасом.
         assert_eq!(alias("яндекс карты"), None);
         assert_eq!(alias("карты"), Some("Maps"));
+    }
+
+    /// Регрессия: `pgrep -f "Notes.app"` находил Spotlight-расширение внутри
+    /// бандла (`…/Notes.app/Contents/PlugIns/…appex` — висит в фоне почти
+    /// всегда), закрытые Заметки считались «уже открытыми», и окно не
+    /// появлялось. Запущенное приложение — только главный исполняемый файл
+    /// бандла, не любой процесс с путём бандла в аргументах.
+    #[test]
+    fn bundle_extension_does_not_count_as_running_app() {
+        // На машине с реально открытыми Заметками проверять нечего.
+        if app_running("Notes") {
+            eprintln!("⚠️ Notes открыты — проверка ложного «уже открыт» пропущена");
+            return;
+        }
+        // Процесс с аргументом-путём внутрь бандла: для pgrep -f это ровно
+        // то, как выглядит работающий appex.
+        let mut child = Command::new("perl")
+            .args([
+                "-e",
+                "sleep 5",
+                "/System/Applications/Notes.app/Contents/PlugIns/com.apple.Notes.SpotlightIndexExtension.appex/Contents/MacOS/com.apple.Notes.SpotlightIndexExtension",
+            ])
+            .spawn()
+            .expect("perl входит в macOS");
+        assert!(
+            !app_running("Notes"),
+            "расширение внутри бандла не делает приложение запущенным"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Путь главного исполняемого файла бандла в аргументах — это и есть
+    /// запущенное приложение, даже если имя процесса не совпадает с бандлом
+    /// («Code» vs «Visual Studio Code»).
+    #[test]
+    fn main_executable_path_counts_as_running_app() {
+        let mut child = Command::new("perl")
+            .args([
+                "-e",
+                "sleep 5",
+                "/Applications/Notes.app/Contents/MacOS/Notes",
+            ])
+            .spawn()
+            .expect("perl входит в macOS");
+        assert!(
+            app_running("Notes"),
+            "главный исполняемый файл бандла — запущенное приложение"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]

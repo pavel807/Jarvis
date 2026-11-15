@@ -174,15 +174,106 @@ pub fn mic_request_access() -> &'static str {
     mic_permission::request_access()
 }
 
+/// iOS: аудио-сессия (AVAudioSession) и разрешение на микрофон.
+///
+/// На iPhone cpal-стрим без активной сессии открывается, но маршрут система
+/// не выдаёт: запись молчит, вывод не слышен. Перед входным и выходным
+/// потоком выставляем категорию PlayAndRecord (динамик вместо телефонного
+/// наушника, Bluetooth-гарнитуры разрешены) и активируем сессию.
+#[cfg(target_os = "ios")]
+mod ios_session {
+    #![allow(deprecated)] // recordPermission устарел в пользу AVAudioApplication (iOS 17+);
+    // старый путь работает на всех поддерживаемых версиях iOS, а не только свежих.
+
+    use anyhow::{Context, Result, bail};
+    use objc2::rc::Retained;
+    use objc2::runtime::Bool;
+    use objc2_avf_audio::{
+        AVAudioSession, AVAudioSessionCategoryOptions, AVAudioSessionRecordPermission,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Запрос уже отправляли: системный диалог показывается один раз,
+    /// дальше только опрашиваем статус.
+    static REQUEST_FIRED: AtomicBool = AtomicBool::new(false);
+
+    fn session() -> Retained<AVAudioSession> {
+        unsafe { AVAudioSession::sharedInstance() }
+    }
+
+    /// Активирует сессию: запись + воспроизведение, вывод на динамик.
+    /// Повторные вызовы безопасны — setCategory/setActive идемпотентны.
+    pub fn activate() -> Result<()> {
+        let session = session();
+        unsafe {
+            let Some(category) = objc2_avf_audio::AVAudioSessionCategoryPlayAndRecord else {
+                bail!("категория PlayAndRecord недоступна в этой версии iOS");
+            };
+            session
+                .setCategory_withOptions_error(
+                    &category,
+                    AVAudioSessionCategoryOptions::DefaultToSpeaker
+                        | AVAudioSessionCategoryOptions::AllowBluetoothHFP,
+                )
+                .context("не задать категорию аудио-сессии")?;
+            session
+                .setActive_error(true)
+                .context("не активировать аудио-сессию")?;
+        }
+        Ok(())
+    }
+
+    /// Статус разрешения на микрофон: "authorized" | "denied" | "pending" |
+    /// "unknown" (pending — системный запрос ещё не отвечен).
+    pub fn status_str() -> &'static str {
+        let permission = unsafe { session().recordPermission() };
+        match permission {
+            AVAudioSessionRecordPermission::Granted => "authorized",
+            AVAudioSessionRecordPermission::Undetermined => "pending",
+            AVAudioSessionRecordPermission::Denied => "denied",
+            _ => "unknown",
+        }
+    }
+
+    /// Показывает системный диалог «Разрешить Jarvis доступ к микрофону?»,
+    /// если статус ещё не определён. Ответ приходит асинхронно — вызывающий
+    /// опрашивает [`status_str`], как на macOS.
+    pub fn request() -> &'static str {
+        if unsafe { session().recordPermission() } == AVAudioSessionRecordPermission::Undetermined
+            && !REQUEST_FIRED.swap(true, Ordering::SeqCst)
+        {
+            let session = session();
+            let block = block2::RcBlock::new(|_granted: Bool| {
+                // Ответ читаем опросом статуса — здесь делать нечего.
+            });
+            unsafe { session.requestRecordPermission(&block) };
+        }
+        status_str()
+    }
+}
+
+/// Статус доступа к микрофону для UI: "authorized" | "denied" | "pending".
+#[cfg(target_os = "ios")]
+pub fn mic_status() -> &'static str {
+    ios_session::status_str()
+}
+
+/// Запрос доступа к микрофону (системный диалог iOS). После отказа iOS
+/// диалог не показывает — вернётся "denied", вызывающий откроет Настройки.
+#[cfg(target_os = "ios")]
+pub fn mic_request_access() -> &'static str {
+    ios_session::request()
+}
+
 /// На Linux системного диалога доступа нет: «разрешён» = есть устройство
 /// ввода. Запрос доступа — та же проверка: спрашивать нечего, кроме
 /// наличия самого микрофона.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub fn mic_status() -> &'static str {
     mic_probe()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub fn mic_request_access() -> &'static str {
     mic_probe()
 }
@@ -190,7 +281,7 @@ pub fn mic_request_access() -> &'static str {
 /// Есть ли микрофон: pactl (PipeWire/PulseAudio), исключая источники
 /// `.monitor` — это петля вывода, а не вход. Отсутствие pactl — «не
 /// удалось определить», не ложное «разрешён».
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 fn mic_probe() -> &'static str {
     let Ok(out) = std::process::Command::new("sh")
         .arg("-c")
@@ -274,6 +365,18 @@ pub fn spawn_stream(tx: SyncSender<Vec<f32>>) -> Result<(cpal::Stream, usize)> {
 
     #[cfg(target_os = "macos")]
     ensure_mic_permission()?;
+    // iOS: при явном запрете — честная ошибка (система отдала бы тишину),
+    // затем активация сессии без неё cpal-стрим не получает маршрут.
+    #[cfg(target_os = "ios")]
+    {
+        if ios_session::status_str() == "denied" {
+            bail!(
+                "Нет доступа к микрофону — iOS запрещает запись. Открой Настройки → \
+                 Jarvis → Микрофон и включи доступ, затем вернись в приложение."
+            );
+        }
+        ios_session::activate().context("аудио-сессия iOS не активировалась")?;
+    }
 
     let host = cpal::default_host();
 
@@ -414,6 +517,10 @@ pub struct OutputPlayer {
 
 impl OutputPlayer {
     pub fn new() -> Result<Self> {
+        // iOS: без активной сессии выходной стрим не играет (маршрут не выдан).
+        #[cfg(target_os = "ios")]
+        ios_session::activate().context("аудио-сессия iOS не активировалась")?;
+
         let host = cpal::default_host();
         let device = host
             .default_output_device()

@@ -407,9 +407,387 @@ pub fn looks_like_fresh_info(text: &str) -> bool {
     .any(|k| t.contains(k))
 }
 
+/// Универсальный факт-вопрос — не обязательно про свежие данные: «почему
+/// море солёное», «что такое квазар», «чем отличается SQL от NoSQL».
+/// Свежесть не важна: маленькая локальная модель на такие вопросы часто
+/// выдумывает, а поиск отвечает точно. Вспомогательный гейт к
+/// [`looks_like_fresh_info`]: она ловит данные, эта — знания.
+pub fn looks_like_factual_question(text: &str) -> bool {
+    let t = text.to_lowercase().replace('ё', "е");
+    // Вопрос про самого ассистента («почему ты молчишь», «что ты умеешь»,
+    // «что тебе нужно») — не поиск.
+    if t.split_whitespace().any(|w| w == "ты" || w == "тебе" || w == "тебя") {
+        return false;
+    }
+    [
+        "почему",
+        "что такое",
+        "что такое ",
+        "кто такой",
+        "кто такая",
+        "кто такие",
+        "где наход",
+        "где род",
+        "где жив",
+        "где расположен",
+        "чем отличается",
+        "чем различ",
+        "какая разница",
+        "в чем разница",
+        "в чём разница",
+        "кто придумал",
+        "кто изобр",
+        "кто открыл",
+        "кто написал",
+        "кто создал",
+        "кто первым",
+        "самый ",
+        "самая ",
+        "самое ",
+        "самые ",
+        "расскажи про ",
+        "расскажи о ",
+        "расскажи кратко",
+        "как работает",
+        "как устроен",
+        "из чего состоит",
+        "для чего нуж",
+        "зачем нуж",
+        "в чем смысл",
+        "в чём смысл",
+    ]
+    .iter()
+    .any(|k| t.contains(k))
+}
+
+// ============================================================
+// Чтение статей («почитай статью про …», «прочитай по ссылке»)
+// ============================================================
+
+/// Сколько символов статьи читается за один заход («читай дальше»):
+/// примерно минута речи. Статья длиннее — остаётся на следующий заход.
+pub const ARTICLE_CHUNK_CHARS: usize = 1400;
+/// Верхний предел извлечённого текста: дальше страница превращается в
+/// мусор из меню и комментариев, а контекст модели не резиновый.
+const ARTICLE_MAX_CHARS: usize = 20_000;
+
+/// Прочитанная статья: заголовок, полный текст и сколько уже прочитано.
+struct ArticleState {
+    title: String,
+    text: String,
+    offset: usize,
+}
+
+/// Последняя прочитанная статья — «читай дальше» берёт следующий кусок.
+static ARTICLE: Mutex<Option<ArticleState>> = Mutex::new(None);
+
+/// Агент под страницы: у поиска бюджет 4 с — заголовки сниппетов приходят
+/// быстро; целая страница тяжелее, ей нужен свой таймаут.
+fn agent_page() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_resolve(Some(Duration::from_millis(1500)))
+            .timeout_connect(Some(Duration::from_secs(6)))
+            .timeout_global(Some(Duration::from_secs(20)))
+            .max_idle_connections_per_host(2)
+            .build()
+            .new_agent()
+    })
+}
+
+/// Похоже ли сказанное на просьбу прочитать статью/страницу вслух.
+/// Возвращает предмет чтения: URL из текста либо тему для поиска.
+/// Пустая тема («просто почитай что-нибудь») — None: непонятно, что искать.
+pub fn read_article_target(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let has_read_word = ["почитай", "прочитай", "прочти", "зачитай", "читай"]
+        .iter()
+        .any(|w| lower.contains(w));
+    if !has_read_word {
+        return None;
+    }
+    // «Не читай», «перестань читать» — не просьба.
+    if lower.contains("не читай") || lower.contains("перестань") || lower.contains("хватит") {
+        return None;
+    }
+
+    // Явная ссылка в тексте — читаем её.
+    for token in text.split_whitespace() {
+        let token = token.trim_matches(|c: char| {
+            c == '"' || c == '\'' || c == ')' || c == '(' || c == ',' || c == '.' || c == '!'
+        });
+        if token.starts_with("http://") || token.starts_with("https://") || token.contains("://")
+        {
+            return Some(token.to_string());
+        }
+        if token.ends_with(".ru") || token.ends_with(".com") {
+            return Some(format!("https://{token}"));
+        }
+    }
+
+    // Предмет: то, что осталось после слов-обёрток («почитай статью про …»).
+    let mut subject = text.to_string();
+    for filler in [
+        "джарвис",
+        "пожалуйста",
+        "мне",
+        "вслух",
+        "статью",
+        "статьи",
+        "статья",
+        "почитай",
+        "прочитай",
+        "прочти",
+        "зачитай",
+        "читай",
+        "про",
+        "о ",
+        "об ",
+        "ссылке",
+        "ссылку",
+        "по ссылке",
+        "из интернета",
+        "в интернете",
+        "что-нибудь",
+        "что нибудь",
+        "что-то",
+        "сейчас",
+        "давай",
+        "а",
+    ] {
+        subject = subject
+            .to_lowercase()
+            .replace(filler, " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        // replace выше стирает регистр темы — приемлемо: тема уходит в поиск.
+    }
+    let subject = subject.trim();
+    if subject.is_empty() || subject.chars().count() < 3 {
+        return None;
+    }
+    Some(subject.to_string())
+}
+
+/// Скачать страницу и вернуть (заголовок, читаемый текст).
+/// Скрипты, стили, меню и подвалы вычищаются — синтезу речь нужна, а не HTML.
+pub fn fetch_article(url: &str) -> Result<(String, String)> {
+    let response = agent_page()
+        .get(url)
+        .header("User-Agent", USER_AGENT)
+        .call()
+        .context("страница не открылась")?;
+    let mut html = response
+        .into_body()
+        .read_to_string()
+        .context("не удалось прочитать страницу")?;
+    // Дальше страницы 2 МБ — это уже не статья, обрежем сырой HTML, чтобы
+    // не держать в памяти мегабайты мусора. Граница — по символу UTF-8,
+    // а не по байту, иначе строка становится невалидной.
+    if html.len() > 2_000_000 {
+        let mut end = 2_000_000;
+        while !html.is_char_boundary(end) {
+            end -= 1;
+        }
+        html.truncate(end);
+    }
+    let (title, text) = extract_article_text(&html);
+    if text.chars().count() < 120 {
+        bail!("на странице не нашлось текста статьи");
+    }
+    let text = text.chars().take(ARTICLE_MAX_CHARS).collect::<String>();
+    Ok((title, text))
+}
+
+/// Запомнить статью и отдать первый кусок для озвучки.
+pub fn start_reading(title: &str, text: &str) -> String {
+    let mut article = ARTICLE.lock().unwrap_or_else(|e| e.into_inner());
+    *article = Some(ArticleState {
+        title: title.to_string(),
+        text: text.to_string(),
+        offset: 0,
+    });
+    next_article_chunk()
+        .unwrap_or_else(|| "Статья слишком короткая.".to_string())
+}
+
+/// Следующий кусок статьи для «читай дальше». None — нечего читать: статья
+/// не открывалась или дочитана до конца.
+pub fn next_article_chunk() -> Option<String> {
+    let mut article = ARTICLE.lock().unwrap_or_else(|e| e.into_inner());
+    let state = article.as_mut()?;
+    let chars: Vec<char> = state.text.chars().collect();
+    if state.offset >= chars.len() {
+        return None;
+    }
+    let end = (state.offset + ARTICLE_CHUNK_CHARS).min(chars.len());
+    let mut chunk: String = chars[state.offset..end].iter().collect();
+    // Кусок заканчивается на полуслове — отступаем до последней границы.
+    if end < chars.len() {
+        if let Some(pos) = chunk.rfind(|c| c == '.' || c == '!' || c == '?' || c == '\n') {
+            chunk.truncate(pos + 1);
+            state.offset += chunk.chars().count();
+        } else {
+            state.offset = end;
+        }
+    } else {
+        state.offset = end;
+    }
+    Some(chunk.trim_start().to_string())
+}
+
+/// Сколько ещё осталось читать (символов). 0 — статья дочитана.
+pub fn article_remaining() -> usize {
+    let article = ARTICLE.lock().unwrap_or_else(|e| e.into_inner());
+    article
+        .as_ref()
+        .map(|a| a.text.chars().count().saturating_sub(a.offset))
+        .unwrap_or(0)
+}
+
+/// Заголовок последней статьи (для «о чём мы читали»).
+pub fn last_article_title() -> Option<String> {
+    let article = ARTICLE.lock().unwrap_or_else(|e| e.into_inner());
+    article.as_ref().map(|a| a.title.clone())
+}
+
+/// Вытащить (заголовок, текст) из HTML: скрипты/стили/навигация прочь,
+/// абзацы разделяются переносом строки, теги и сущности раскрываются.
+pub fn extract_article_text(html: &str) -> (String, String) {
+    let title = html
+        .to_ascii_lowercase()
+        .find("<title")
+        .and_then(|start| {
+            let open_end = html[start..].find('>')? + start + 1;
+            let close = html[open_end..].find("</title>")? + open_end;
+            Some(html[open_end..close].trim().to_string())
+        })
+        .unwrap_or_default();
+
+    let mut cleaned = html.to_string();
+    // Скрипты и стили — целиком, вместе с содержимым.
+    for tag in ["script", "style", "noscript", "svg", "head"] {
+        cleaned = remove_block(&cleaned, tag);
+    }
+    // Навигация и подвалы — лучшие усилия: не на всех сайтах семантика есть.
+    for tag in ["nav", "header", "footer", "aside", "form", "button"] {
+        cleaned = remove_block(&cleaned, tag);
+    }
+    // HTML-комментарии.
+    while let Some(start) = cleaned.find("<!--") {
+        match cleaned[start..].find("-->") {
+            Some(len) => cleaned.replace_range(start..start + len + 3, ""),
+            None => break,
+        }
+    }
+    // Блочные теги дают границу абзаца.
+    for tag in [
+        "</p>", "</h1>", "</h2>", "</h3>", "</h4>", "</li>", "<br", "</div>", "</tr>",
+    ] {
+        cleaned = cleaned.replace(tag, "\n");
+    }
+    let text = strip_tags(&cleaned);
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.chars().count() < 2 {
+            continue;
+        }
+        // Мусорные строки-обёртки («Поделиться», подписки) — лучшие усилия.
+        const NOISE: &[&str] = &["поделиться", "подписат", "cookie", "реклам", "комментар"];
+        if NOISE.iter().any(|n| line.to_lowercase().contains(n)) && line.chars().count() < 60 {
+            continue;
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    (title, out.trim().to_string())
+}
+
+/// Удалить блок `<tag …>…</tag>` целиком (регистронезависимо, без вложенных
+/// одноимённых тегов — для script/style этого достаточно).
+fn remove_block(html: &str, tag: &str) -> String {
+    let mut out = html.to_string();
+    let close = format!("</{tag}>");
+    let open_a = format!("<{tag}>");
+    let open_b = format!("<{tag} ");
+    loop {
+        let lower = out.to_ascii_lowercase();
+        let Some(start) = lower.find(&open_a).or_else(|| lower.find(&open_b)) else {
+            break;
+        };
+        match lower[start..].find(&close) {
+            Some(offset) => {
+                let end = start + offset + close.len();
+                out.replace_range(start..end, " ");
+            }
+            None => break,
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn factual_question_detection() {
+        for phrase in [
+            "почему море солёное",
+            "что такое квазар",
+            "где родился Пушкин",
+            "чем отличается SQL от NoSQL",
+            "кто придумал телефон",
+            "самая высокая гора в мире",
+            "расскажи про чёрные дыры",
+        ] {
+            assert!(looks_like_factual_question(phrase), "факт-вопрос: {phrase}");
+        }
+        for phrase in [
+            "расскажи сказку про кота",
+            "открой ютуб",
+            "почему ты такой задумчивый",
+            "что ты умеешь",
+            "какая погода сегодня",
+        ] {
+            assert!(!looks_like_factual_question(phrase), "не факт-вопрос: {phrase}");
+        }
+    }
+
+    #[test]
+    fn article_text_is_cleaned() {
+        let html = "<html><head><title>Тест</title><style>body{color:red}</style></head>\
+<body><script>alert(1)</script><nav>меню</nav><article><h1>Заголовок</h1>\
+<p>Первый &amp; второй абзац.</p><p>Второй абзац.</p></article><footer>подвал</footer></body></html>";
+        let (title, text) = extract_article_text(html);
+        assert_eq!(title, "Тест");
+        assert!(text.contains("Первый & второй абзац"));
+        assert!(text.contains("Второй абзац"));
+        assert!(!text.contains("alert"));
+        assert!(!text.contains("меню"));
+        assert!(!text.contains("подвал"));
+        assert!(!text.contains("color:red"));
+    }
+
+    #[test]
+    fn article_chunking_advances() {
+        let text = "абзац один. ".repeat(200);
+        {
+            let mut article = ARTICLE.lock().unwrap_or_else(|e| e.into_inner());
+            *article = Some(ArticleState {
+                title: "Тест".into(),
+                text: text.clone(),
+                offset: 0,
+            });
+        }
+        let first = next_article_chunk().expect("первый кусок");
+        let second = next_article_chunk().expect("второй кусок");
+        assert_ne!(first, second);
+        assert!(first.chars().count() <= ARTICLE_CHUNK_CHARS + 200);
+    }
 
     #[test]
     fn strip_tags_basic() {

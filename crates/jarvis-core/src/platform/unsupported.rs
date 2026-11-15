@@ -54,6 +54,10 @@ pub fn set_volume(_percent: u8) -> bool {
     false
 }
 
+pub fn get_volume() -> Option<u8> {
+    None
+}
+
 pub fn set_brightness(_percent: u8) -> bool {
     false
 }

@@ -131,6 +131,8 @@ const THIRTY_SECONDS: Duration = Duration::from_secs(30);
 /// отклоняется до выполнения.
 pub fn spec_for(name: &str) -> Option<ToolSpec> {
     // Плагины-автоматизации: спецификация из их реестра, тот же контракт.
+    // iOS: плагинов нет (см. mod plugins в lib.rs).
+    #[cfg(not(target_os = "ios"))]
     if crate::plugins::is_plugin_tool(name) {
         return crate::plugins::spec(name);
     }

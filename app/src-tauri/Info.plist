@@ -3,6 +3,6 @@
 <plist version="1.0">
   <dict>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Jarvis использует микрофон для распознавания wake word и голосовых команд.</string>
+    <string>Джарвису нужен микрофон, чтобы слышать ваш вопрос и отвечать голосом.</string>
   </dict>
 </plist>

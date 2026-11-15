@@ -25,7 +25,6 @@ pub mod uzu_backend;
 use crate::events::{EventTx, JarvisEvent};
 use crate::router;
 use crate::tools;
-use crate::tts::AudioMessage;
 use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
@@ -34,8 +33,9 @@ use std::time::Duration;
 
 pub use template::ChatTurn;
 
-/// Сколько последних реплик (вопрос + ответ = 2 записи) держим в контексте.
-pub const MAX_HISTORY_ENTRIES: usize = 6;
+/// Сколько обменов (вопрос+ответ) держать в разговорной памяти. 6 было
+/// впритык: «а почему?» после двух уточнений уже теряло контекст.
+pub const MAX_HISTORY_ENTRIES: usize = 10;
 
 /// Номер последнего обращения пользователя.
 ///
@@ -98,14 +98,16 @@ pub const NORMALIZE_SYSTEM_PROMPT: &str = "Ты нормализатор тек�
 
 /// Базовый системный промпт для разговорного режима (без tool-инструкций).
 ///
-/// Коротко намеренно. Раньше здесь был абзац о том, как ассистент должен
-/// материться в ответ на оскорбления, и требование «5-10 развёрнутых
-/// предложений»: он занимал треть промпта, прямо противоречил первой строке
-/// про краткость и для модели такого размера был чистым шумом.
+/// Универсальный ассистент: не только команды, но и любые вопросы — факты,
+/// «почему», математика, даты, советы. Коротко намеренно: длинный промпт
+/// для модели такого размера был чистым шумом.
 pub const CHAT_SYSTEM_PROMPT: &str = concat!(
-    "Ты голосовой ассистент, мужской род. Коротко, по-русски, без markdown — ",
-    "тебя озвучивает синтез. Факты, даты, числа — через web_search; ",
-    "не уверен — «не знаю». Простое — отвечай сразу. ",
+    "Ты голосовой ассистент, мужской род. Отвечай по-русски на любые вопросы: ",
+    "факты, объяснения «почему», даты, математика, переводы, советы. ",
+    "Общеизвестное — сразу и уверенно. Коротко: 1–4 предложения, ",
+    "без markdown и эмодзи — тебя озвучивает синтез. ",
+    "Точные числа, цены, имена, свежие данные — вызывай web_search и отвечай ",
+    "по его результатам; не уверен — «не знаю», не выдумывай. ",
     "Действие — один блок ",
     "<tool>{\"name\":\"имя\",\"args\":{...}}</tool> (open_app, окна, таймеры, файлы, музыка); ",
     "без блока — текстовый ответ."
@@ -138,6 +140,18 @@ fn chat_system_prompt() -> &'static str {
 }
 
 const LLM_WAIT_TIMEOUT_SECS: u64 = 300;
+
+/// Сообщения аудио-конвейера. Определение здесь, а не в `tts`: разговорный
+/// конвейер (ask/ask_web) компилируется и там, где голосового стека нет
+/// (iOS) — канал существует, озвучку делает интерфейс, реплики не теряются.
+pub enum AudioMessage {
+    PlayWav(String),
+    SynthesizeAndPlay(String),
+    /// Превью голоса в интерфейсе: фраза синтезируется указанным диктором,
+    /// но выбранный голос приложения не меняет. В кэш не пишется.
+    PreviewVoice { text: String, voice: String },
+    Stop,
+}
 
 /// Диспетчер LLM-бэкендов: одинаковый потоковый интерфейс поверх candle и uzu.
 pub struct LlmEngine {
@@ -192,7 +206,9 @@ impl LlmEngine {
             }
             #[cfg(not(target_os = "macos"))]
             {
-                eprintln!("⚠️ llm_backend = \"uzu\" работает только на macOS — использую candle");
+                eprintln!(
+                    "⚠️ llm_backend = \"uzu\" работает только на macOS — использую candle"
+                );
             }
         }
         Ok(Self {
@@ -318,6 +334,19 @@ impl LlmEngine {
     }
 }
 
+/// Какая модель **фактически** загружена и отвечает. Источник правды для UI:
+/// настройка может говорить «облако», но пока загрузка не удалась, отвечать
+/// некому — и интерфейс должен это видеть, а не угадывать по settings.toml.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct BackendInfo {
+    /// "uzu" | "candle" | "api".
+    pub backend: String,
+    /// Пресет облака ("yandex" | "gigachat" | "openai"), пусто для локальных.
+    pub preset: String,
+    /// Имя модели: локальный каталог или модель у провайдера.
+    pub model: String,
+}
+
 pub struct SharedLlmState {
     pub engine: Mutex<Option<LlmEngine>>,
     pub condvar: Condvar,
@@ -326,6 +355,8 @@ pub struct SharedLlmState {
     /// увеличивает счётчик — старый загрузчик (например, качающий модель
     /// uzu) видит устаревшее поколение и не записывает свой движок.
     pub generation: AtomicU64,
+    /// Фактически загруженный бэкенд. None — готового движка нет.
+    pub active: Mutex<Option<BackendInfo>>,
 }
 
 pub type SharedLlm = Arc<SharedLlmState>;
@@ -337,6 +368,7 @@ impl SharedLlmState {
             condvar: Condvar::new(),
             failed: AtomicBool::new(false),
             generation: AtomicU64::new(1),
+            active: Mutex::new(None),
         }
     }
 }
@@ -345,6 +377,55 @@ impl Default for SharedLlmState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Убрать движок из слота. Обязательный шаг при неудачной перезагрузке
+/// (например, облако не запустилось): иначе в слоте остаётся прежняя
+/// локальная модель, `wait_for_engine` мгновенно возвращает её, и выбранное
+/// облако молча подменялось «тупым» локальным ответом.
+fn discard_engine(shared: &SharedLlm) {
+    let had_engine = {
+        let mut guard = shared.engine.lock().unwrap_or_else(|e| e.into_inner());
+        guard.take().is_some()
+    };
+    *shared.active.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    if had_engine {
+        println!("🗑 Слот LLM очищен: предыдущий движок больше не отвечает");
+    }
+    shared.condvar.notify_all();
+}
+
+/// Какая модель фактически отвечает (для статуса и UI). None — движок не готов.
+pub fn active_backend(shared: &SharedLlm) -> Option<BackendInfo> {
+    shared
+        .active
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Честное сообщение, почему модель сейчас не ответит: загрузка не удалась
+/// или ещё идёт. Формулировка — под выбранный бэкенд, чтобы подсказка была
+/// действием («проверь ключ»), а не общей «модель грузится».
+fn engine_unavailable_message(shared: &SharedLlm) -> &'static str {
+    if shared.failed.load(Ordering::SeqCst) {
+        if config::backend() == "api" {
+            "Облачная модель не запустилась: проверь ключ и настройки провайдера."
+        } else {
+            "Модель не загрузилась: проверь выбор модели в настройках."
+        }
+    } else {
+        "Модель ещё загружается, повтори запрос чуть позже."
+    }
+}
+
+/// Движок недоступен (failed или не дождались): события + голосовая реплика.
+fn report_engine_unavailable(shared: &SharedLlm, events: &EventTx, audio_tx: &Sender<AudioMessage>) {
+    let message = engine_unavailable_message(shared);
+    let _ = events.send(JarvisEvent::Error {
+        message: message.into(),
+    });
+    let _ = audio_tx.send(AudioMessage::SynthesizeAndPlay(message.into()));
 }
 
 pub fn spawn_llm_loader(shared: &SharedLlm, events: &EventTx) {
@@ -391,6 +472,18 @@ pub fn spawn_llm_loader(shared: &SharedLlm, events: &EventTx) {
                     println!("↩️ Загрузчик LLM устарел после прогрева — выхожу");
                     return;
                 }
+                let info = BackendInfo {
+                    backend: config::backend(),
+                    preset: (config::backend() == "api")
+                        .then(config::api_preset)
+                        .unwrap_or_default(),
+                    model: if config::backend() == "api" {
+                        config::api_model()
+                    } else {
+                        config::model_name()
+                    },
+                };
+                *shared.active.lock().unwrap_or_else(|e| e.into_inner()) = Some(info);
                 let mut guard = shared.engine.lock().unwrap_or_else(|e| e.into_inner());
                 *guard = Some(engine);
                 drop(guard);
@@ -401,6 +494,10 @@ pub fn spawn_llm_loader(shared: &SharedLlm, events: &EventTx) {
             }
             Err(e) => {
                 eprintln!("❌ Ошибка загрузки LLM: {e:#}");
+                // Убираем прежний движок: после неудачной загрузки выбранного
+                // бэкенда ассистент обязан молчать с честной ошибкой, а не
+                // продолжать отвечать оставшейся в слоте старой моделью.
+                discard_engine(&shared);
                 shared.failed.store(true, Ordering::SeqCst);
                 shared.condvar.notify_all();
                 let _ = events.send(JarvisEvent::LlmStatus {
@@ -517,30 +614,79 @@ pub fn ask(
         // «Поставь таймер на двадцать секунд» — мгновенно и без модели:
         // длительность разбираем сами (числа-слова STT пишет словами),
         // хаб ставит таймер, окно утилит открывается по событию.
-        // Стоп-глаголы («останови таймер на 5 минут») не должны ставить
-        // новый таймер: падаем в обычный путь, где остановка обрабатывается.
+        // Стоп-глаголы («отмени таймер») — тоже без модели: 2B в
+        // разговорной ветке вместо timer_stop отвечала текстом «отменила»,
+        // ничего не отменяя. «Смени/поменяй» — замена старого, а не
+        // второй таймер рядом.
+        let lower = prompt.to_lowercase();
         let stop_verbs = ["останови", "отмени", "сними", "убери", "выключи", "стоп"];
-        let stops_timer = stop_verbs.iter().any(|w| prompt.to_lowercase().contains(w));
-        if system == CHAT_SYSTEM_PROMPT
-            && !stops_timer
-            && prompt.to_lowercase().contains("таймер")
-            && let Some(secs) = crate::text::parse_duration(&prompt)
-        {
-            let speech = format!(
-                "Поставил таймер на {}.",
-                crate::tools::humanize_seconds(secs)
-            );
-            println!("⏱ Быстрый таймер: {secs} с");
-            crate::timers::start(
-                &events,
-                &audio_tx,
-                "",
-                secs,
-                crate::timers::TimerKind::Timer,
-            );
-            let _ = audio_tx.send(AudioMessage::SynthesizeAndPlay(speech.clone()));
-            let _ = events.send(JarvisEvent::LlmDone { text: speech });
-            return;
+        let stops_timer = stop_verbs.iter().any(|w| lower.contains(w));
+        if system == CHAT_SYSTEM_PROMPT && lower.contains("таймер") {
+            if stops_timer {
+                println!("⏱ Быстрая отмена таймера");
+                let speech = match crate::timers::cancel(&events, &audio_tx, None, None) {
+                    Some(timer) => {
+                        let what = if timer.kind == crate::timers::TimerKind::Alarm {
+                            "будильник"
+                        } else {
+                            "таймер"
+                        };
+                        // Быстрые таймеры ставятся без имени — кавычки с
+                        // пустотой не озвучиваем.
+                        let named = if timer.label.is_empty() {
+                            what.to_string()
+                        } else {
+                            format!("{what} «{}»", timer.label)
+                        };
+                        if timer.ringing {
+                            format!("Остановил {named}.")
+                        } else {
+                            format!(
+                                "Остановил {named} (оставалось {}).",
+                                crate::tools::humanize_seconds(timer.remaining_secs)
+                            )
+                        }
+                    }
+                    None => "Активных таймеров нет.".to_string(),
+                };
+                let _ = audio_tx.send(AudioMessage::SynthesizeAndPlay(speech.clone()));
+                let _ = events.send(JarvisEvent::LlmDone { text: speech });
+                return;
+            }
+            if let Some(secs) = crate::text::parse_duration(&prompt) {
+                let replace_verbs = ["смени", "поменяй", "переделай", "перезапусти", "заново"];
+                let replace = replace_verbs.iter().any(|w| lower.contains(w));
+                if replace {
+                    for timer in crate::timers::active() {
+                        if timer.kind == crate::timers::TimerKind::Timer {
+                            crate::timers::cancel(
+                                &events,
+                                &audio_tx,
+                                Some(crate::timers::TimerKind::Timer),
+                                Some(timer.id),
+                            );
+                        }
+                    }
+                }
+                let speech = format!(
+                    "Поставил таймер на {}.",
+                    crate::tools::humanize_seconds(secs)
+                );
+                println!(
+                    "⏱ Быстрый таймер: {secs} с{}",
+                    if replace { " (с заменой)" } else { "" }
+                );
+                crate::timers::start(
+                    &events,
+                    &audio_tx,
+                    "",
+                    secs,
+                    crate::timers::TimerKind::Timer,
+                );
+                let _ = audio_tx.send(AudioMessage::SynthesizeAndPlay(speech.clone()));
+                let _ = events.send(JarvisEvent::LlmDone { text: speech });
+                return;
+            }
         }
 
         // «Открой утилиты» / «закрой утилиты» — окно Джарвиса, решаем сами.
@@ -760,14 +906,16 @@ pub fn ask(
                 .collect()
         };
 
+        // Неудачная загрузка выбранного бэкенда — честный отказ сразу, без
+        // ожидания: слот пуст, ждать нечего, а реплика подскажет, что чинить.
+        if shared.failed.load(Ordering::SeqCst) {
+            report_engine_unavailable(&shared, &events, &audio_tx);
+            return;
+        }
+
         let Some(mut guard) = wait_for_engine(&shared, Duration::from_secs(LLM_WAIT_TIMEOUT_SECS))
         else {
-            let _ = events.send(JarvisEvent::Error {
-                message: "LLM недоступна".into(),
-            });
-            let _ = audio_tx.send(AudioMessage::SynthesizeAndPlay(
-                "Модель ещё загружается, повтори запрос чуть позже.".into(),
-            ));
+            report_engine_unavailable(&shared, &events, &audio_tx);
             return;
         };
 
@@ -1018,6 +1166,24 @@ fn action_params() -> config::GenerationParams {
     }
 }
 
+/// Склейка prefill с продолжением ответа. Candle дописывает
+/// `<tool>{"name":"` в промпт, но не в возвращаемый текст; uzu prefill
+/// игнорирует и пишет блок целиком. Если модель собрала вызов сама —
+/// оставляем её текст; если вызов собирается только с префиксом — склеиваем;
+/// иначе (обычный текст) возвращаем как есть — разбор и дожим ветками ниже.
+fn join_prefill(prefill: &str, text: String) -> String {
+    if matches!(tools::parse_lenient(&text), tools::ToolParse::Call(_)) {
+        return text;
+    }
+    let joined = format!("{prefill}{text}");
+    if matches!(tools::parse_lenient(&joined), tools::ToolParse::Call(_)) {
+        println!("🧩 Собрал tool-блок из prefill-продолжения");
+        joined
+    } else {
+        text
+    }
+}
+
 pub(crate) fn speak(audio_tx: &Sender<AudioMessage>, events: &EventTx, text: &str) {
     let text = if text.trim().is_empty() {
         "Готово".to_string()
@@ -1025,6 +1191,14 @@ pub(crate) fn speak(audio_tx: &Sender<AudioMessage>, events: &EventTx, text: &st
         text.trim().to_string()
     };
     let _ = audio_tx.send(AudioMessage::SynthesizeAndPlay(text.clone()));
+    let _ = events.send(JarvisEvent::LlmDone { text });
+}
+
+/// Реплика только событиями, без аудио-конвейера — iOS: интерфейс сам
+/// показывает текст и озвучивает его системным синтезом речи.
+pub fn speak_events(events: &EventTx, text: &str) {
+    let text = text.trim().to_string();
+    let _ = events.send(JarvisEvent::LlmChunk { text: text.clone() });
     let _ = events.send(JarvisEvent::LlmDone { text });
 }
 
@@ -1340,7 +1514,7 @@ fn run_action(
     // текущей задаче, а не начинаются с нуля.
     let loop_history: Vec<ChatTurn> = {
         let buf = history.lock().unwrap_or_else(|e| e.into_inner());
-        buf.iter().rev().take(4).rev().cloned().collect()
+        buf.iter().rev().take(6).rev().cloned().collect()
     };
     let mut loop_history = loop_history;
     // Наблюдение до действия: агент видит окна, плеер, буфер и счётчики,
@@ -1414,13 +1588,19 @@ fn run_action(
     }
 
     for step in 1..=MAX_TOOL_STEPS {
+        let mut used_prefill: Option<&'static str> = None;
         let generated = {
+            // Неудачная загрузка выбранного бэкенда — честный отказ и в
+            // агентном цикле: без проверки цикл уводил бы вопрос в старый
+            // движок из слота, игнорируя выбор пользователя.
+            if shared.failed.load(Ordering::SeqCst) {
+                report_engine_unavailable(shared, &events, &audio_tx);
+                return;
+            }
             let Some(mut guard) =
                 wait_for_engine(shared, Duration::from_secs(LLM_WAIT_TIMEOUT_SECS))
             else {
-                let _ = events.send(JarvisEvent::Error {
-                    message: "LLM недоступна".into(),
-                });
+                report_engine_unavailable(shared, &events, &audio_tx);
                 return;
             };
             let Some(engine) = guard.as_mut() else {
@@ -1438,6 +1618,7 @@ fn run_action(
                 } else {
                     TOOL_PREFILL
                 };
+                used_prefill = Some(prefill);
                 engine.generate_streaming_with_prefill(
                     &active_system,
                     &loop_history,
@@ -1479,6 +1660,13 @@ fn run_action(
             println!("🛫 Отменено пользователем — ответ не разбирается и не исполняется");
             return;
         }
+        // Candle дописывает prefill в промпт, но не в возвращаемый текст:
+        // парсер видит «set_alarm","args":…</tool>» без головы
+        // «<tool>{"name":"» — вызов не собирается, тратится дожим-переспрос.
+        let text = match used_prefill {
+            Some(prefill) => join_prefill(prefill, text),
+            None => text,
+        };
         let parsed = match tools::parse_lenient(&text) {
             tools::ToolParse::None => tools::parse_bare(&text),
             other => other,
@@ -1888,6 +2076,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failed_reload_discards_stale_engine_state() {
+        // Регрессия: при неудачной загрузке нового бэкенда прежний движок
+        // оставался в слоте — выбранное облако молча подменялось локальной
+        // моделью. Слот обязан очищаться, а реплика — меняться с «загружается»
+        // на честный отказ.
+        let shared: SharedLlm = Arc::new(SharedLlmState::new());
+        *shared.active.lock().unwrap_or_else(|e| e.into_inner()) = Some(BackendInfo {
+            backend: "candle".into(),
+            preset: String::new(),
+            model: "qwen3.5-0.8b".into(),
+        });
+        shared.failed.store(true, Ordering::SeqCst);
+
+        discard_engine(&shared);
+        assert!(active_backend(&shared).is_none());
+        assert!(
+            shared
+                .engine
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        );
+
+        let failed_msg = engine_unavailable_message(&shared);
+        shared.failed.store(false, Ordering::SeqCst);
+        assert_ne!(
+            failed_msg,
+            engine_unavailable_message(&shared),
+            "после сброса failed реплика снова «модель загружается»"
+        );
+    }
+
+    #[test]
     fn normalize_sanitizer_rejects_garbage() {
         assert_eq!(
             sanitize_normalized("2 м/с", "два метра в секунду").unwrap(),
@@ -1906,6 +2127,52 @@ mod tests {
         );
         assert_eq!(host_of("cdek.ru").as_deref(), Some("cdek.ru"));
         assert_eq!(host_of("  ").as_deref(), None);
+    }
+
+    #[test]
+    fn prefill_join_restores_tool_head() {
+        // Candle дописывает «<tool>{"name":"» в промпт, но не в ответ:
+        // продолжение без склейки парсер не собирает (живой лог: шаг 1 —
+        // «LLM без tool», шаг 2 — дожим-переспрос).
+        let joined = join_prefill(
+            TOOL_PREFILL,
+            "set_alarm\",\"args\":{\"hours\":24,\"minutes\":0}}</tool>".to_string(),
+        );
+        assert!(matches!(
+            tools::parse_lenient(&joined),
+            tools::ToolParse::Call(_)
+        ));
+        assert_eq!(joined, "<tool>{\"name\":\"set_alarm\",\"args\":{\"hours\":24,\"minutes\":0}}</tool>");
+    }
+
+    #[test]
+    fn prefill_join_keeps_complete_block() {
+        // Модель (uzu, либо самостоятельная) выдала блок целиком — не клеим
+        // префикс второй раз.
+        let full = "<tool>{\"name\":\"timer_stop\"}</tool>".to_string();
+        assert_eq!(join_prefill(TOOL_PREFILL, full.clone()), full);
+    }
+
+    #[test]
+    fn prefill_join_leaves_plain_text_alone() {
+        // Обычный текстовый ответ под force_tool — как был: без префикса,
+        // чтобы ветка дожима видела «ответил текстом», а не «выдуманный tool».
+        let plain = "Готов поставить будильник.".to_string();
+        assert_eq!(join_prefill(TOOL_PREFILL, plain.clone()), plain);
+    }
+
+    #[test]
+    fn prefill_join_restores_site_open() {
+        // SITE_OPEN_PREFILL: модель дописывает хвост адреса и закрывающие.
+        let joined = join_prefill(
+            SITE_OPEN_PREFILL,
+            "example.com\"}}</tool>".to_string(),
+        );
+        assert!(matches!(
+            tools::parse_lenient(&joined),
+            tools::ToolParse::Call(tools::ToolCall::OpenUrl { url, .. })
+                if url == "https://example.com"
+        ));
     }
 
     #[test]

@@ -112,7 +112,7 @@ impl McpServer {
             json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "jarvis", "version": "6.1.0"}
+                "clientInfo": {"name": "jarvis", "version": "6.2.0"}
             }),
         )?;
         server.notify("notifications/initialized")?;

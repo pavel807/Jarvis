@@ -6,6 +6,9 @@
 //! использует Win32 SendInput через встроенный PowerShell.
 
 use serde::Serialize;
+// Утилиты вывода процессов нужны только настольным ОС: на iOS до сюда
+// не доходит (вся автоматизация — unsupported).
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::process::{Command, Output};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -164,6 +167,7 @@ fn is_modifier(key: &str) -> bool {
     matches!(normalize_key(key).as_deref(), Some("ctrl" | "shift" | "alt" | "super"))
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn command_output(bin: &str, args: &[String]) -> Result<String, String> {
     let output = Command::new(bin)
         .args(args)
@@ -172,6 +176,7 @@ fn command_output(bin: &str, args: &[String]) -> Result<String, String> {
     output_text(bin, output)
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn output_text(bin: &str, output: Output) -> Result<String, String> {
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
