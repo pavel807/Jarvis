@@ -317,6 +317,23 @@ pub fn downmix_f32(data: &[f32], channels: usize) -> Vec<f32> {
         .collect()
 }
 
+/// Обработчик ошибок входного потока cpal без спама. Пропавшие буферы
+/// (underrun/overrun у Bluetooth-гарнитур и при перегрузке) не фатальны —
+/// поток продолжает работать, но сыпятся десятками в секунду. Логируем
+/// первую ошибку и далее раз в 30 секунд.
+pub fn stream_error_handler() -> impl FnMut(cpal::Error) + Send + 'static {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    let last = Mutex::new(None::<Instant>);
+    move |e| {
+        let Ok(mut last) = last.lock() else { return };
+        if last.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
+            *last = Some(Instant::now());
+            crate::logging::warn(format!("🎙️ Входной поток: {e} (запись продолжается)"));
+        }
+    }
+}
+
 pub fn downmix_i16(data: &[i16], channels: usize) -> Vec<f32> {
     data.chunks(channels)
         .map(|c| c.iter().map(|&x| x as f32 / 32768.0).sum::<f32>() / channels as f32)
@@ -445,7 +462,7 @@ pub fn spawn_stream(tx: SyncSender<Vec<f32>>) -> Result<(cpal::Stream, usize)> {
                             let _ = tx.send(downmix_f32(d, ch));
                         }
                     },
-                    |e| eprintln!("❌ Ошибка входного потока: {e}"),
+                    crate::audio::stream_error_handler(),
                     None,
                 ),
                 cpal::SampleFormat::I16 => dev.build_input_stream(
@@ -456,7 +473,7 @@ pub fn spawn_stream(tx: SyncSender<Vec<f32>>) -> Result<(cpal::Stream, usize)> {
                             let _ = tx.send(downmix_i16(d, ch));
                         }
                     },
-                    |e| eprintln!("❌ Ошибка входного потока: {e}"),
+                    crate::audio::stream_error_handler(),
                     None,
                 ),
                 cpal::SampleFormat::U16 => dev.build_input_stream(
@@ -467,7 +484,7 @@ pub fn spawn_stream(tx: SyncSender<Vec<f32>>) -> Result<(cpal::Stream, usize)> {
                             let _ = tx.send(downmix_u16(d, ch));
                         }
                     },
-                    |e| eprintln!("❌ Ошибка входного потока: {e}"),
+                    crate::audio::stream_error_handler(),
                     None,
                 ),
                 f => bail!("Неподдерживаемый формат микрофона: {f:?}"),

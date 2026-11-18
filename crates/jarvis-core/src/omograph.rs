@@ -61,6 +61,7 @@ fn ensure_files() -> Result<PathBuf> {
         "accentuator",
         "nn/nn_omograph/tiny2/tokenizer.json",
         &tokenizer_file,
+        &mut |_| {},
     )
     .context("Не удалось скачать tokenizer.json")?;
 
@@ -69,6 +70,7 @@ fn ensure_files() -> Result<PathBuf> {
         "stressonnx-models",
         "ru_ruaccent/dictionary/omographs.json.gz",
         &omographs,
+        &mut |_| {},
     )
     .context("Не удалось скачать omographs.json.gz")?;
 
@@ -82,6 +84,7 @@ fn ensure_files() -> Result<PathBuf> {
                 "accentuator",
                 "nn/nn_omograph/tiny2/model.onnx",
                 &onnx,
+                &mut |_| {},
             )
             .context("Не удалось скачать model.onnx")?;
         }

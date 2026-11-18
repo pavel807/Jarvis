@@ -1,14 +1,14 @@
-//! TTS: Silero v5 на candle. Синтез речи и воспроизведение любых WAV,
-//! с эмиссией `AudioLevel` для анимации UI-сферы.
+//! TTS: ZONOS3-Mini на candle — единственный движок синтеза (клон голоса
+//! Джарвиса, 44.1 кГц). Воспроизведение любых WAV, эмиссия `AudioLevel`
+//! для анимации UI-сферы.
 
 use crate::audio::OutputPlayer;
 use crate::events::{EventTx, JarvisEvent};
 use crate::llm::{self, SharedLlm};
+use crate::logging;
 use crate::paths;
 use crate::settings::Settings;
-use crate::tts_silero::SAMPLE_RATE as SILERO_SAMPLE_RATE;
-pub use crate::tts_silero::SILERO_VOICES;
-use crate::tts_silero::SileroEngine;
+use crate::tts_zonos::voice::{SpeechEngine, ZonosVoice};
 use anyhow::{Context, Result, bail};
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
@@ -20,10 +20,9 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-/// v9: ударитель и омографы переехали с ONNX Runtime на candle
-/// (плюс выбор ударной гласной по максимуму вероятности) — кэш v8
-/// местами звучал с ударением не на той гласной.
-const TTS_ENGINE_VERSION: &str = "jarvis-tts-v9-silero";
+/// v10: единственный движок синтеза — ZONOS3-Mini (клон голоса, 44.1 кГц);
+/// Silero v5 удалён. Кэш v9 не совместим по звуку.
+const TTS_ENGINE_VERSION: &str = "jarvis-tts-v10-zonos";
 const TTS_CACHE_MAX_CHARS: usize = 200;
 const TTS_WAIT_TIMEOUT_SECS: u64 = 600;
 pub const TTS_CACHE_MAX_BYTES: u64 = 300 * 1024 * 1024;
@@ -41,6 +40,156 @@ pub fn current_speed() -> f32 {
 
 static TTS_VOICE: RwLock<String> = RwLock::new(String::new());
 
+/// Клонировать голос из записи: аудиофайл (wav/mp3/ogg/flac) → 192-мерный
+/// эмбеддинг спикер-энкодером → `voices/<имя>.embedding.npy`. Запись —
+/// 5–60 секунд чистой речи одного диктора; обрезаем до 60 с.
+pub fn clone_voice_from_file(path: &Path, name: &str) -> Result<()> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        bail!("Имя голоса — латиница, цифры, «_» и «-»");
+    }
+    let samples = decode_audio(path)?;
+    let secs = samples.len() as f64 / 44100.0;
+    if secs < 3.0 {
+        bail!("Запись слишком короткая ({secs:.1} с) — нужно 5–60 секунд речи");
+    }
+    let trimmed = &samples[..samples.len().min(60 * 44100)];
+    let encoder = crate::tts_zonos::SpeakerEncoder::open(
+        &crate::model_fetch::zonos3_dir().join("spk-encoder.gguf"),
+    )
+    .context("Не удалось загрузить spk-encoder.gguf")?;
+    let emb = encoder
+        .embedding(trimmed, 44100)
+        .context("Спикер-энкодер не справился с записью")?;
+    if emb.iter().any(|v| !v.is_finite()) {
+        bail!("В записи нечисто — не удалось вытащить голос");
+    }
+    let dir = crate::model_fetch::zonos3_dir().join("voices");
+    fs::create_dir_all(&dir)?;
+    write_npy(&dir.join(format!("{name}.embedding.npy")), &emb)?;
+    Ok(())
+}
+
+/// Декод аудиофайла в моно f32 44.1 кГц: wav — hound, mp3 — minimp3,
+/// ресемпл оконным sinc.
+pub fn decode_audio(path: &Path) -> Result<Vec<f32>> {
+    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()) {
+        Some(ext) if ext == "wav" => decode_wav_any_rate(path),
+        Some(ext) if ext == "mp3" => decode_mp3(path),
+        Some(ext) => bail!("Формат {ext} не поддерживается — возьми wav или mp3"),
+        None => bail!("Неизвестный формат — нужен wav или mp3"),
+    }
+}
+
+/// WAV любого канального набора и частоты: моно, f32.
+fn decode_wav_any_rate(path: &Path) -> Result<Vec<f32>> {
+    let mut reader = WavReader::open(path).with_context(|| format!("Не открыть {:?}", path))?;
+    let spec = reader.spec();
+    let rate = spec.sample_rate;
+    let ch = spec.channels as usize;
+    let raw: Vec<f32> = if spec.sample_format == SampleFormat::Float {
+        reader
+            .samples::<f32>()
+            .filter_map(|s| s.ok())
+            .collect()
+    } else {
+        let max = (1i64 << (spec.bits_per_sample - 1)) as f32;
+        reader
+            .samples::<i32>()
+            .filter_map(|s| s.ok())
+            .map(|s| s as f32 / max)
+            .collect()
+    };
+    let mono: Vec<f32> = if ch > 1 {
+        raw.chunks(ch).map(|c| c.iter().sum::<f32>() / ch as f32).collect()
+    } else {
+        raw
+    };
+    resample_if_needed(mono, rate)
+}
+
+/// mp3 через minimp3: первый поток, моно из каналов, f32.
+fn decode_mp3(path: &Path) -> Result<Vec<f32>> {
+    let file = fs::File::open(path).with_context(|| format!("Не открыть {:?}", path))?;
+    let mut decoder = minimp3::Decoder::new(file);
+    let mut raw: Vec<i16> = Vec::new();
+    let mut rate: u32 = 44100;
+    let mut channels = 1usize;
+    loop {
+        match decoder.next_frame() {
+            Ok(frame) => {
+                rate = frame.sample_rate.max(1) as u32;
+                channels = frame.channels as usize;
+                raw.extend_from_slice(&frame.data);
+            }
+            Err(minimp3::Error::Eof) => break,
+            Err(minimp3::Error::SkippedData) => continue,
+            Err(e) => return Err(e).context("Ошибка декодирования mp3"),
+        }
+    }
+    let mono: Vec<f32> = if channels > 1 {
+        raw.chunks(channels)
+            .map(|c| c.iter().map(|&v| v as f32 / 32768.0).sum::<f32>() / channels as f32)
+            .collect()
+    } else {
+        raw.iter().map(|&v| v as f32 / 32768.0).collect()
+    };
+    resample_if_needed(mono, rate.max(1))
+}
+
+fn resample_if_needed(samples: Vec<f32>, rate: u32) -> Result<Vec<f32>> {
+    if rate == 44100 {
+        return Ok(samples);
+    }
+    Ok(crate::tts_zonos::speaker::sinc_resample(&samples, rate, 44100))
+}
+
+/// Минимальная запись `.npy` f32 [n] (тот же формат, что читает
+/// load_voice_embedding).
+fn write_npy(path: &Path, values: &[f32]) -> Result<()> {
+    let dict = format!(
+        "{{'descr': '<f4', 'fortran_order': False, 'shape': ({},), }}",
+        values.len()
+    );
+    let header_len = 10 + dict.len();
+    let pad = 64 - (header_len % 64);
+    let dict = format!("{dict}{}", " ".repeat(pad - 1) + "\n");
+    let mut bytes = Vec::with_capacity(10 + dict.len() + values.len() * 4);
+    bytes.extend_from_slice(b"\x93NUMPY");
+    bytes.extend_from_slice(&[1, 0]);
+    bytes.extend_from_slice(&(dict.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(dict.as_bytes());
+    for v in values {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    fs::write(path, bytes).with_context(|| format!("Не записать {:?}", path))
+}
+
+/// Голоса ZONOS3: `voices/<имя>.embedding.npy` в каталоге весов
+/// (голос «jarvis» — клон Джарвиса — первым).
+pub fn zonos_voices() -> Vec<(String, String)> {
+    let dir = crate::model_fetch::zonos3_dir();
+    let mut out = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir.join("voices")) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Some(base) = name.strip_suffix(".embedding.npy") {
+                let desc = if base == "jarvis" { "основной мужской" } else { "загруженный тобой" };
+                out.push((base.to_string(), desc.to_string()));
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        let ja = a.0 == "jarvis";
+        let jb = b.0 == "jarvis";
+        jb.cmp(&ja).then(a.0.cmp(&b.0))
+    });
+    out
+}
+
 pub fn current_voice() -> String {
     TTS_VOICE.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
@@ -50,7 +199,7 @@ pub fn set_current_voice(voice: String) {
 }
 
 pub struct SharedTtsState {
-    pub tts: Mutex<Option<Arc<SileroEngine>>>,
+    pub tts: Mutex<Option<Arc<dyn SpeechEngine>>>,
     pub condvar: Condvar,
 }
 
@@ -71,6 +220,7 @@ impl Default for SharedTtsState {
     }
 }
 
+/// Загрузить движок синтеза ZONOS3 в фоне (единственный движок).
 pub fn spawn_tts_loader(shared: &SharedTts, tts_failed: &Arc<AtomicBool>, voice: &str) {
     let shared = Arc::clone(shared);
     let tts_failed = Arc::clone(tts_failed);
@@ -78,21 +228,60 @@ pub fn spawn_tts_loader(shared: &SharedTts, tts_failed: &Arc<AtomicBool>, voice:
     set_current_voice(voice.clone());
 
     std::thread::spawn(move || {
-        println!("🧠 Загрузка TTS (silero, голос «{voice}») в фоне...");
-        match SileroEngine::new(&voice) {
+        logging::info(format!(
+            "🧠 Загрузка TTS (ZONOS3-Mini, голос «{voice}») в фоне..."
+        ));
+        match load_zonos_voice(&voice).map(|v| Arc::new(v) as Arc<dyn SpeechEngine>) {
             Ok(engine) => {
                 let mut guard = shared.tts.lock().unwrap_or_else(|e| e.into_inner());
-                *guard = Some(Arc::new(engine));
+                *guard = Some(engine);
                 shared.condvar.notify_all();
-                println!("✅ TTS готов к озвучке");
+                logging::info("✅ TTS готов к озвучке");
             }
             Err(e) => {
-                eprintln!("❌ Ошибка загрузки TTS: {e}");
+                logging::error(format!("❌ Ошибка загрузки TTS: {e:#}"));
+                // Единственный движок: без весов голос замолчит до скачивания
+                // (кнопка «Скачать» или переключение голоса перезапустит загрузку).
                 tts_failed.store(true, Ordering::SeqCst);
                 shared.condvar.notify_all();
             }
         }
     });
+}
+
+/// Поднять голос ZONOS3: скачать веса, загрузить бэкбон, ZAC-декодер и голос.
+fn load_zonos_voice(voice: &str) -> Result<ZonosVoice> {
+    crate::model_fetch::ensure_zonos3().context("Не удалось подготовить веса ZONOS3")?;
+    let dir = crate::model_fetch::zonos3_dir();
+    let backbone = crate::tts_zonos::GgufFile::open(&dir.join("backbone-ptq.gguf"))?;
+    let device = crate::tts_zonos::engine::device();
+    let engine = crate::tts_zonos::ZonosEngine::load(&backbone, device.clone())?;
+    // ZAC-декодер общий: он превращает коды кадров в звук 44.1 кГц.
+    let codec = crate::tts_zonos::ZacDecoder::open(&dir.join("zac-keep2.gguf"), &device)
+        .context("Не удалось загрузить ZAC-декодер (zac-keep2.gguf)")?;
+    // Голос из ассетов (192-мерный эмбеддинг), если он есть.
+    let speaker = crate::tts_zonos::voice::load_voice_embedding(&dir, voice);
+    if speaker.is_none() {
+        logging::warn(format!(
+            "⚠️ Эмбеддинг голоса «{voice}» не найден в {} — синтез без клона голоса",
+            dir.display()
+        ));
+    }
+    Ok(ZonosVoice::with_preview_dir(
+        engine,
+        Some(Arc::new(codec)),
+        speaker,
+        None,
+        voice,
+        Some(dir.join("voices")),
+    ))
+}
+
+/// Разовый синтез ZONOS3 для утилит (wake-эталоны, негативы, диагностика):
+/// движок поднимается на один набор фраз и закрывается. Конкретный тип —
+/// чтобы менять параметры сэмплирования (сид/температуру) между фразами.
+pub fn open_zonos_voice(voice: &str) -> Result<ZonosVoice> {
+    load_zonos_voice(voice)
 }
 
 pub fn set_voice(shared: &SharedTts, tts_failed: &Arc<AtomicBool>, voice: &str) {
@@ -132,16 +321,18 @@ pub fn prune_tts_cache() {
     }
 
     if removed > 0 {
-        println!(
+        logging::info(format!(
             "🧹 Кэш TTS уменьшен на {:.1} МБ",
             removed as f64 / 1048576.0
-        );
+        ));
     }
 }
 
 fn tts_cache_path(text: &str, voice: &str, speed: f32) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     TTS_ENGINE_VERSION.hash(&mut hasher);
+    // Движок в ключе: кэш Silero v9 не совместим по звуку.
+    "zonos".hash(&mut hasher);
     voice.hash(&mut hasher);
     ((speed * 100.0).round() as i64).hash(&mut hasher);
     text.trim().hash(&mut hasher);
@@ -196,19 +387,19 @@ fn wait_for_tts(
     shared_tts: &SharedTts,
     tts_failed: &AtomicBool,
     timeout: Duration,
-) -> Option<Arc<SileroEngine>> {
+) -> Option<Arc<dyn SpeechEngine>> {
     let mut guard = shared_tts.tts.lock().unwrap_or_else(|e| e.into_inner());
     let start = Instant::now();
 
     while guard.is_none() {
         if tts_failed.load(Ordering::SeqCst) {
-            eprintln!("❌ Загрузка TTS завершилась ошибкой.");
+            logging::error("❌ Загрузка TTS завершилась ошибкой.");
             return None;
         }
 
         let elapsed = start.elapsed();
         if elapsed >= timeout {
-            eprintln!("❌ Не дождался готовности TTS за {:?}.", timeout);
+            logging::error(format!("❌ Не дождался готовности TTS за {timeout:?}."));
             return None;
         }
 
@@ -337,7 +528,7 @@ fn play_wav_with_level(
 ) {
     let Ok((mono, src_rate)) = read_wav_mono(Path::new(path)) else {
         if let Err(e) = play_via(output, path, stop_flag) {
-            eprintln!("⚠️ Ошибка воспроизведения файла ({path}): {e}");
+            logging::warn(format!("⚠️ Ошибка воспроизведения файла ({path}): {e}"));
         }
         return;
     };
@@ -375,6 +566,7 @@ fn enqueue_playback(
     mut samples: Vec<f32>,
     speed: f32,
     text: &str,
+    sample_rate: u32,
 ) {
     let fade_len = (device_rate as f32 * 0.015) as usize;
     let n = samples.len();
@@ -385,7 +577,7 @@ fn enqueue_playback(
         }
     }
 
-    let src_rate = (SILERO_SAMPLE_RATE as f32 * speed).round() as usize;
+    let src_rate = (sample_rate as f32 * speed).round() as usize;
     let out = if src_rate != device_rate {
         crate::audio::resample_audio(&samples, src_rate, device_rate)
     } else {
@@ -434,7 +626,7 @@ pub fn spawn_audio_player(
         let output = match OutputPlayer::new() {
             Ok(o) => Some(o),
             Err(e) => {
-                eprintln!("❌ Не удалось открыть выходной аудиопоток: {e}");
+                logging::error(format!("❌ Не удалось открыть выходной аудиопоток: {e}"));
                 None
             }
         };
@@ -572,7 +764,7 @@ pub fn spawn_audio_player(
                         tts_failed.as_ref(),
                         Duration::from_secs(TTS_WAIT_TIMEOUT_SECS),
                     ) else {
-                        eprintln!("⚠️ TTS не готов. Фраза не озвучена: \"{}\"", text);
+                        logging::warn(format!("⚠️ TTS не готов. Фраза не озвучена: \"{text}\""));
                         continue;
                     };
 
@@ -581,27 +773,27 @@ pub fn spawn_audio_player(
                     }
 
                     let Some(player) = &output else {
-                        eprintln!("⚠️ Выходной аудиопоток недоступен, фраза пропущена");
+                        logging::warn("⚠️ Выходной аудиопоток недоступен, фраза пропущена");
                         continue;
                     };
                     let device_rate = player.device_sample_rate();
 
                     is_speaking.store(true, Ordering::SeqCst);
 
-                    match engine.synthesize(&text, speed) {
+                    match engine.speak(&text, speed) {
                         Ok(samples) if !samples.is_empty() => {
                             if can_cache {
                                 if let Err(e) = fs::create_dir_all(paths::tts_cache_dir()) {
-                                    eprintln!("⚠️ Не удалось создать папку кэша речи: {e}");
+                                    logging::warn(format!("⚠️ Не удалось создать папку кэша речи: {e}"));
                                 }
                                 let spec = WavSpec {
                                     channels: 1,
-                                    sample_rate: (SILERO_SAMPLE_RATE as f32 * speed).round() as u32,
+                                    sample_rate: (engine.sample_rate() as f32 * speed).round() as u32,
                                     bits_per_sample: 16,
                                     sample_format: SampleFormat::Int,
                                 };
                                 if let Err(e) = write_wav_i16(&cache_path, spec, &samples) {
-                                    eprintln!("⚠️ Не удалось сохранить кэш речи: {e}");
+                                    logging::warn(format!("⚠️ Не удалось сохранить кэш речи: {e}"));
                                 }
                             }
 
@@ -613,11 +805,12 @@ pub fn spawn_audio_player(
                                 samples,
                                 speed,
                                 &text,
+                                engine.sample_rate(),
                             );
                         }
-                        Ok(_) => eprintln!("⚠️ Движок вернул пустое аудио"),
+                        Ok(_) => logging::warn("⚠️ Движок вернул пустое аудио"),
                         Err(e) => {
-                            eprintln!("⚠️ Ошибка синтеза речи: {e}");
+                            logging::warn(format!("⚠️ Ошибка синтеза речи: {e:#}"));
                             if can_cache {
                                 let _ = fs::remove_file(&cache_path);
                             }
@@ -650,7 +843,7 @@ pub fn spawn_audio_player(
                         tts_failed.as_ref(),
                         Duration::from_secs(TTS_WAIT_TIMEOUT_SECS),
                     ) else {
-                        eprintln!("⚠️ TTS не готов. Превью не озвучено: \"{text}\"");
+                        logging::warn(format!("⚠️ TTS не готов. Превью не озвучено: \"{text}\""));
                         continue;
                     };
                     let Some(player) = &output else {
@@ -660,7 +853,7 @@ pub fn spawn_audio_player(
                     let device_rate = player.device_sample_rate();
                     let speed = current_speed();
                     is_speaking.store(true, Ordering::SeqCst);
-                    match engine.synthesize_with(&voice, &text, speed) {
+                    match engine.speak_with(&voice, &text, speed) {
                         Ok(samples) if !samples.is_empty() => {
                             enqueue_playback(
                                 &events,
@@ -670,10 +863,11 @@ pub fn spawn_audio_player(
                                 samples,
                                 speed,
                                 &text,
+                                engine.sample_rate(),
                             );
                         }
-                        Ok(_) => eprintln!("⚠️ Превью голоса вернуло пустое аудио"),
-                        Err(e) => eprintln!("⚠️ Ошибка превью голоса: {e}"),
+                        Ok(_) => logging::warn("⚠️ Превью голоса вернуло пустое аудио"),
+                        Err(e) => logging::warn(format!("⚠️ Ошибка превью голоса: {e:#}")),
                     }
                     is_speaking.store(false, Ordering::SeqCst);
                 }

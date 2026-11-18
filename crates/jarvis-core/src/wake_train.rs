@@ -8,6 +8,7 @@ use crate::audio::{calculate_rms, resample_audio};
 use crate::events::{EventTx, JarvisEvent};
 use crate::paths;
 use crate::tts::list_wav_samples;
+use crate::tts_zonos::{Sampling, SpeechEngine};
 use anyhow::{Context, Result, bail};
 use rustpotter::Rustpotter;
 use std::fs;
@@ -101,7 +102,7 @@ pub fn record_until_stop(dir: &Path, label: &str, stop: &AtomicBool) -> Result<P
             move |d: &[f32], _| {
                 let _ = tx.send(crate::audio::downmix_f32(d, ch));
             },
-            |e| eprintln!("❌ Ошибка входного потока: {e}"),
+            crate::audio::stream_error_handler(),
             None,
         )?,
         cpal::SampleFormat::I16 => device.build_input_stream(
@@ -109,7 +110,7 @@ pub fn record_until_stop(dir: &Path, label: &str, stop: &AtomicBool) -> Result<P
             move |d: &[i16], _| {
                 let _ = tx.send(crate::audio::downmix_i16(d, ch));
             },
-            |e| eprintln!("❌ Ошибка входного потока: {e}"),
+            crate::audio::stream_error_handler(),
             None,
         )?,
         cpal::SampleFormat::U16 => device.build_input_stream(
@@ -117,7 +118,7 @@ pub fn record_until_stop(dir: &Path, label: &str, stop: &AtomicBool) -> Result<P
             move |d: &[u16], _| {
                 let _ = tx.send(crate::audio::downmix_u16(d, ch));
             },
-            |e| eprintln!("❌ Ошибка входного потока: {e}"),
+            crate::audio::stream_error_handler(),
             None,
         )?,
         f => bail!("Неподдерживаемый формат микрофона: {f:?}"),
@@ -212,7 +213,7 @@ pub fn record_sample(
             move |d: &[f32], _| {
                 let _ = tx.send(crate::audio::downmix_f32(d, ch));
             },
-            |e| eprintln!("❌ Ошибка входного потока: {e}"),
+            crate::audio::stream_error_handler(),
             None,
         )?,
         cpal::SampleFormat::I16 => device.build_input_stream(
@@ -220,7 +221,7 @@ pub fn record_sample(
             move |d: &[i16], _| {
                 let _ = tx.send(crate::audio::downmix_i16(d, ch));
             },
-            |e| eprintln!("❌ Ошибка входного потока: {e}"),
+            crate::audio::stream_error_handler(),
             None,
         )?,
         cpal::SampleFormat::U16 => device.build_input_stream(
@@ -228,7 +229,7 @@ pub fn record_sample(
             move |d: &[u16], _| {
                 let _ = tx.send(crate::audio::downmix_u16(d, ch));
             },
-            |e| eprintln!("❌ Ошибка входного потока: {e}"),
+            crate::audio::stream_error_handler(),
             None,
         )?,
         f => bail!("Неподдерживаемый формат микрофона: {f:?}"),
@@ -373,15 +374,19 @@ pub fn pad_window(audio: &[f32], window: usize) -> Vec<f32> {
 }
 
 /// Негативы для метрической регистрации: похожие по звучанию слова,
-/// бытовой гул и тишина — синтезируются Silero, голоса пользователя не нужны.
+/// бытовой гул и тишина — синтезируются ZONOS3, голос пользователя не нужен.
 fn synth_negatives(events: &EventTx) -> Result<Vec<Vec<f32>>> {
     let window = 16_000 * 12 / 10;
-    let engine = crate::tts_silero::SileroEngine::new_no_stress("ru_eduard")
-        .context("Silero для негативов недоступен")?;
+    let mut engine =
+        crate::tts::open_zonos_voice("jarvis").context("ZONOS3 для негативов недоступен")?;
+    engine.set_sampling(Sampling {
+        seed: 97,
+        ..Sampling::default()
+    });
     let mut negatives = Vec::new();
     // Фонетически близкие к «Джарвис» слова — обязательная часть набора:
     // именно они учат вычитание отсекать ложные срабатывания.
-    for (i, text) in [
+    for text in [
         "сервис",
         "запись",
         "нравится",
@@ -394,15 +399,10 @@ fn synth_negatives(events: &EventTx) -> Result<Vec<Vec<f32>>> {
         "сверстник",
         "университет",
         "маркетинг",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let audio = engine.synthesize_with("ru_eduard", text, 1.0)?;
-        let mono =
-            crate::audio::resample_audio(&audio, crate::tts_silero::SAMPLE_RATE as usize, 16_000);
+    ] {
+        let audio = engine.speak(text, 1.0)?;
+        let mono = crate::audio::resample_audio(&audio, 44_100, 16_000);
         negatives.push(pad_window(&mono, window));
-        let _ = i;
     }
     negatives.push(vec![0_f32; window]); // тишина
     negatives.push(

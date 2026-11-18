@@ -48,7 +48,7 @@ fn levenshtein(a: &[String], b: &[String]) -> usize {
     prev[b.len()]
 }
 
-/// Набор голосов Silero TTS (движок самого Jarvis): один текст, 8 голосов.
+/// Набор синтетических голосов (корпус wake-эталонов): один текст, 8 файлов.
 /// build/voice_compare_16k/*.wav; эталон — текст генерации.
 const TTS_REFERENCE: &str = "Слушаю вас, Павел. Все системы в норме: процессор загружен на тридцать процентов, оперативной памяти свободно двенадцать гигабайт. Открываю премьер про. Похоже, сегодня будет дождь — взять с собой зонт? До связи.";
 
@@ -102,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut first_chunk_ms = Vec::new();
 
     if tts_set {
-        // Голоса Silero: один эталон на все файлы каталога.
+        // Синтетические голоса: один эталон на все файлы каталога.
         let mut voices: Vec<String> = std::fs::read_dir("build/voice_compare_16k")?
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().is_some_and(|x| x == "wav"))
@@ -129,7 +129,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         println!("─────");
         println!(
-            "Silero TTS (8 голосов): WER {:.1}%  — декодер {:?}, устройство {}",
+            "Синтетические голоса ({}): WER {:.1}%  — декодер {:?}, устройство {}",
+            voices.len(),
             100.0 * total_wer as f64 / total_words.max(1) as f64,
             decoder,
             if model.is_metal() { "Metal" } else { "CPU" }

@@ -202,11 +202,15 @@ impl FastConformer {
 /// распознаётся за ~130 мс вместо ~780. Metal включается переменной
 /// окружения JARVIS_ASR_DEVICE=metal (для экспериментов и длинных потоков).
 fn pick_device() -> Device {
-    if std::env::var("JARVIS_ASR_DEVICE").as_deref() == Ok("metal") {
-        #[cfg(target_os = "macos")]
-        match Device::new_metal(0) {
-            Ok(d) => return d,
-            Err(e) => eprintln!("⚠️ Metal недоступен ({e}), ASR будет работать на CPU"),
+    // Metal по умолчанию на macOS (быстрая транскрипция); откат —
+    // JARVIS_ASR_DEVICE=cpu.
+    #[cfg(target_os = "macos")]
+    {
+        if std::env::var("JARVIS_ASR_DEVICE").as_deref() != Ok("cpu") {
+            match Device::new_metal(0) {
+                Ok(d) => return d,
+                Err(e) => eprintln!("⚠️ Metal недоступен ({e}), ASR будет работать на CPU"),
+            }
         }
     }
     Device::Cpu

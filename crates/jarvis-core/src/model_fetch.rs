@@ -1,18 +1,44 @@
 //! Загрузка моделей, у которых нет внешнего источника (HF/Mirai).
 //!
-//! silero (TTS, сконвертирован вручную) и Qwen3.5-0.8B (бэкенд candle) лежат
+//! Qwen3.5-0.8B (бэкенд candle) и FastConformer (распознавание) лежат
 //! в отдельном релизе GitHub — по умолчанию `pavel807/jarvis-models`, тег
 //! `models-v1`. Базовый URL можно переопределить переменной окружения
 //! `JARVIS_MODELS_BASE_URL`.
 //!
 //! Архивы — обычные `tar.gz`, распаковываются в каталог `models/`, поэтому
-//! внутри должны лежать пути относительно него (`silero/…`, `qwen3.5-0.8b/…`).
+//! внутри должны лежать пути относительно него (`qwen3.5-0.8b/…`).
+//! ZONOS3 качается напрямую из Hugging Face (см. `zonos3.rs`/`model_fetch`
+//! ниже по файлу).
 
 use anyhow::{Context, Result, bail};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+/// Запрос пользователя отменить текущую загрузку моделей.
+///
+/// Флаг проверяется потоковым загрузчиком по мере роста файла — отмена
+/// срабатывает внутри одного файла (архивы/веса по 460+ МБ), а не только
+/// между файлами. Сбрасывается при старте новой загрузки.
+pub static DOWNLOAD_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Отменить текущую загрузку моделей: частичные файлы удаляются.
+pub fn cancel_downloads() {
+    DOWNLOAD_CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Идёт ли отмена (для вызывающих потоков — чтобы отличить отмену от ошибки).
+pub fn downloads_cancelled() -> bool {
+    DOWNLOAD_CANCEL.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn ensure_not_cancelled() -> Result<()> {
+    if downloads_cancelled() {
+        bail!("Загрузка отменена");
+    }
+    Ok(())
+}
 
 const DEFAULT_BASE_URL: &str =
     "https://github.com/pavel807/jarvis-models/releases/download/models-v1";
@@ -20,30 +46,6 @@ const DEFAULT_BASE_URL: &str =
 /// Базовый URL релиза с моделями (без имени ассета).
 pub fn base_url() -> String {
     std::env::var("JARVIS_MODELS_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
-}
-
-/// Гарантирует, что файлы Silero v5 есть в `models/silero/`, иначе качает
-/// `silero.tar.gz` из релиза.
-pub fn ensure_silero() -> Result<()> {
-    ensure_silero_with_progress(&mut |_| {})
-}
-
-/// Как [`ensure_silero`], но с отчётом о прогрессе (0..=100).
-pub fn ensure_silero_with_progress(progress: &mut dyn FnMut(u8)) -> Result<()> {
-    let dir = crate::paths::models_dir().join("silero");
-    if silero_ready(&dir) {
-        progress(100);
-        return Ok(());
-    }
-    ensure_archive("silero.tar.gz", progress)?;
-    if silero_ready(&dir) {
-        Ok(())
-    } else {
-        bail!(
-            "После загрузки silero в {:?} нет v5_cis_base.safetensors/alphabet.json",
-            dir
-        )
-    }
 }
 
 /// Докачать файл вакворда из релиза (jarvis_model_2.rpw, jarvis_model.jref):
@@ -126,22 +128,17 @@ pub fn fastconformer_status() -> Option<u64> {
     fastconformer_ready(&dir).then(|| dir_size(&dir))
 }
 
-/// Размер файлов Silero, если модель озвучки на месте; иначе `None`.
-pub fn silero_status() -> Option<u64> {
-    let dir = crate::paths::models_dir().join("silero");
-    silero_ready(&dir).then(|| dir_size(&dir))
-}
-
 /// Удаляет каталог модели по имени — те, что приложение само скачивает.
 /// Пользовательские каталоги LLM (положенные в models/ руками) не трогаем.
 pub fn model_dir_remove(name: &str) -> Result<()> {
-    match name {
-        "qwen3.5-0.8b" | "silero" | "fastconformer" => {}
+    let dir = match name {
+        "qwen3.5-0.8b" | "fastconformer" => crate::paths::models_dir().join(name),
+        // ZONOS3 лежит в отдельном каталоге zonos3.
+        "zonos" => zonos3_dir(),
         other => bail!(
             "Модель «{other}» не удаляется из приложения: каталог пользовательский"
         ),
-    }
-    let dir = crate::paths::models_dir().join(name);
+    };
     if dir.exists() {
         std::fs::remove_dir_all(&dir)
             .with_context(|| format!("Не удалось удалить {}", dir.display()))?;
@@ -169,10 +166,6 @@ pub fn qwen35_remove(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn silero_ready(dir: &Path) -> bool {
-    dir.join("v5_cis_base.safetensors").is_file() && dir.join("alphabet.json").is_file()
-}
-
 pub fn qwen35_ready(dir: &Path) -> bool {
     if !dir.join("config.json").is_file() || !dir.join("tokenizer.json").is_file() {
         return false;
@@ -193,6 +186,7 @@ fn has_safetensors(dir: &Path) -> bool {
 
 /// Скачивает `asset` из релиза и распаковывает его в `models/`.
 fn ensure_archive(asset: &str, progress: &mut dyn FnMut(u8)) -> Result<()> {
+    DOWNLOAD_CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
     let models = crate::paths::models_dir();
     std::fs::create_dir_all(&models)
         .with_context(|| format!("Не удалось создать {}", models.display()))?;
@@ -253,59 +247,81 @@ fn content_length(response: &ureq::http::Response<ureq::Body>) -> Option<u64> {
     length
 }
 
-/// Качает один файл по прямому URL в `dest` — для источников, которые не
-/// ходят через GitHub-релиз. Используется только на iOS (там нет hf-hub,
-/// см. Cargo.toml); десктоп качает файлы HuggingFace крейтом hf-hub.
-#[cfg(target_os = "ios")]
-pub(crate) fn download_url(url: &str, dest: &Path) -> Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("не создать каталог {}", parent.display()))?;
+/// Каталог с весами ZONOS3-Mini (GGUF с HuggingFace).
+pub fn zonos3_dir() -> PathBuf {
+    crate::paths::models_dir().join("zonos3")
+}
+
+/// Имена файлов ZONOS3, которые нужны движку. Декодер — компактный
+/// `zac-keep2` (дефолт web/ggml-серверов: 2 слоя на стадию), полный
+/// `zac.gguf` не нужен: тот же звук, но заметно тяжелее.
+pub const ZONOS3_FILES: &[(&str, &str)] = &[
+    ("backbone-ptq.gguf", "gguf/backbone-ptq.gguf"),
+    ("zac-keep2.gguf", "gguf/zac-keep2.gguf"),
+    ("spk-encoder.gguf", "gguf/spk-encoder.gguf"),
+];
+
+/// Гарантирует, что веса ZONOS3 на месте, иначе качает их с HuggingFace.
+///
+/// Файлы крупные (бэкбон ~660 МБ, компактный декодер и спикер-энкодер —
+/// сотни МБ и ~45 МБ), поэтому скачивание идёт с отчётом о прогрессе и
+/// только по отсутствующим.
+pub fn ensure_zonos3_with_progress(progress: &mut dyn FnMut(u8)) -> Result<()> {
+    let dir = zonos3_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("не создать {}", dir.display()))?;
+    DOWNLOAD_CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
+    let total = ZONOS3_FILES.len();
+    for (i, (local, remote)) in ZONOS3_FILES.iter().enumerate() {
+        ensure_not_cancelled()?;
+        let dest = dir.join(local);
+        if !dest.exists() {
+            println!("📥 Загрузка ZONOS3: {local}...");
+            // Сквозной прогресс: база за скачанные файлы + доля текущего файла.
+            let base = i * 100 / total;
+            let share = 100 / total;
+            let mut file_progress = |pct: u8| {
+                progress((base + (pct.min(99) as usize) * share / 100) as u8);
+            };
+            hf_file("Zyphra", "ZONOS3-Mini", remote, &dest, &mut file_progress)
+                .with_context(|| format!("не удалось скачать {remote}"))?;
+        }
+        progress(((i + 1) * 100 / total) as u8);
     }
-    let expected = remote_size(url);
-    download(url, dest, expected, &mut |pct| {
-        println!(
-            "📥 {} — {pct}%",
-            dest.file_name().unwrap_or_default().to_string_lossy()
-        )
-    })
+    Ok(())
+}
+
+/// Гарантирует, что веса ZONOS3 на месте.
+pub fn ensure_zonos3() -> Result<()> {
+    ensure_zonos3_with_progress(&mut |_| {})
+}
+
+/// Готовы ли веса ZONOS3.
+pub fn zonos3_ready() -> bool {
+    let dir = zonos3_dir();
+    ZONOS3_FILES.iter().all(|(local, _)| dir.join(local).exists())
 }
 
 /// Файл `filename` из репозитория HuggingFace `owner/name` в `dest`.
 ///
-/// Десктоп — крейт hf-hub (он же делает кэш/проверки); iOS — прямые
-/// resolve-URL через собственный загрузчик, потому что hf-hub тянет
-/// xet-стек с sysinfo, не собирающимся под iOS (см. Cargo.toml).
-pub(crate) fn hf_file(owner: &str, name: &str, filename: &str, dest: &Path) -> Result<()> {
+/// Прямые resolve-URL через собственный потоковый загрузчик: он даёт
+/// отмену по флагу [`DOWNLOAD_CANCEL`] и плавный прогресс внутри одного
+/// файла (веса ZONOS3 — до 663 МБ), чего у блокирующего hf-hub нет.
+pub(crate) fn hf_file(owner: &str, name: &str, filename: &str, dest: &Path, progress: &mut dyn FnMut(u8)) -> Result<()> {
     if dest.exists() {
         return Ok(());
     }
     println!("📥 Загрузка {filename}...");
-    #[cfg(not(target_os = "ios"))]
-    {
-        let client =
-            hf_hub::HFClientSync::new().context("Не удалось создать HuggingFace-клиент")?;
-        let model = client.model(owner.to_string(), name.to_string());
-        let downloaded = model
-            .download_file()
-            .filename(filename.to_string())
-            .send()
-            .with_context(|| format!("Не удалось скачать {filename}"))?;
-        std::fs::copy(&downloaded, dest)
-            .with_context(|| format!("Не удалось сохранить {}", dest.display()))?;
-        Ok(())
-    }
-    #[cfg(target_os = "ios")]
-    {
-        let url = format!("https://huggingface.co/{owner}/{name}/resolve/main/{filename}");
-        download_url(&url, dest).with_context(|| format!("Не удалось скачать {filename}"))
-    }
+    let url = format!("https://huggingface.co/{owner}/{name}/resolve/main/{filename}");
+    download(&url, dest, 0, progress).with_context(|| format!("Не удалось скачать {filename}"))
 }
 
 /// Качает `url` в `dest`, дёргая `progress(pct)` по мере роста файла.
-/// HTTP-загрузка в процессе: ureq проходит редиректы GitHub, размер берём
+/// HTTP-загрузка в процессе: ureq проходит редиректы GitHub/HF, размер берём
 /// из Content-Length ответа. Внешние curl/tar не нужны ни на одной ОС —
 /// на iOS их в сэндбоксе просто нет.
+///
+/// Пишет во временный `dest.part` и переименовывает по завершении: отмена
+/// или обрыв не оставляют поломанный файл под настоящим именем.
 fn download(url: &str, dest: &Path, _expected: u64, progress: &mut dyn FnMut(u8)) -> Result<()> {
     let response = agent_download()
         .get(url)
@@ -316,19 +332,35 @@ fn download(url: &str, dest: &Path, _expected: u64, progress: &mut dyn FnMut(u8)
     }
     let expected = content_length(&response).unwrap_or(0);
 
+    let tmp = dest.with_extension(format!(
+        "part{}",
+        std::process::id()
+    ));
     let mut reader = response.into_body().into_reader();
-    let mut file = std::fs::File::create(dest)
-        .with_context(|| format!("не создать файл {}", dest.display()))?;
+    let mut file = std::fs::File::create(&tmp)
+        .with_context(|| format!("не создать файл {}", tmp.display()))?;
 
+    let cancel_msg = "Загрузка отменена";
     let mut buf = vec![0u8; 64 * 1024];
     let mut total: u64 = 0;
     let mut last = 0u8;
     loop {
-        let n = reader.read(&mut buf).context("обрыв при скачивании")?;
+        ensure_not_cancelled()?;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                if downloads_cancelled() {
+                    anyhow::Error::msg(cancel_msg)
+                } else {
+                    anyhow::Error::new(e).context("обрыв при скачивании")
+                }
+            })?;
         if n == 0 {
             break;
         }
-        std::io::Write::write_all(&mut file, &buf[..n]).context("запись файла модели")?;
+        std::io::Write::write_all(&mut file, &buf[..n])
+            .map_err(|e| anyhow::Error::new(e).context("запись файла модели"))?;
         total += n as u64;
         if expected > 0 {
             let pct = ((total.min(expected) as f64 / expected as f64) * 100.0) as u8;
@@ -339,9 +371,17 @@ fn download(url: &str, dest: &Path, _expected: u64, progress: &mut dyn FnMut(u8)
         }
     }
     std::io::Write::flush(&mut file).ok();
+    drop(file);
+    if downloads_cancelled() {
+        let _ = std::fs::remove_file(&tmp);
+        bail!("{cancel_msg}");
+    }
     if expected > 0 && total < expected {
+        let _ = std::fs::remove_file(&tmp);
         bail!("скачано {total} из {expected} байт — файл оборвался");
     }
+    std::fs::rename(&tmp, dest)
+        .with_context(|| format!("не переименовать {}", tmp.display()))?;
     progress(100);
     Ok(())
 }

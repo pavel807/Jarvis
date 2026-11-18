@@ -42,6 +42,8 @@ pub mod facts;
 pub mod jokes;
 pub mod learned;
 pub mod llm;
+/// Журнал: dev — терминал, prod — только GUI (события в интерфейс).
+pub mod logging;
 pub mod mcp;
 pub mod memory;
 pub mod model_fetch;
@@ -129,7 +131,7 @@ pub mod tools;
 pub mod topic;
 pub mod tts;
 pub mod tts_normalizer;
-pub mod tts_silero;
+pub mod tts_zonos;
 pub mod auto;
 // Wake-слово (RustPotter) — десктоп: на iOS слушание включается кнопкой.
 #[cfg(not(target_os = "ios"))]
@@ -143,6 +145,6 @@ pub mod wake_train;
 pub mod weather;
 pub mod web;
 /// Мобильный движок iOS: tap-to-talk (микрофон → FastConformer → LLM →
-/// Silero) на тех же моделях, что и десктоп, без wake-слова и автоматизации.
+/// ZONOS3) на тех же моделях, что и десктоп, без wake-слова и автоматизации.
 #[cfg(target_os = "ios")]
 pub mod mobile;

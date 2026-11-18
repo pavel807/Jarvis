@@ -6,7 +6,7 @@
 //!
 //! микрофон (cpal/CoreAudio) → буфер 16 кГц → FastConformer STT
 //! (candle-CPU, модель качается в Documents/Jarvis/models) → гейты
-//! (дальше/шутка/факт/календарь/почитай) → [`crate::llm::ask`] → Silero TTS
+//! (дальше/шутка/факт/календарь/почитай) → [`crate::llm::ask`] → ZONOS3 TTS
 //! через [`crate::tts::spawn_audio_player`] (настоящий выходной поток,
 //! AVAudioSession активируется в audio.rs).
 //!
@@ -31,13 +31,13 @@ pub const STT_SAMPLE_RATE: usize = 16_000;
 
 /// Всё, что нужно мобильному движку: общее состояние LLM, история
 /// разговора, канал событий (UI слушает их через `engine-event`), флаг
-/// отмены генерации и настоящий аудио-конвейер Silero.
+/// отмены генерации и настоящий аудио-конвейер ZONOS3.
 pub struct MobileHandles {
     pub llm: llm::SharedLlm,
     pub history: Arc<Mutex<Vec<ChatTurn>>>,
     pub events: crate::events::EventTx,
     pub cancel: Arc<AtomicBool>,
-    /// Плеер Silero: llm::ask шлёт сюда SynthesizeAndPlay/Stop.
+    /// Плеер TTS: llm::ask шлёт сюда SynthesizeAndPlay/Stop.
     pub audio_tx: Sender<AudioMessage>,
     /// Говорит ли плеер прямо сейчас (для UI-индикатора).
     pub is_speaking: Arc<AtomicBool>,
@@ -50,7 +50,7 @@ pub struct MobileHandles {
 }
 
 impl MobileHandles {
-    /// Собирает хендлы из общего состояния приложения: плеер Silero и его
+    /// Собирает хендлы из общего состояния приложения: плеер ZONOS3 и его
     /// флаги уже созданы в инициализации (общие с десктопным пайплайном),
     /// STT и сессия прослушивания появляются по мере работы.
     pub fn new(
@@ -213,7 +213,7 @@ pub fn listen_start(h: &MobileHandles) -> String {
 
 /// Остановить запись и распознать сказанное. Распознавание и ответ идут
 /// в фоне: UI получает Transcript → LlmChunk/LlmDone, озвучка — через
-/// настоящий плеер Silero.
+/// настоящий плеер ZONOS3.
 pub fn listen_stop(h: &MobileHandles) {
     let session = h
         .listen
@@ -305,7 +305,7 @@ pub fn speak_stop(h: &MobileHandles) {
 }
 
 /// Общий конвейер вопрос→ответ (текст с клавиатуры): ask() с настоящим
-/// аудио-каналом Silero. Гейты не здесь — сначала [`handle_text`].
+/// аудио-каналом TTS. Гейты не здесь — сначала [`handle_text`].
 pub fn answer(h: &MobileHandles, text: &str) {
     answer_with(
         &h.llm,
@@ -323,7 +323,7 @@ pub fn handle_text(h: &MobileHandles, text: &str) -> bool {
     gates_with(&h.events, &h.cancel, text)
 }
 
-/// Общий конвейер вопрос→ответ: ask() с настоящим аудио-каналом Silero.
+/// Общий конвейер вопрос→ответ: ask() с настоящим аудио-каналом ZONOS3.
 fn answer_with(
     llm: &llm::SharedLlm,
     history: &Arc<Mutex<Vec<ChatTurn>>>,

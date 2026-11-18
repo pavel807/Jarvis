@@ -82,8 +82,14 @@ fn ensure_files() -> Result<PathBuf> {
     ];
 
     for (remote, local_name) in files {
-        crate::model_fetch::hf_file("TigreGotico", "stressonnx-models", remote, &dir.join(local_name))
-            .with_context(|| format!("Не удалось подготовить {local_name}"))?;
+        crate::model_fetch::hf_file(
+            "TigreGotico",
+            "stressonnx-models",
+            remote,
+            &dir.join(local_name),
+            &mut |_| {},
+        )
+        .with_context(|| format!("Не удалось подготовить {local_name}"))?;
     }
 
     // Веса для candle. ONNX нужен только чтобы собрать их скриптом
@@ -97,6 +103,7 @@ fn ensure_files() -> Result<PathBuf> {
                 "stressonnx-models",
                 "ru_ruaccent/nn_accent/model.onnx",
                 &onnx,
+                &mut |_| {},
             )
             .context("Не удалось скачать accent.onnx")?;
         }

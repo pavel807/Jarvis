@@ -88,12 +88,13 @@ pub struct Settings {
     pub weather_city: String,
 
     // --- TTS ---
-    /// Голос Silero v5: ru_eduard | ru_dmitriy | ru_alexandr | ru_bogdan | ... (29 голосов).
+    /// Голос синтеза: эмбеддинг из voices/ (jarvis — голос Джарвиса,
+    /// клонирование по опорной записи).
     pub tts_voice: String,
     /// Скорость речи: 1.0 — естественно, меньше — медленнее.
     pub tts_speed: f32,
     /// Мобильная озвучка: интерфейс (iPhone/iPad) читает ответы системным
-    /// голосом. На десктопе озвучкой занимается Silero — поле не действует.
+    /// голосом. На десктопе озвучкой занимается ZONOS3 — поле не действует.
     pub tts_speak_answers: bool,
 
     // --- Отклик ---
@@ -186,7 +187,7 @@ impl Default for Settings {
             api_model: "yandexgpt-lite".to_string(),
             api_folder_id: String::new(),
             weather_city: "Москва".to_string(),
-            tts_voice: "ru_eduard".to_string(),
+            tts_voice: "jarvis".to_string(),
             tts_speed: 1.0,
             tts_speak_answers: true,
             ack_before_llm: false,
@@ -206,9 +207,21 @@ impl Default for Settings {
 
 impl Settings {
     pub fn load(path: &Path) -> Result<Self> {
-        match fs::read_to_string(path) {
-            Ok(raw) => toml::from_str(&raw).with_context(|| format!("Ошибка парсинга {:?}", path)),
-            Err(_) => Ok(Self::default()),
+        let mut s = match fs::read_to_string(path) {
+            Ok(raw) => toml::from_str::<Self>(&raw)
+                .with_context(|| format!("Ошибка парсинга {:?}", path))?,
+            Err(_) => Self::default(),
+        };
+        s.migrate();
+        Ok(s)
+    }
+
+    /// Одноразовые переходы при загрузке: голоса «ru_eduard» и прочие
+    /// Silero-дикторы остались от удалённого движка — ZONOS3 не знает
+    /// таких голосов, имя становится «jarvis» (эмбеддинг клона).
+    fn migrate(&mut self) {
+        if self.tts_voice.starts_with("ru_") {
+            self.tts_voice = "jarvis".to_string();
         }
     }
 
@@ -254,7 +267,7 @@ impl Settings {
     /// Применяет настройки, безопасные на живую (hot-reload settings.toml):
     /// скорость речи, параметры генерации LLM и конфиг облачного провайдера.
     /// Голос и бэкенд не трогаем: смена голоса требует перезагрузки
-    /// Silero-движка (её делает UI-команда сохранения), бэкенд/модель —
+    /// TTS-движка (её делает UI-команда сохранения), бэкенд/модель —
     /// перезапуска движка.
     pub fn apply_hot(&self) {
         crate::tts::set_current_speed(self.tts_speed);

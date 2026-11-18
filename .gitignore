@@ -27,3 +27,6 @@ resp2.json
 schedule.json
 memory.json
 learned_commands.json
+
+# Локальные архивы моделей, скачанные для отладки
+*.tar.gz

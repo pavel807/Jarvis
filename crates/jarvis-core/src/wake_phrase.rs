@@ -1,35 +1,29 @@
-//! Активационная фраза: пользователь выбирает **любую**, Silero её
-//! синтезирует, а CTC-детектор проверяет, что модель фразу слышит.
+//! Активационная фраза: пользователь выбирает **любую**, ZONOS3 её
+//! синтезирует голосом Джарвиса, а CTC-детектор проверяет, что модель фразу
+//! слышит.
 //!
 //! Зачем синтез, если эталон — текст? Проверка: ASR-модель может кодить
 //! необычную фразу неверно (для «Джарвис» в скользящем окне она давала
-//! «Дервись»). Синтез разными дикторами и темпами показывает, сколько
-//! вариантов произношения модель понимает буквально, и даёт воспроизводимый
-//! эталон произношения для самопроверки.
+//! «Дервись»). Синтез с разными темпами и сидами сэмплирования показывает,
+//! сколько вариантов произношения модель понимает буквально, и даёт
+//! воспроизводимый эталон произношения для самопроверки.
 //!
 //! Длина фразы важна для детектора: окно должно накрывать её целиком,
 //! поэтому в отчёте — рекомендованный `window_ms`.
 
 use crate::stt::Stt;
+use crate::tts_zonos::{Sampling, SpeechEngine, ZonosVoice};
 use crate::wake_ctc::{self, CtcScratch};
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// Дикторы Silero для проверки — разные тембры.
-const VOICES: &[&str] = &[
-    "ru_aigul",
-    "ru_albina",
-    "ru_dmitriy",
-    "ru_eduard",
-    "ru_ekaterina",
-    "ru_karina",
-    "ru_oksana",
-    "ru_vika",
-];
-
 /// Темпы произнесения.
 const TEMPOS: &[f32] = &[0.95, 1.0, 1.05];
+
+/// Сиды сэмплирования — как разные «дикторы»: тембр и интонация чуть
+/// меняются от прогона к прогону, ASR проверяется на вариативности.
+const SEEDS: &[u32] = &[11, 23, 37, 41, 53, 67, 71, 83];
 
 /// Отчёт по проверке активационной фразы.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -48,14 +42,15 @@ pub struct PhraseReport {
     pub samples_dir: String,
 }
 
-/// Синтезировать фразу разными дикторами и проверить, слышит ли её модель.
+/// Синтезировать фразу голосом Джарвиса (вариации темпа и сида) и проверить,
+/// слышит ли её модель.
 pub fn generate_and_check(stt: &Arc<Mutex<Stt>>, phrase: &str) -> Result<PhraseReport> {
     let phrase = phrase.trim();
     if phrase.is_empty() {
         bail!("Фраза-активация пустая");
     }
-    let engine = crate::tts_silero::SileroEngine::new_no_stress("ru_eduard")
-        .context("Silero недоступен — фразу нечем синтезировать")?;
+    let mut engine: ZonosVoice = crate::tts::open_zonos_voice("jarvis")
+        .context("ZONOS3 недоступен — фразу нечем синтезировать")?;
 
     // Путь абсолютный: без JARVIS_HOME train_dir() относительный, и записи
     // легли бы в текущий каталог процесса.
@@ -69,12 +64,18 @@ pub fn generate_and_check(stt: &Arc<Mutex<Stt>>, phrase: &str) -> Result<PhraseR
     let mut worst = f32::INFINITY;
     let mut longest_ms = 0usize;
 
-    for voice in VOICES {
-        for (ti, speed) in TEMPOS.iter().enumerate() {
-            let Ok(audio) = engine.synthesize_with(voice, phrase, *speed) else {
+    let mut variant = 0usize;
+    for (ti, speed) in TEMPOS.iter().enumerate() {
+        for seed in SEEDS {
+            engine.set_sampling(Sampling {
+                seed: *seed,
+                ..Sampling::default()
+            });
+            let Ok(audio) = engine.speak(phrase, *speed) else {
+                variant += 1;
                 continue;
             };
-            let mono = crate::audio::resample_audio(&audio, 48_000, 16_000);
+            let mono = crate::audio::resample_audio(&audio, 44_100, 16_000);
             longest_ms = longest_ms.max(mono.len() * 1000 / 16_000);
             // Окно для проверки — фраза целиком с полями по краям.
             let win = (mono.len() + 8_000).max(16_000 * 12 / 10);
@@ -83,7 +84,7 @@ pub fn generate_and_check(stt: &Arc<Mutex<Stt>>, phrase: &str) -> Result<PhraseR
             for (i, s) in mono.iter().take(win - start).enumerate() {
                 window[start + i] = *s;
             }
-            let path = dir.join(format!("phrase_{voice}_{ti}.wav"));
+            let path = dir.join(format!("phrase_zonos_{ti}_{seed}.wav"));
             write_wav(&path, &window)?;
             total += 1;
             if wake_ctc::ctc_frames(stt, &window, &mut scratch).is_none() {
@@ -93,11 +94,13 @@ pub fn generate_and_check(stt: &Arc<Mutex<Stt>>, phrase: &str) -> Result<PhraseR
                 detected += 1;
                 worst = worst.min(m.score);
             }
+            variant += 1;
         }
     }
+    let _ = variant;
 
     if total == 0 {
-        bail!("Silero не синтезировал ни одного варианта фразы");
+        bail!("ZONOS3 не синтезировал ни одного варианта фразы");
     }
     // Детектор должен накрывать фразу целиком: окно = фраза + 400 мс запаса.
     let window_ms = (longest_ms + 400).max(1200);

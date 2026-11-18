@@ -1189,6 +1189,65 @@ fn plan_existing_path(target: &str) -> Option<String> {
         .then(|| target.to_string())
 }
 
+/// Музыка/плеер — не запуск приложения: «включи музыку» управляет
+/// плеером, а не открывает Music.app.
+fn media_words(lower: &[String]) -> bool {
+    lower.iter().any(|w| {
+        w.starts_with("музык")
+            || w.starts_with("плеер")
+            || w.starts_with("трек")
+            || w.starts_with("песн")
+    })
+}
+
+/// Файл или папка — не приложение.
+fn path_words(lower: &[String]) -> bool {
+    lower.iter().any(|w| {
+        w.starts_with("файл")
+            || w.starts_with("папк")
+            || w.starts_with("каталог")
+            || matches!(w.as_str(), "file" | "folder" | "document" | "documents")
+    })
+}
+
+/// Сайт или ссылка — не приложение.
+fn site_words(lower: &[String]) -> bool {
+    lower.iter().any(|w| {
+        w.starts_with("сайт")
+            || w.starts_with("страниц")
+            || w.starts_with("ссылк")
+            || matches!(w.as_str(), "site" | "website" | "url")
+    })
+}
+
+/// Просьба про музыку или файл-папку (по строке).
+///
+/// Команда пользователя из commands.toml такие фразы перехватывать не
+/// должна: «включи музыку» — это плеер, «открой папку документы» — папка.
+/// Их разбирают план и модель.
+pub fn request_is_media_or_path(text: &str) -> bool {
+    let lower: Vec<String> = text.split_whitespace().map(|w| w.to_lowercase()).collect();
+    media_words(&lower) || path_words(&lower)
+}
+
+/// Просьба про музыку (по строке).
+pub fn request_is_media(text: &str) -> bool {
+    let lower: Vec<String> = text.split_whitespace().map(|w| w.to_lowercase()).collect();
+    media_words(&lower)
+}
+
+/// Просьба про файл-папку (по строке).
+pub fn request_is_path(text: &str) -> bool {
+    let lower: Vec<String> = text.split_whitespace().map(|w| w.to_lowercase()).collect();
+    path_words(&lower)
+}
+
+/// Просьба про сайт или ссылку (по строке).
+pub fn request_is_site(text: &str) -> bool {
+    let lower: Vec<String> = text.split_whitespace().map(|w| w.to_lowercase()).collect();
+    site_words(&lower)
+}
+
 fn plan_open(
     tokens: &[String],
     lookup: &impl Fn(&str) -> Option<String>,
@@ -1233,26 +1292,11 @@ fn plan_open(
     }
     // Музыка/плеер — не запуск приложения: «включи музыку» управляет
     // плеером, а не открывает Music.app. Пусть решает LLM со срезом music.
-    if lower.iter().any(|w| {
-        w.starts_with("музык")
-            || w.starts_with("плеер")
-            || w.starts_with("трек")
-            || w.starts_with("песн")
-    }) {
+    if media_words(&lower) {
         return None;
     }
-    let path_marker = lower.iter().any(|w| {
-        w.starts_with("файл")
-            || w.starts_with("папк")
-            || w.starts_with("каталог")
-            || matches!(w.as_str(), "file" | "folder" | "document" | "documents")
-    });
-    let site_marker = lower.iter().any(|w| {
-        w.starts_with("сайт")
-            || w.starts_with("страниц")
-            || w.starts_with("ссылк")
-            || matches!(w.as_str(), "site" | "website" | "url")
-    });
+    let path_marker = path_words(&lower);
+    let site_marker = site_words(&lower);
 
     if let Some(url) = plan_explicit_url(&target) {
         return Some(crate::tools::ToolCall::OpenUrl { url, browser: browser.clone() });

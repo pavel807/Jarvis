@@ -7,6 +7,7 @@
 //! Запуск: JARVIS_HOME=~/.local/share/Jarvis cargo run -p jarvis-core --example wake_ctc_probe
 
 use anyhow::{Context, Result};
+use jarvis_core::tts_zonos::{Sampling, SpeechEngine};
 
 fn read_window(path: &std::path::Path) -> Result<Vec<f32>> {
     let mut reader = hound::WavReader::open(path)?;
@@ -100,33 +101,27 @@ fn main() -> Result<()> {
             .collect(),
     ));
 
-    // Режим --synth: синтезируем САМО слово разными дикторами Silero и
-    // меряем recall на нём. Это и есть проверка «любого активационного
-    // слова»: эталон — текст, переобучение и синтез эталона не нужны.
+    // Режим --synth: синтезируем САМО слово разными «дикторами» ZONOS3
+    // (сиды сэмплирования) и меряем recall на нём. Это и есть проверка
+    // «любого активационного слова»: эталон — текст, переобучение и синтез
+    // эталона не нужны.
     let synth = std::env::args().any(|a| a == "--synth");
     if synth {
-        let voices = [
-            "ru_aigul",
-            "ru_albina",
-            "ru_alexandr",
-            "ru_dmitriy",
-            "ru_eduard",
-            "ru_ekaterina",
-            "ru_igor",
-            "ru_karina",
-            "ru_marat",
-            "ru_oksana",
-        ];
-        let engine = jarvis_core::tts_silero::SileroEngine::new_no_stress("ru_eduard")?;
+        let seeds: &[u32] = &[11, 23, 37, 41, 53, 67, 71, 83];
+        let mut engine = jarvis_core::tts::open_zonos_voice("jarvis")?;
         let mut hits = 0usize;
         let mut total = 0usize;
         let mut worst = f32::INFINITY;
-        for voice in voices {
+        for seed in seeds {
+            engine.set_sampling(Sampling {
+                seed: *seed,
+                ..Sampling::default()
+            });
             for speed in [0.95f32, 1.0, 1.05] {
-                let Ok(audio) = engine.synthesize_with(voice, &word, speed) else {
+                let Ok(audio) = engine.speak(&word, speed) else {
                     continue;
                 };
-                let mono = jarvis_core::audio::resample_audio(&audio, 48_000, 16_000);
+                let mono = jarvis_core::audio::resample_audio(&audio, 44_100, 16_000);
                 let mut w = vec![0_f32; window_len];
                 let start = (window_len - mono.len().min(window_len / 2)) / 2;
                 for (i, s) in mono.iter().take(window_len - start).enumerate() {
@@ -159,7 +154,7 @@ fn main() -> Result<()> {
                                 })
                                 .collect()
                         };
-                        println!("   промах: {voice} @ {speed} → CTC «{pieces:?}»");
+                        println!("   промах: сид {seed} @ {speed} → CTC «{pieces:?}»");
                     }
                 }
             }

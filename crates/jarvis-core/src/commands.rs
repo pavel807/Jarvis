@@ -159,17 +159,26 @@ impl CommandsConfig {
     /// (глагол) и объект (дословный триггер) детерминированно определяют
     /// команду, модель на них не тратится.
     ///
-    /// Ловим только «глагол первым + голый триггер за ним»: составные фразы
-    /// («закрой ютуб и открой телегу») по-прежнему зона LLM.
+    /// Триггер ищется в любом месте остатка фразы, а не только в начале:
+    /// «открой браузер файт фокс» — это команда «файт фокс» с уточнением
+    /// («с какой браузер»), а не отдельная фраза для модели. Длинный триггер
+    /// побеждает короткий («яндекс карты» важнее «яндекс»); два одинаково
+    /// длинных триггера РАЗНЫХ команд означают составную просьбу — её
+    /// по-прежнему разбирает LLM.
+    ///
+    /// Глагол направления — обязательно первый: «что открой ютуб значит» —
+    /// вопрос, а не просьба открыть YouTube. Составные фразы («закрой ютуб
+    /// и открой телегу») по-прежнему зона LLM.
     pub fn find_action_command(&self, text: &str) -> Option<Command> {
         let cleaned = clean_wakewords_and_prompt(text);
         let mut words: Vec<&str> = cleaned.split_whitespace().collect();
 
         // Глагол направления обязан стоять первым: «что открой ютуб значит» —
-        // вопрос, а не просьба открыть YouTube.
-        let direction = words.first()?;
-        let closing = STOP_VERBS.contains(direction);
-        let opening = !closing && OPEN_VERBS.contains(direction);
+        // вопрос, а не просьба открыть YouTube. Копия строки: дальше список
+        // слов меняется, а глагол нужен и после.
+        let direction = words.first()?.to_string();
+        let closing = STOP_VERBS.contains(&direction.as_str());
+        let opening = !closing && OPEN_VERBS.contains(&direction.as_str());
         if !closing && !opening {
             return None;
         }
@@ -180,10 +189,26 @@ impl CommandsConfig {
             return None;
         }
 
-        // Дальше — тот же дословный матч, что и в find_command: триггер в
-        // начале остатка фразы, никакого fuzzy. Вежливые слова
-        // («пожалуйста») снимутся внутри find_command сами.
-        let cmd = self.find_command(&target)?;
+        // Сначала — дословный триггер в начале остатка (старое поведение):
+        // он точнее любых догадок.
+        let (cmd, after) = match self.find_command(&target) {
+            Some(cmd) => (cmd, 0),
+            None => self.find_command_in(&target)?,
+        };
+
+        // Файл-папка: «открой папку документы» — это папка, а не приложение
+        // из каталога (у команды «finder» триггер «папка»). Слова после
+        // триггера означают уточнение цели — разбирать их должен план.
+        if after > 0 && crate::router::request_is_path(&target) {
+            return None;
+        }
+        // Музыка: «включи музыку» — это плеер, а не запуск приложения.
+        // «Открыть музыку» — наоборот, команда пользователя.
+        if crate::router::request_is_media(&target)
+            && !direction.starts_with("откры")
+        {
+            return None;
+        }
 
         // Направление и тип действия должны сочетаться: закрыть можно только
         // приложение, ссылку и файл — только открыть.
@@ -193,7 +218,115 @@ impl CommandsConfig {
             matches!(cmd.action_type.trim(), "app" | "url" | "path").then_some(cmd)
         }
     }
+
+    /// Команда по триггеру, встретившемуся в любом месте фразы, и число слов
+    /// после него.
+    ///
+    /// Выбирается самый длинный триггер (по числу слов): «яндекс карты» важнее
+    /// «яндекс». Если одинаково длинные триггеры нашлись у РАЗНЫХ команд,
+    /// выбор не делается — фраза составная, и разбирать её должен LLM.
+    fn find_command_in(&self, text: &str) -> Option<(Command, usize)> {
+        let target = clean_text(text);
+        let words: Vec<&str> = target.split_whitespace().collect();
+        // (слов в триггере, слов после триггера, команда)
+        let mut best: Option<(usize, usize, &Command)> = None;
+        let mut tie = false;
+
+        for cmd in &self.commands {
+            if !cmd.enabled {
+                continue;
+            }
+            for trigger in &cmd.trigger_words {
+                let joined = clean_text(trigger);
+                if joined.is_empty() {
+                    continue;
+                }
+                let needle: Vec<&str> = joined.split_whitespace().collect();
+                let Some(start) = words
+                    .windows(needle.len())
+                    .position(|w| w.iter().zip(needle.iter()).all(|(word, t)| word_eq(word, t)))
+                else {
+                    continue;
+                };
+                let len = needle.len();
+                let after = words.len() - (start + len);
+                match best {
+                    // Короче текущего — оставляем лучший.
+                    Some((best_len, _, _)) if best_len > len => {}
+                    // Такая же длина: разные команды — фраза составная.
+                    Some((best_len, _, best_cmd)) if best_len == len => {
+                        if best_cmd.name != cmd.name {
+                            tie = true;
+                        }
+                    }
+                    // Длиннее — новый лучший, и прошлая неоднозначность
+                    // уже не про него.
+                    _ => {
+                        best = Some((len, after, cmd));
+                        tie = false;
+                    }
+                }
+            }
+        }
+
+        match (best, tie) {
+            (Some((_, after, cmd)), false) => Some((cmd.clone(), after)),
+            _ => None,
+        }
+    }
+
+    /// Команда по имени или триггеру, без учёта регистра.
+    ///
+    /// Модель часто выдумывает «инструмент», имя которого совпадает с
+    /// командой пользователя из commands.toml («Finder»): это не ошибка
+    /// модели, а сигнал выполнить КОМАНДУ, а не гуглить её название.
+    pub fn find_command_by_name(&self, name: &str) -> Option<Command> {
+        let wanted = name.trim();
+        if wanted.is_empty() {
+            return None;
+        }
+        self.commands
+            .iter()
+            .filter(|c| c.enabled)
+            .find(|c| c.name.eq_ignore_ascii_case(wanted))
+            .or_else(|| {
+                self.commands.iter().filter(|c| c.enabled).find(|c| {
+                    c.trigger_words
+                        .iter()
+                        .any(|t| t.trim().eq_ignore_ascii_case(wanted))
+                })
+            })
+            .cloned()
+    }
 }
+
+/// Мягкое равенство слов: с учётом русских окончаний.
+///
+/// «музыка» ≈ «музыку», «папка» ≈ «папку» — триггеры в commands.toml стоят
+/// в именительном падеже, а в речи падеж меняется. Слова считаются равными,
+/// если отличаются только окончанием: общий префикс длинный, разница в
+/// длине мала. У настоящих разных слов («фокс» / «фокус») префикс короткий —
+/// такие не считаем равными.
+fn word_eq(word: &str, trigger: &str) -> bool {
+    if word == trigger {
+        return true;
+    }
+    let a: Vec<char> = word.chars().collect();
+    let b: Vec<char> = trigger.chars().collect();
+    let min_len = a.len().min(b.len());
+    // Короткие слова не разбираем: «фокс» и «фокус» отличаются серединой,
+    // а не окончанием.
+    if min_len < 5 || a.len().abs_diff(b.len()) > 3 {
+        return false;
+    }
+    let common = a
+        .iter()
+        .zip(b.iter())
+        .take_while(|(x, y)| x == y)
+        .count();
+    common + 2 >= min_len
+}
+
 
 /// Глаголы открытия/запуска. Проверяется только первое слово фразы — так же,
 /// как [`STOP_VERBS`] решает направление в perform.
@@ -731,6 +864,12 @@ pub fn run_command_tool(
 pub fn prompt_catalog_from(cfg: &CommandsConfig) -> String {
     let mut lines: Vec<String> = Vec::new();
     for cmd in cfg.commands.iter().filter(|c| c.enabled).take(40) {
+        // Стоп и выход из работы движок выполняет сам (детерминированно, без
+        // модели), а run_command их всё равно не умеет: в каталоге они были бы
+        // шумом и тратой префилла.
+        if matches!(cmd.action_type.trim(), "stop" | "exit") {
+            continue;
+        }
         let mut params = placeholders_of(&cmd.action_value);
         let value: String = cmd.action_value.trim().chars().take(60).collect();
         let action = match cmd.action_type.trim() {
@@ -744,8 +883,15 @@ pub fn prompt_catalog_from(cfg: &CommandsConfig) -> String {
             other => format!("действие {other}: {value}"),
         };
         // В промпт достаточно трёх триггеров: полный список раздувал префилл,
-        // а модель матчит по смыслу, а не по словарю.
-        let triggers: Vec<String> = cmd.trigger_words.iter().take(3).cloned().collect();
+        // а модель матчит по смыслу, а не по словарю. Триггер, повторяющий имя
+        // команды, не нужен — имя и так стоит в строке («finder, файлы/папка →
+        // запустить приложение Finder»), а каждый лишний триггер — это токены
+        // до первого звука.
+        let mut triggers: Vec<String> = cmd.trigger_words.iter().take(3).cloned().collect();
+        triggers.retain(|t| !t.trim().eq_ignore_ascii_case(cmd.name.trim()));
+        if triggers.is_empty() {
+            triggers = cmd.trigger_words.iter().take(3).cloned().collect();
+        }
         // Команды без параметров описываются одной строкой: «триггеры:» и
         // «параметры:» на 17 командах из 20 — чистый расход префилла.
         if params.is_empty() {
@@ -905,6 +1051,68 @@ mod tests {
             cfg.find_command("какие есть сервисы для прослушивания музыки")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn action_command_finds_trigger_inside_phrase() {
+        // «открой браузер файт фокс»: триггер «файт фокс» стоит не в начале
+        // остатка фразы, но команда пользователя всё равно находится —
+        // иначе фраза уходила в модель, а та выдумывала «инструмент Finder».
+        let cfg = CommandsConfig {
+            global: test_config().global,
+            commands: vec![
+                Command {
+                    name: "firefox".into(),
+                    trigger_words: vec!["файт фокс".into(), "файрфокс".into()],
+                    action_type: "app".into(),
+                    action_value: "Firefox".into(),
+                    action_fallback: None,
+                    enabled: true,
+                },
+                Command {
+                    name: "chrome".into(),
+                    trigger_words: vec!["хром".into()],
+                    action_type: "app".into(),
+                    action_value: "Google Chrome".into(),
+                    action_fallback: None,
+                    enabled: true,
+                },
+            ],
+        };
+        let cmd = cfg
+            .find_action_command("открой браузер файт фокс")
+            .expect("триггер найден в остатке фразы");
+        assert_eq!(cmd.name, "firefox");
+        // Короткий триггер той же команды тоже работает.
+        let cmd = cfg
+            .find_action_command("открой хром")
+            .expect("короткий триггер");
+        assert_eq!(cmd.name, "chrome");
+    }
+
+    #[test]
+    fn two_commands_in_one_phrase_stay_with_llm() {
+        // Составная просьба («открой ютуб и включи музыку»): триггеры разной
+        // длины, оба по одному слову — выбор неоднозначен, фраза уходит модели.
+        let cfg = test_config();
+        assert!(
+            cfg.find_action_command("открой ютуб и включи музыку")
+                .is_none(),
+            "составная фраза не должна выполняться одной командой"
+        );
+    }
+
+    #[test]
+    fn command_is_found_by_name_case_insensitive() {
+        // Модель выдумывает «инструмент Finder» — это команда пользователя.
+        let cfg = test_config();
+        let cmd = cfg.find_command_by_name("YouTube").expect("по имени");
+        assert_eq!(cmd.name, "youtube");
+        // По триггеру — тоже.
+        let cmd = cfg.find_command_by_name("видео").expect("по триггеру");
+        assert_eq!(cmd.name, "youtube");
+        assert!(cfg.find_command_by_name("нет-такой").is_none());
+        assert!(cfg.find_command_by_name("").is_none());
     }
 
     #[test]

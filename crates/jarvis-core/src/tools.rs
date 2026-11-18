@@ -968,6 +968,41 @@ pub fn parse(text: &str) -> ToolParse {
     }
 }
 
+/// Имя инструмента и аргументы из сырого tool-блока — без проверки имени.
+///
+/// Нужно, когда модель выдумала инструмент: его имя может совпадать с
+/// командой пользователя из commands.toml («Finder»), и тогда команду надо
+/// выполнить, а не гуглить её название.
+pub fn raw_call(text: &str) -> Option<(String, std::collections::HashMap<String, String>)> {
+    let canon = crate::tool_guard::canon_tags(text);
+    let inner = extract_tool_inner(&canon).ok()?;
+    let v: Value = serde_json::from_str(inner).ok()?;
+    let raw_name = ["name", "tool", "function", "action"]
+        .iter()
+        .find_map(|k| v.get(*k))
+        .and_then(|x| x.as_str())?
+        .trim()
+        .to_string();
+    if raw_name.is_empty() {
+        return None;
+    }
+    let args = match extract_args(&v) {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    let args = args
+        .into_iter()
+        .filter_map(|(k, val)| {
+            let text = match val {
+                Value::String(s) => s,
+                other => other.to_string(),
+            };
+            Some((k, text))
+        })
+        .collect();
+    Some((raw_name, args))
+}
+
 /// Достаёт JSON из tool-блока. Закрывающий `</tool>` необязателен: генерация
 /// часто останавливается ровно на `}}`, и токен может оборвать тег на `</`.
 /// Поэтому при отсутствии тега берём первый сбалансированный JSON-объект.
@@ -4614,6 +4649,18 @@ mod tests {
     #[test]
     fn parse_ignores_plain_text() {
         assert!(matches!(parse("Привет! Как дела?"), ToolParse::None));
+    }
+
+    #[test]
+    fn raw_call_reads_invented_tool() {
+        // Модель выдумала инструмент «Finder» — имя и аргументы всё равно
+        // достаём: по имени выполняем команду пользователя из commands.toml.
+        let text = r#"<tool>{"name":"Finder","args":{"path":"/home/paveldev"}}</tool>"#;
+        let (name, args) = raw_call(text).expect("имя и аргументы");
+        assert_eq!(name, "Finder");
+        assert_eq!(args.get("path").map(String::as_str), Some("/home/paveldev"));
+        // Без tool-блока — ничего.
+        assert!(raw_call("просто текст").is_none());
     }
 
     #[test]
