@@ -329,7 +329,7 @@ export const settings = $state<Settings>({
   llm_model: "qwen3.5-2b-mirai-m",
   llm_temperature: 0.6,
   llm_max_tokens: 0,
-  tts_voice: "ru_dmitriy",
+  tts_voice: "jarvis",
   tts_speed: 1.0,
   ack_before_llm: false,
   barge_in: true,
@@ -349,7 +349,7 @@ export const settings = $state<Settings>({
 /**
  * Tap-to-talk на iOS: слушание включается кнопкой — микрофон открыт, пока
  * пользователь не отпустит (нажмёт «стоп»), затем текст распознаёт
- * FastConformer и Джарвис отвечает голосом Silero, как на десктопе.
+ * FastConformer и Джарвис отвечает голосом ZONOS3, как на десктопе.
  */
 export async function listenStart() {
   try {
@@ -523,7 +523,7 @@ export async function initEvents() {
         store.chat.error = "";
         store.processing = false;
         completeReply(store.chat.done);
-        // Озвучка единая на всех платформах: Silero в Rust-движке. UI лишь
+        // Озвучка единая на всех платформах: ZONOS3 в Rust-движке. UI лишь
         // показывает фазу «говорит» (событие speech) и кнопку «Стоп».
         break;
       case "audio_level":

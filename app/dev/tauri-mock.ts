@@ -7,7 +7,7 @@
  *
  * Мок подменяет ровно то, что использует фронтенд: `invoke` и шину событий.
  * Данные подобраны так, чтобы страницы выглядели как в жизни: список команд
- * из commands.toml, голоса Silero, сэмплы wake word.
+ * из commands.toml, голоса ZONOS3, сэмплы wake word.
  *
  * Состояние можно переключать из консоли браузера: `window.jarvisMock.scenario(...)`.
  */
@@ -50,6 +50,8 @@ const VOICES: [string, string][] = [
 ];
 
 const settings = {
+  // Мастер первого запуска в превью не показываем — он закрывает главную.
+  setup_done: true,
   silence_rms_threshold: 0.018,
   silence_timeout_secs: 0.7,
   min_command_duration_secs: 0.5,
@@ -136,9 +138,9 @@ const samples = {
 };
 
 const tasks = [
-  { id: 1, text: "Собрать обратную связь по интерфейсу Mark V", done: false },
+  { id: 1, text: "Позвонить в сервис и узнать про запись", done: false },
   { id: 2, text: "Проверить приоритеты команд после чистки списка", done: false },
-  { id: 3, text: "Обновить образцы wake word на новый микрофон", done: true },
+  { id: 3, text: "Обновить образцы голоса на новый микрофон", done: true },
 ];
 
 let taskSeq = tasks.length;
@@ -316,7 +318,7 @@ const scenarios = {
         "Сегодня в Москве около **+7 градусов**, облачно с прояснениями.\n\nВетер небольшой — до `3 м/с`. Теплее одеться не помешает.",
     });
     fire("engine-event", { type: "state_changed", state: "listening" });
-    fire("engine-event", { type: "log", message: "TTS-сборка: silero v5, голос «ru_dmitriy»" });
+    fire("engine-event", { type: "log", message: "Озвучка: ZONOS3, голос «jarvis»" });
   },
   /** Действие инструментом: видно и услышанное, и итог действия. */
   action() {

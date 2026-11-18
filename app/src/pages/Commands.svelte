@@ -36,43 +36,43 @@
       icon: "grid",
       valueLabel: "Название программы",
       placeholder: "Safari",
-      hint: "Название как в папке «Программы» — например Safari или Microsoft Excel.",
+      hint: "",
     },
     url: {
       label: "Открыть сайт",
       icon: "link",
       valueLabel: "Адрес сайта",
       placeholder: "https://example.com",
-      hint: "Страница откроется в браузере по умолчанию.",
+      hint: "",
     },
     search: {
       label: "Найти в браузере",
       icon: "search",
       valueLabel: "Адрес поиска",
       placeholder: "https://www.google.com/search?q={}",
-      hint: "Вместо {} подставится то, что вы сказали после команды.",
+      hint: "Вместо {} — то, что вы скажете",
     },
     web: {
       label: "Найти в интернете и рассказать",
       icon: "globe",
-      hint: "Джарвис поищет в интернете и коротко ответит голосом. Ничего указывать не нужно.",
+      hint: "",
     },
     path: {
       label: "Открыть файл или папку",
       icon: "folder",
       valueLabel: "Путь",
       placeholder: "tasks.md",
-      hint: "Относительный путь считается от папки с данными Джарвиса.",
+      hint: "",
     },
     stop: {
       label: "Замолчать",
       icon: "stop",
-      hint: "Прерывает озвучку и подготовку ответа.",
+      hint: "",
     },
     exit: {
       label: "Закрыть Джарвис",
       icon: "power",
-      hint: "Полностью завершает приложение.",
+      hint: "",
     },
     command: {
       label: "Выполнить в терминале",
@@ -311,11 +311,6 @@
       Новая команда
     </button>
   </div>
-  <p class="page-sub commands-sub">
-    Джарвис выполняет команду, когда слышит одно из её слов. Чем выше строка,
-    тем раньше команда срабатывает — порядок можно менять перетаскиванием.
-  </p>
-
   <div class="toolbar">
     <div class="search-box">
       <span class="search-box__icon"><AppIcon name="search" size={15} /></span>
@@ -323,7 +318,7 @@
         bind:value={query}
         class="input"
         type="search"
-        placeholder="Поиск по названию, словам, действию…"
+        placeholder="Поиск"
         aria-label="Поиск по командам"
       />
     </div>
@@ -337,12 +332,6 @@
       <option value="priority">По приоритету</option>
       <option value="name">По алфавиту</option>
     </select>
-    <div class="toolbar__spacer"></div>
-    {#if config}
-      <span class="badge" title="Активных команд из всех">
-        {config.commands.filter((c) => c.enabled).length} из {config.commands.length}
-      </span>
-    {/if}
   </div>
 
   {#if !config}
@@ -396,15 +385,13 @@
           <span class="cmd-row__body">
             <span class="cmd-row__name">{cmd.name}</span>
             <span class="cmd-row__sub">
-              <span class="cmd-row__desc">{actionSummary(cmd)}</span>
+              <!-- Что делает команда — уже сказано заголовком раздела,
+                   поэтому в строке только слова, на которые она реагирует. -->
               <span class="cmd-row__triggers" title={cmd.trigger_words.join(", ")}>
                 {triggerSummary(cmd)}
               </span>
             </span>
           </span>
-          {#if !cmd.enabled}
-            <span class="badge">выключена</span>
-          {/if}
           <span class="cmd-row__actions">
             <button
               class="switch"
@@ -452,12 +439,6 @@
     </div>
   {/if}
 
-  {#if sortMode === "name" && config?.commands.length}
-    <p class="hint" style="margin-top: 10px">
-      Порядок перетаскиванием работает только в сортировке «По приоритету» — она показывает,
-      как команды проверяются голосом.
-    </p>
-  {/if}
 </div>
 
 {#if draftOpen}
@@ -516,7 +497,6 @@
           Добавить
         </button>
       </div>
-      <p class="hint">Произносите эти слова после «Джарвис». Чем больше вариантов, тем надёжнее.</p>
     </div>
 
     <div class="field">
@@ -546,7 +526,7 @@
     {#if draft.action_type === "app"}
       <div class="field">
         <label class="label" for="cmd-fallback">
-          Полный путь, если программа не находится (необязательно)
+          Путь к программе
         </label>
         <input
           id="cmd-fallback"
@@ -568,10 +548,6 @@
 {/if}
 
 <style>
-  .cmd-group + .hint {
-    margin-top: 10px;
-  }
-
   .back-btn {
     flex-shrink: 0;
     align-self: flex-start;
@@ -579,11 +555,6 @@
 
   /* Подзаголовок под шапкой на всю ширину: с кнопкой в строке заголовка
      он сжимался до узкой колонки и растягивался на восемь строк. */
-  .commands-sub {
-    margin: -6px 0 14px;
-    padding-left: 44px;
-  }
-
   /* Раздел по типу действия: между группами больше воздуха, чем между строками. */
   .cmd-section {
     margin-top: 18px;

@@ -237,15 +237,10 @@ fn spawn_engine(
             s.tts_voice.clone()
         };
 
-        tts::spawn_tts_loader(
-            &shared_engine.shared_tts,
-            &shared_engine.tts_failed,
-            &tts_voice,
-        );
+        tts::spawn_tts_loader(&shared_engine.shared_tts, &shared_engine.tts_failed, &tts_voice);
 
         let _ = events_tx.send(JarvisEvent::Log {
-            message: "TTS-сборка: silero v5 + нейро-ударитель, голос «{voice}»"
-                .replace("{voice}", &tts_voice),
+            message: format!("Озвучка: ZONOS3, голос «{tts_voice}»"),
         });
         spawn_llm_loader(&shared_engine.shared_llm, &events_tx);
 
@@ -382,7 +377,7 @@ async fn llm_models_status() -> Vec<LlmModelInfo> {
             let Some(name) = entry.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if name == "qwen3.5-0.8b" || name == "silero" || name == "fastconformer" {
+            if name == "qwen3.5-0.8b" || name == "zonos3" || name == "fastconformer" {
                 continue;
             }
             if entry.join("config.json").is_file() && entry.join("tokenizer.json").is_file() {
@@ -456,6 +451,14 @@ fn llm_download_model(
                 });
                 // Движок перечитает модель без перезапуска приложения.
                 spawn_llm_loader(&llm, &tx);
+                for ev in rx {
+                    let _ = app2.emit("engine-event", &ev);
+                }
+            }
+            Err(e) if jarvis_core::model_fetch::downloads_cancelled() => {
+                let _ = tx.send(JarvisEvent::Log {
+                    message: "Загрузка модели отменена".into(),
+                });
                 for ev in rx {
                     let _ = app2.emit("engine-event", &ev);
                 }
@@ -539,13 +542,14 @@ async fn models_status() -> Vec<ModelCard> {
         removable: true,
     });
 
-    let silero = jarvis_core::model_fetch::silero_status();
+    let zonos = jarvis_core::model_fetch::zonos3_ready();
+    let zonos_size = zonos.then(|| dir_size(&jarvis_core::model_fetch::zonos3_dir()));
     out.push(ModelCard {
-        name: "silero".into(),
-        title: "Озвучка — Silero v5, русские голоса".into(),
+        name: "zonos".into(),
+        title: "Озвучка — ZONOS3-Mini, голос Джарвиса (~0.9 ГБ)".into(),
         kind: "tts".into(),
-        installed: silero.is_some(),
-        size_mb: silero.map(|b| b / 1_048_576),
+        installed: zonos,
+        size_mb: zonos_size.map(|b| b / 1_048_576),
         downloadable: true,
         removable: true,
     });
@@ -553,7 +557,22 @@ async fn models_status() -> Vec<ModelCard> {
     out
 }
 
-/// Скачивание модели речи (Silero/FastConformer) по кнопке из настроек.
+/// Суммарный размер каталога (для карточки модели озвучки).
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_size(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Скачивание модели речи (FastConformer/ZONOS3) по кнопке из настроек.
 /// Прогресс — теми же событиями download_progress, что и у LLM.
 #[tauri::command]
 fn model_download(
@@ -561,7 +580,7 @@ fn model_download(
     shared: State<'_, Arc<Shared>>,
     name: String,
 ) -> Result<String, String> {
-    if !matches!(name.as_str(), "silero" | "fastconformer") {
+    if !matches!(name.as_str(), "fastconformer" | "zonos") {
         return Err(format!(
             "Модель «{name}» качается из раздела «Модель» (LLM) или не скачивается из приложения"
         ));
@@ -585,8 +604,8 @@ fn model_download(
                 let _ = app2.emit(
                     "engine-event",
                     &JarvisEvent::DownloadProgress {
-                        what: if name == "silero" {
-                            "Голос (Silero)".into()
+                        what: if name == "zonos" {
+                            "Голос ZONOS3".into()
                         } else {
                             "Распознавание речи".into()
                         },
@@ -595,16 +614,16 @@ fn model_download(
                 );
             }
         };
-        let result = if name == "silero" {
-            jarvis_core::model_fetch::ensure_silero_with_progress(&mut progress)
+        let result = if name == "zonos" {
+            jarvis_core::model_fetch::ensure_zonos3_with_progress(&mut progress)
         } else {
             jarvis_core::model_fetch::ensure_fastconformer_with_progress(&mut progress)
         };
         let _ = app2.emit(
             "engine-event",
             &JarvisEvent::DownloadProgress {
-                what: if name == "silero" {
-                    "Голос (Silero)".into()
+                what: if name == "zonos" {
+                    "Голос ZONOS3".into()
                 } else {
                     "Распознавание речи".into()
                 },
@@ -616,18 +635,26 @@ fn model_download(
                 let _ = app2.emit(
                     "engine-event",
                     &JarvisEvent::Log {
-                        message: if name == "silero" {
-                            "Голос скачан — перезагружаю озвучку".into()
+                        message: if name == "zonos" {
+                            "Веса ZONOS3 скачаны — перезагружаю озвучку".into()
                         } else {
                             "Распознавание скачано — подхватится при следующем запуске".into()
                         },
                     },
                 );
-                // Silero живёт в отдельном движке: перезагружаем его сразу,
+                // ZONOS3 живёт в отдельном движке: перезагружаем его сразу,
                 // без перезапуска приложения.
-                if name == "silero" {
+                if name == "zonos" {
                     tts::set_voice(&shared_tts, &tts_failed, &tts::current_voice());
                 }
+            }
+            Err(e) if jarvis_core::model_fetch::downloads_cancelled() => {
+                let _ = app2.emit(
+                    "engine-event",
+                    &JarvisEvent::Log {
+                        message: "Загрузка модели отменена".into(),
+                    },
+                );
             }
             Err(e) => {
                 let _ = app2.emit(
@@ -641,6 +668,20 @@ fn model_download(
         LLM_DOWNLOADING.store(false, Ordering::SeqCst);
     });
     Ok(format!("Скачиваю {name} — прогресс появится в интерфейсе"))
+}
+
+/// Клонировать голос из записи (wav/mp3): файл → эмбеддинг → voices/<name>.
+#[tauri::command]
+fn voice_clone(path: String, name: String) -> Result<(), String> {
+    jarvis_core::tts::clone_voice_from_file(Path::new(&path), &name.trim())
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Отмена текущей загрузки моделей (кнопка «Отменить» в индикаторе).
+#[tauri::command]
+fn model_download_cancel() -> Result<(), String> {
+    jarvis_core::model_fetch::cancel_downloads();
+    Ok(())
 }
 
 /// Удаление скачанной модели (для повторной загрузки или экономии места).
@@ -942,10 +983,7 @@ fn tasks_open() -> Result<(), String> {
 
 #[tauri::command]
 fn tts_voices() -> Vec<(String, String)> {
-    tts::SILERO_VOICES
-        .iter()
-        .map(|(id, desc)| (id.to_string(), desc.to_string()))
-        .collect()
+    tts::zonos_voices()
 }
 
 /// Открывает ссылку из ответа ассистента в системном браузере.
@@ -1585,6 +1623,7 @@ pub fn run() {
         None,
     ));
     let builder = builder.plugin(tauri_plugin_notification::init());
+    let builder = builder.plugin(tauri_plugin_dialog::init());
     builder
         .setup(|app| {
             let handle = app.handle().clone();
@@ -1592,6 +1631,21 @@ pub fn run() {
             // 1. Канал событий создаём ПЕРВЫМ: он нужен и плееру (для AudioLevel),
             //    и движку, и мосту в UI.
             let (events_tx, events_rx) = channel::<JarvisEvent>();
+
+            // Журнал ядра: в GUI — всегда; в терминале — только dev-сборки
+            // (prod показывает пользователю только интерфейс).
+            let log_tx = events_tx.clone();
+            jarvis_core::logging::set_sink(Box::new(move |level, message| {
+                let message = message.to_string();
+                // Warn в GUI идёт как запись журнала: у шины нет отдельного
+                // уровня, а текст предупреждения и так самодостаточен.
+                let _ = log_tx.send(match level {
+                    jarvis_core::logging::Level::Error => JarvisEvent::Error { message },
+                    jarvis_core::logging::Level::Info | jarvis_core::logging::Level::Warn => {
+                        JarvisEvent::Log { message }
+                    }
+                });
+            }));
 
             // 2. Состояния, которые плеер и движок делят между собой.
             let shared_tts: Arc<SharedTtsState> = Arc::new(SharedTtsState::new());
@@ -1719,11 +1773,11 @@ pub fn run() {
                         .unwrap_or_else(|e| e.into_inner());
                     s.tts_voice.clone()
                 };
-                // Озвучка — настоящая Silero (модель скачается при первом
-                // запуске в Documents/Jarvis/models), а не системный синтез.
+                // Озвучка — ZONOS3 (модель скачается при первом запуске в
+                // системной папке моделей), голос клонированный «jarvis».
                 tts::spawn_tts_loader(&shared.shared_tts, &shared.tts_failed, &tts_voice);
                 let _ = events_tx.send(JarvisEvent::Log {
-                    message: format!("Озвучка: silero v5, голос «{tts_voice}»"),
+                    message: format!("Озвучка: ZONOS3, голос «{tts_voice}»"),
                 });
                 let mobile = jarvis_core::mobile::MobileHandles::new(
                     Arc::clone(&shared.shared_llm),
@@ -1783,6 +1837,8 @@ pub fn run() {
             llm_reload,
             models_status,
             model_download,
+            model_download_cancel,
+            voice_clone,
             model_remove,
             open_models_dir,
             send_chat,

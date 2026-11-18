@@ -82,6 +82,14 @@
 
   const micStatusText = $derived(MIC_STATUS_TEXT[micStatus]);
 
+  /** Бейдж доступа: слова вместо внутренних значений статуса. */
+  const MIC_STATUS_BADGE: Record<MicStatus, string> = {
+    authorized: "есть",
+    denied: "запрещён",
+    pending: "запрос",
+    unknown: "неизвестно",
+  };
+
   async function refreshMicStatus() {
     try {
       micStatus = await invoke<MicStatus>("mic_status");
@@ -190,6 +198,15 @@
       toast(`Скачиваю ${title} — прогресс внизу списка`, "ok");
     } catch (e) {
       toast(`Не удалось начать загрузку: ${e}`, "err");
+    }
+  }
+
+  async function cancelDownload() {
+    try {
+      await invoke("model_download_cancel");
+      toast("Отменяю загрузку", "ok");
+    } catch (e) {
+      toast(`Не удалось отменить: ${e}`, "err");
     }
   }
 
@@ -450,9 +467,6 @@
           <span class="row-item__icon"><AppIcon name="commands" size={16} /></span>
           <span class="row-item__text">
             <span class="row-item__title">Команды</span>
-            <span class="row-item__hint">
-              Голосовые фразы и действия: поиск, приоритет, включение и отключение
-            </span>
           </span>
           <span class="row-item__chevron"><AppIcon name="chevronRight" size={15} /></span>
         </button>
@@ -463,7 +477,7 @@
           <span class="row-item__text">
             <span class="row-item__title">Голос и скорость речи</span>
             <span class="row-item__hint">
-              Сейчас выбран {voiceName(settings.tts_voice)} · {settings.tts_speed.toFixed(2)}×
+              {voiceName(settings.tts_voice)} · {settings.tts_speed.toFixed(2)}×
             </span>
           </span>
           <span class="row-item__chevron"><AppIcon name="chevronRight" size={15} /></span>
@@ -473,11 +487,7 @@
         <button class="row-item" onclick={() => go("wakeword")}>
           <span class="row-item__icon"><AppIcon name="mic" size={16} /></span>
           <span class="row-item__text">
-            <span class="row-item__title">Wake word и голос — дополнительно</span>
-            <span class="row-item__hint">
-              Джарвис слышит фразу от любого человека; здесь — проверка фразы
-              и записи для профиля голоса
-            </span>
+            <span class="row-item__title">Фраза активации и голос</span>
           </span>
           <span class="row-item__chevron"><AppIcon name="chevronRight" size={15} /></span>
         </button>
@@ -487,7 +497,6 @@
           <span class="row-item__icon"><AppIcon name="help" size={16} /></span>
           <span class="row-item__text">
             <span class="row-item__title">Помощь</span>
-            <span class="row-item__hint">Как пользоваться и что делать, если не работает</span>
           </span>
           <span class="row-item__chevron"><AppIcon name="chevronRight" size={15} /></span>
         </button>
@@ -502,10 +511,6 @@
       {#if hit("имя", "ассистент", "название", "как называть")}
         <div class="row-item" style="flex-direction: column; align-items: stretch; gap: 6px">
           <span class="row-item__title">Имя ассистента</span>
-          <span class="row-item__hint">
-            Как он представляется в разговоре. То же слово — фраза-активация:
-            скажите имя, и ассистент откликнется.
-          </span>
           <input
             class="input"
             type="text"
@@ -522,7 +527,7 @@
         <SwitchRow
           checked={settings.ack_before_llm}
           title="Звук перед ответом"
-          hint="Короткий сигнал, что вопрос услышан. Выключено — ответ быстрее."
+          hint=""
           onchange={(value) => void patchSettings({ ack_before_llm: value })}
         />
       {/if}
@@ -530,7 +535,7 @@
         <SwitchRow
           checked={autostart}
           title="Запускать при входе в систему"
-          hint="Джарвис будет ждать в строке меню сразу после включения."
+          hint=""
           onchange={toggleAutostart}
         />
       {/if}
@@ -547,25 +552,24 @@
             <span class="row-item__title">Доступ к микрофону</span>
             <span class="row-item__hint">{micStatusText}</span>
           </span>
-          <span class="badge" class:badge--ok={micStatus === "authorized"}>
-            {micStatus === "authorized" ? "OK" : micStatus.toUpperCase()}
+          <span
+            class="badge"
+            class:badge--ok={micStatus === "authorized"}
+            class:badge--warn={micStatus === "pending"}
+            class:badge--err={micStatus === "denied"}
+          >
+            {MIC_STATUS_BADGE[micStatus]}
           </span>
         </div>
         <button class="row-item" disabled={micBusy} onclick={requestMic}>
           <span class="row-item__text">
             <span class="row-item__title">Запросить доступ</span>
-            <span class="row-item__hint">{IS_MAC
-              ? "Показать системный запрос macOS ещё раз"
-              : "На Linux отдельного разрешения не нужно — проверим микрофон"}</span>
           </span>
           <span class="row-item__chevron"><AppIcon name="mic" size={15} /></span>
         </button>
         <button class="row-item" onclick={openMicSettings}>
           <span class="row-item__text">
             <span class="row-item__title">{IS_MAC ? "Открыть Системные настройки" : "Открыть настройки звука"}</span>
-            <span class="row-item__hint">{IS_MAC
-              ? "Конфиденциальность и безопасность → Микрофон"
-              : "Уровни ввода и выбор устройства"}</span>
           </span>
           <span class="row-item__chevron"><AppIcon name="gear" size={15} /></span>
         </button>
@@ -581,12 +585,12 @@
               <span class="row-item__title">Профиль голоса</span>
               <span class="row-item__hint">
                 {voiceSamples > 0
-                  ? `Готов: ${voiceSamples} ${voiceSamples === 1 ? "запись" : (voiceSamples < 5 ? "записи" : "записей")}. Обучить ещё`
-                  : "Нет записей — фильтр не работает. Прочитай фразу в обучении"}
+                  ? `${voiceSamples} ${voiceSamples === 1 ? "запись" : (voiceSamples < 5 ? "записи" : "записей")}`
+                  : "Нет записей"}
               </span>
             </span>
             <span class="badge" class:badge--ok={voiceSamples > 0}>
-              {voiceSamples > 0 ? "OK" : "ПУСТО"}
+              {voiceSamples > 0 ? "готов" : "пусто"}
             </span>
           </button>
         {/if}
@@ -665,6 +669,7 @@
               <progress value={store.download.percent} max="100"></progress> {store.download.percent}%
             </span>
           </span>
+          <button class="btn btn--secondary btn--sm" onclick={cancelDownload}>Отменить</button>
         </div>
       {/if}
       {#if apiActive && yandexActive}
@@ -775,9 +780,7 @@
           <span class="row-item__text">
             <span class="row-item__title">{m.title}</span>
             <span class="row-item__hint">
-              {m.installed
-                ? `Установлена${m.sizeMb ? ` — ${m.sizeMb} МБ` : ""} · лежит в папке моделей`
-                : "Не скачана — скачается в папку моделей"}
+              {m.installed ? `Установлена${m.sizeMb ? ` — ${m.sizeMb} МБ` : ""}` : "Не скачана"}
             </span>
           </span>
           {#if m.installed}
@@ -802,7 +805,6 @@
       <div class="row-item">
         <span class="row-item__text">
           <span class="row-item__title">Папка моделей</span>
-          <span class="row-item__hint">Все модели живут отдельно от приложения — оно весит мало</span>
         </span>
         <button class="btn btn--secondary btn--sm" onclick={() => void openModelsDir()}>
           Открыть папку
@@ -819,15 +821,12 @@
         <div class="row-item">
           <span class="row-item__text">
             <span class="row-item__title">Канал в Telegram</span>
-            <span class="row-item__hint">
-              Токен бота от BotFather и id чатов через запятую. Пусто — канал выключен.
-            </span>
           </span>
         </div>
         <SwitchRow
           checked={settings.telegram_execute}
           title="Выполнять команды из Telegram"
-          hint="Бот исполняет тот же список команд, что и голосом: «открой ютуб», таймеры и другие. Выключено — только разговор."
+          hint="Тот же список команд, что и голосом"
           onchange={(value) => void patchSettings({ telegram_execute: value })}
         />
         <div class="api-fields">

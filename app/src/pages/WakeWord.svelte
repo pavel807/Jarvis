@@ -169,22 +169,14 @@
       <AppIcon name="chevronLeft" size={17} />
     </button>
     <div class="page-head__body">
-      <h1 class="page-title">Wake word и голос — дополнительно</h1>
-      <p class="page-sub">
-        Ассистент срабатывает на фразу «{name}». Если он путает её с другой речью
-        или не откликается — запишите несколько образцов своим голосом.
-      </p>
+      <h1 class="page-title">Фраза активации и голос</h1>
+      <p class="page-sub">Ассистент откликается на фразу «{name}»</p>
     </div>
   </div>
 
   <div class="card card--outline" style="margin-bottom: 12px">
-    <div class="card__title">Активационная фраза</div>
-    <p class="card__hint">
-      Любая фраза: «Джарвис», «Компьютер», «Робот». Детектор слушает
-      ASR-модель и срабатывает, когда она услышала фразу буквально, — голос
-      значения не имеет. Фраза — то же слово, что и имя ассистента, и
-      применяется сразу после сохранения.
-    </p>
+    <div class="card__title">Фраза активации</div>
+    <p class="card__hint">Любая фраза: «Джарвис», «Компьютер», «Робот»</p>
     <label class="api-field">
       <span class="api-field__label">Фраза-активация</span>
       <input
@@ -206,11 +198,7 @@
       {phraseBusy ? "Синтезирую…" : "Сгенерировать и проверить фразу"}
     </button>
     {#if phraseReport}
-      <p class="card__hint">
-        Услышано {phraseReport.detected} из {phraseReport.total} вариантов
-        (худший счёт {phraseReport.worst_score.toFixed(3)}), окно детектора —
-        {phraseReport.window_ms} мс.
-      </p>
+      <p class="card__hint">Услышано {phraseReport.detected} из {phraseReport.total}</p>
     {/if}
   </div>
 
@@ -220,7 +208,7 @@
         <div class="card__title">1 · Запишите обращение</div>
         <p class="card__hint">
           Скажите «Джарвис» естественно, как обычно. Запись остановится сама.
-          Достаточно {MINIMUM} записей, лучше — {RECOMMENDED}.
+          Достаточно {MINIMUM}, лучше — {RECOMMENDED}.
         </p>
 
         <button
@@ -258,10 +246,7 @@
 
       <div class="card card--outline">
         <div class="card__title">Фоновый шум <span class="dim" style="font-weight: 400">— необязательно</span></div>
-        <p class="card__hint">
-          Запишите пару фрагментов обычной обстановки: разговоры, телевизор, музыка.
-          Так Джарвис реже срабатывает на чужую речь.
-        </p>
+        <p class="card__hint">Разговоры, телевизор, музыка — так реже срабатывает на чужую речь</p>
         <button
           class="btn btn--secondary btn--block"
           disabled={store.recording}
@@ -290,10 +275,7 @@
     <div>
       <div class="card card--outline">
         <div class="card__title">2 · Соберите модель</div>
-        <p class="card__hint">
-          Джарвис сравнит ваши записи между собой и запомнит, как звучит именно
-          ваше «Джарвис». Это занимает пару секунд.
-        </p>
+        <p class="card__hint">Занимает пару секунд</p>
         <button class="btn btn--primary btn--block" disabled={building || !ready} onclick={buildModel}>
           {#if building}
             <span class="spinner"></span>
@@ -309,9 +291,7 @@
 
       <div class="card card--outline">
         <div class="card__title">3 · Проверьте и включите</div>
-        <p class="card__hint">
-          Запишите проверочное «Джарвис» и посмотрите, насколько оно похоже на ваши образцы.
-        </p>
+        <p class="card__hint">Запишите «Джарвис» и послушайте, как выходит</p>
 
         <div class="btn-row">
           <button

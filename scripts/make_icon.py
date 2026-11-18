@@ -7,8 +7,16 @@
 канал-проводник, ядро. Цвета взяты из scene.ts, чтобы иконка и приложение
 выглядели одним устройством.
 
+Два мастера из одного рисунка:
+  resources/icons/icon.svg      — macOS/Windows: со скруглёнными углами
+                                  (там система углы не скругляет);
+  resources/icons/icon-ios.svg  — iOS: полный квадрат без альфы (система
+                                  скругляет сама, а полупрозрачные углы
+                                  iOS не принимает).
+
 Запуск:  python3 scripts/make_icon.py
-Результат: resources/icons/icon.svg (мастер) и все размеры в app/src-tauri/icons
+Результат: resources/icons/icon.svg, resources/icons/icon-ios.svg,
+            resources/icons/icon-ios.png и все размеры в app/src-tauri/icons
 
 Никаких SVG-фильтров: свечение набрано широкими полупрозрачными штрихами,
 потому что растеризатор (librsvg) трактует фильтры хуже, чем браузеры, а
@@ -104,7 +112,7 @@ def glow_stroke(points: list[tuple[float, float]], color: str, width: float) -> 
     )
 
 
-def build_svg() -> str:
+def build_svg(square: bool = False) -> str:
     r = SIZE * 0.385  # внешний радиус корпуса
     outline = truncated(r)
     chassis = ring(r, r * 0.79)
@@ -156,7 +164,7 @@ def build_svg() -> str:
     </radialGradient>
   </defs>
 
-  <rect width="{SIZE}" height="{SIZE}" rx="{SIZE * 0.2237:.0f}" fill="url(#bg)"/>
+  <rect width="{SIZE}" height="{SIZE}" rx="{0 if square else SIZE * 0.2237:.0f}" fill="url(#bg)"/>
 
   <!-- Колодец под ядром -->
   <path d="{path(well)}" fill="{DEEP}" fill-opacity="0.35"/>
@@ -187,10 +195,15 @@ def build_svg() -> str:
 
 
 def main() -> int:
-    svg = build_svg()
     MASTER.parent.mkdir(parents=True, exist_ok=True)
-    MASTER.write_text(svg, encoding="utf-8")
+    MASTER.write_text(build_svg(), encoding="utf-8")
     print(f"→ мастер иконки: {MASTER}")
+
+    # Мастер для iOS: тот же рисунок, но квадратный и без прозрачных углов —
+    # iOS скругляет иконку сам и полупрозрачные углы не принимает.
+    master_ios = MASTER.parent / "icon-ios.svg"
+    master_ios.write_text(build_svg(square=True), encoding="utf-8")
+    print(f"→ мастер иконки (iOS): {master_ios}")
 
     ICONS.mkdir(parents=True, exist_ok=True)
     png = ICONS / "icon.png"
@@ -200,8 +213,23 @@ def main() -> int:
     )
     print(f"→ растер: {png} (1024×1024)")
 
+    # Растер для iOS — непрозрачный квадрат.
+    png_ios = MASTER.parent / "icon-ios.png"
+    subprocess.run(
+        ["rsvg-convert", "-w", "1024", "-h", "1024", "-o", str(png_ios), str(master_ios)],
+        check=True,
+    )
+    print(f"→ растер (iOS): {png_ios} (1024×1024)")
+
     subprocess.run(["bun", "tauri", "icon", "src-tauri/icons/icon.png"], cwd=APP, check=True)
     print("→ все размеры пересобраны")
+
+    # Иконка в iOS-каталоге: та же картинка, но квадратная и без альфы
+    # (iOS скругляет углы сам и прозрачность не принимает).
+    subprocess.run(
+        ["python3", str(ROOT / "scripts" / "ios_icon.py")],
+        check=False,
+    )
     return 0
 
 

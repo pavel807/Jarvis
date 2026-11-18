@@ -1,9 +1,12 @@
 /**
- * Голоса Silero: бэкенд отдаёт технические id (`ru_dmitriy`) и пометку
+ * Голоса TTS: бэкенд отдаёт технические id (`jarvis`, `ru_eduard`) и пометку
  * «мужской»/«женский». Пользователю показываем имя и группируем по полу.
+ * Движок ZONOS3 — единственный: голоса — эмбеддинги из voices/ (jarvis —
+ * клон голоса Джарвиса), чужие записи — превью без смены голоса.
  */
 
 const NAMES: Record<string, string> = {
+  jarvis: "Джарвис",
   ru_eduard: "Эдуард",
   ru_dmitriy: "Дмитрий",
   ru_alexandr: "Александр",
@@ -62,6 +65,7 @@ export function voiceGroups(voices: [string, string][]): VoiceGroup[] {
   for (const [id, desc] of voices) {
     const item: VoiceItem = { id, name: voiceName(id) };
     if (desc.includes("основн")) item.note = "основной";
+    if (desc.includes("загружен")) item.note = "загруженный тобой";
     if (desc.includes("мужск")) men.push(item);
     else if (desc.includes("женск")) women.push(item);
     else other.push(item);

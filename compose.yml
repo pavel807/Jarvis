@@ -1,5 +1,5 @@
 # Сборка проекта через compose: один сервис, воспроизводимый контейнер,
-# артефакты на хосте в ./dist-out. Нативный путь — ./install.sh.
+# артефакты на хосте в ./dist-out. Нативный путь — `nsh run` в ./installer.
 #
 #   docker compose run --rm build          # собрать релиз
 #   docker compose run --rm test           # прогнать тесты воркспейса

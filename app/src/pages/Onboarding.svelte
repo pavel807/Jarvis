@@ -29,25 +29,25 @@
       backend: "uzu",
       model: "qwen3.5-2b-mirai-l",
       title: "Умная — локальная, Qwen3.5 2B",
-      hint: "Работает на этом Mac, ~2,2 ГБ. Точные веса, реже ошибается.",
+      hint: "На этом Mac, ~2,2 ГБ",
     },
     {
       backend: "uzu",
       model: "qwen3.5-4b-mirai-l",
       title: "Эксперт — локальная, Qwen3.5 4B",
-      hint: "Старшая локальная модель, ~4,5 ГБ. Точнее, отвечает чуть медленнее.",
+      hint: "На этом Mac, ~4,5 ГБ, отвечает медленнее",
     },
     {
       backend: "uzu",
       model: "qwen3.5-0.8b",
       title: "Быстрая — локальная, Qwen3.5 0.8B",
-      hint: "~0,5 ГБ. Самая быстрая, но чаще ошибается.",
+      hint: "~0,5 ГБ, отвечает быстрее всех",
     },
     {
       backend: "candle",
       model: "qwen3.5-0.8b",
       title: "Классическая — локальная, candle",
-      hint: "Собственная реализация без Uzu. Модель из папки models/.",
+      hint: "~0,5 ГБ",
     },
   ];
 
@@ -73,6 +73,15 @@
     }
   }
   void loadModels();
+
+  async function cancelDownload() {
+    try {
+      await invoke("model_download_cancel");
+      toast("Отменяю загрузку", "ok");
+    } catch (e) {
+      toast(`Не удалось отменить: ${e}`, "err");
+    }
+  }
 
   async function downloadModel(name: string) {
     try {
@@ -140,7 +149,7 @@
 
     {#if step === 0}
       <h1 class="ob-title">{name} просыпается</h1>
-      <p class="ob-sub">Загружаются основные модели — это занимает до минуты.</p>
+      <p class="ob-sub">Модели загружаются — это до минуты</p>
       <div class="card card--flush ob-status">
         <div class="ob-row">
           <span class="ob-dot" class:is-ok={engineReady}></span>
@@ -163,10 +172,7 @@
       </button>
     {:else if step === 1}
       <h1 class="ob-title">Кто будет отвечать?</h1>
-      <p class="ob-sub">
-        Локальная модель работает без интернета. Облачная — умнее, но нужен
-        API-ключ, и фразы уходят в сеть.
-      </p>
+      <p class="ob-sub">Локальная — без интернета. Облачная — нужен ключ</p>
       <div class="card card--flush ob-picker">
         {#each llmChoices as choice (choice.backend + choice.model)}
           <button class="row-item" onclick={() => pickLlm(choice.backend, choice.model)}>
@@ -204,12 +210,13 @@
                 <progress value={store.download.percent} max="100"></progress> {store.download.percent}%
               </span>
             </span>
+            <button class="btn btn--secondary btn--sm" onclick={cancelDownload}>Отменить</button>
           </div>
         {/if}
         <button class="row-item" onclick={() => pickApi("yandex")}>
           <span class="row-item__text">
             <span class="row-item__title">Яндекс GPT — облако</span>
-            <span class="row-item__hint">Нужен API-ключ Яндекс.Облака и идентификатор каталога</span>
+            <span class="row-item__hint">Нужен ключ и идентификатор каталога</span>
           </span>
           {#if apiActive && yandexActive}
             <span class="row-item__value"><AppIcon name="check" size={15} /></span>
@@ -218,7 +225,7 @@
         <button class="row-item" onclick={() => pickApi("gigachat")}>
           <span class="row-item__text">
             <span class="row-item__title">GigaChat (Сбер) — облако</span>
-            <span class="row-item__hint">Нужен только ключ авторизации — access-токен Джарвис получает сам</span>
+            <span class="row-item__hint">Нужен только ключ</span>
           </span>
           {#if gigachatActive}
             <span class="row-item__value"><AppIcon name="check" size={15} /></span>
@@ -227,7 +234,7 @@
         <button class="row-item" onclick={() => pickApi("openai")}>
           <span class="row-item__text">
             <span class="row-item__title">Своя модель (API) — облако</span>
-            <span class="row-item__hint">Любой OpenAI-совместимый сервис: ключ, адрес и модель ниже</span>
+            <span class="row-item__hint">OpenAI, OpenRouter, LM Studio</span>
           </span>
           {#if apiActive && settings.api_preset === "openai"}
             <span class="row-item__value"><AppIcon name="check" size={15} /></span>
@@ -308,11 +315,7 @@
       <button class="btn btn--primary btn--block" onclick={() => (step = 2)}>Дальше</button>
     {:else if step === 2}
       <h1 class="ob-title">Познакомься с моим голосом</h1>
-      <p class="ob-sub">
-        Прочитай фразу с экрана — {name} запомнит, как звучит твой голос, и
-        будет отсекать посторонних. Можно пропустить: он честно предупредит,
-        что фильтр пока не работает.
-      </p>
+      <p class="ob-sub">Прочитай фразу — {name} запомнит твой голос. Можно пропустить</p>
       <VoiceTraining />
       <div class="ob-skip-row">
         <button class="btn btn--primary btn--block" onclick={finish}>Готово</button>

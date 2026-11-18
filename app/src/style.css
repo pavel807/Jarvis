@@ -5,30 +5,27 @@
    Центральный элемент — треугольный реактор Mark V.
 
    Правила:
-   1. Циан — энергия системы: активность, связь, фокус.
-      Никаких посторонних акцентов.
-   2. Технические метки — моноширинные, строчные буквы не капсом
-      без нужды; читаемость важнее «футуристичности».
-   3. Свечение — только у энергии: реактор, активные состояния,
-      фокус. Поверхности остаются матовыми.
-   4. Движение — плавное, с естественным замедлением; уважаем
+   1. Хром тихий: поверхности матовые, графит без цветного тона.
+   2. Циан — единственный акцент: активность, фокус, энергия реактора.
+   3. Свечений нет — глубина из ступеней поверхности и hairline-границ.
+   4. Движение — короткое, с естественным замедлением; уважаем
       prefers-reduced-motion.
    ============================================================ */
 
 :root {
   color-scheme: dark;
 
-  /* Фон и поверхности — тёмная сталь */
-  --bg: #0a1523;
-  --bg-2: #0e1c2e;
-  --surface: #101923;
-  --surface-2: #15212d;
-  --surface-3: #1a2936;
-  --hover: rgba(75, 203, 255, 0.07);
+  /* Фон и поверхности — тёмный графит, тёплый металл */
+  --bg: #0c1014;
+  --bg-2: #10151b;
+  --surface: #141a21;
+  --surface-2: #1a2129;
+  --surface-3: #212a33;
+  --hover: rgba(255, 255, 255, 0.05);
 
   /* Границы и металл */
-  --border: #1a2936;
-  --border-strong: #263747;
+  --border: #222b34;
+  --border-strong: #33404b;
   --titanium: #aebbc6;
   --silver: #d8e2ea;
 
@@ -43,7 +40,6 @@
   --energy: #b9f0ff;
   --cyan-soft: rgba(75, 203, 255, 0.12);
   --cyan-ring: rgba(75, 203, 255, 0.45);
-  --cyan-glow: rgba(75, 203, 255, 0.35);
 
   /* Статусы */
   --ok: #65d6a3;
@@ -107,14 +103,14 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(75, 203, 255, 0.16);
+  background: rgba(148, 163, 176, 0.18);
   border-radius: 5px;
   border: 3px solid transparent;
   background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(75, 203, 255, 0.32);
+  background: rgba(148, 163, 176, 0.32);
   background-clip: content-box;
 }
 
@@ -149,10 +145,7 @@ body {
   /* Свой контекст наслаивания: холст реактора с z-index: -1 остаётся поверх
      фона приложения, но под полупрозрачными панелями интерфейса. */
   isolation: isolate;
-  /* Нейтральное затемнение к низу — глубина без цветных пятен. */
-  background:
-    radial-gradient(140% 60% at 50% 118%, rgba(10, 21, 35, 0) 40%, #060f1b 100%),
-    var(--bg);
+  background: var(--bg);
 }
 
 /* ---------- Шапка ---------- */
@@ -1202,7 +1195,7 @@ input[type="range"]:active::-webkit-slider-thumb {
 .reactor-boot__fill {
   display: block;
   height: 100%;
-  background: linear-gradient(90deg, rgba(75, 203, 255, 0.2), var(--cyan));
+  background: var(--cyan);
   transform-origin: left center;
   animation: boot-fill var(--intro-dur, 2.3s) cubic-bezier(0.4, 0.1, 0.3, 1) forwards;
 }
@@ -1338,13 +1331,9 @@ input[type="range"]:active::-webkit-slider-thumb {
   min-width: 0;
 }
 
-.transmission__tag {
-  flex-shrink: 0;
-  width: 44px;
-  font-family: var(--mono);
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
+/* Ответ пользователя — приглушённый, ответ Джарвиса — основной текст.
+   Раньше различались метками IN/OUT — они только занимали место. */
+.transmission__row .transmission__text {
   color: var(--text-3);
 }
 
@@ -1361,10 +1350,6 @@ input[type="range"]:active::-webkit-slider-thumb {
 
 .transmission__row.is-reply .transmission__text {
   color: var(--text);
-}
-
-.transmission__row.is-reply .transmission__tag {
-  color: var(--cyan);
 }
 
 .transmission__row.is-action .transmission__text {
@@ -1446,12 +1431,11 @@ input[type="range"]:active::-webkit-slider-thumb {
   height: 30px;
 }
 
-/* Мини-спектр: столбики с вертикальным градиентом и лёгким свечением. */
+/* Мини-спектр: столбики активной записи — плоский циан. */
 .wave span {
   width: 3px;
   border-radius: 2px;
-  background: linear-gradient(180deg, #c9f1ff, var(--cyan) 72%);
-  box-shadow: 0 0 6px rgba(75, 203, 255, 0.3);
+  background: var(--cyan);
   height: calc(3px + var(--h) * 26px);
   transition: height 0.08s linear, opacity 0.2s;
 }
@@ -1830,7 +1814,7 @@ input[type="range"]:active::-webkit-slider-thumb {
 }
 
 .cmd-row.is-disabled .cmd-row__name,
-.cmd-row.is-disabled .cmd-row__desc,
+.cmd-row.is-disabled .cmd-row__triggers,
 .cmd-row.is-disabled .cmd-row__icon {
   opacity: 0.45;
 }
@@ -1899,15 +1883,6 @@ input[type="range"]:active::-webkit-slider-thumb {
   min-width: 0;
 }
 
-.cmd-row__desc {
-  font-size: 12px;
-  color: var(--text-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-
 .cmd-row__triggers {
   color: var(--text-3);
   font-size: 10.5px;
@@ -1961,6 +1936,13 @@ input[type="range"]:active::-webkit-slider-thumb {
 
 .voice-current__note {
   font-size: 12px;
+  color: var(--text-2);
+}
+
+.voice-engine__note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--text-2);
 }
 
@@ -2580,4 +2562,16 @@ input[type="range"]:active::-webkit-slider-thumb {
   background: var(--cyan);
   color: var(--on-accent);
   font-weight: 650;
+}
+
+/* ---------- Свой голос: загрузка записи ---------- */
+
+.voice-upload {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.voice-upload .input {
+  flex: 1;
 }

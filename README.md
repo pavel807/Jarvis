@@ -132,10 +132,39 @@ cd app && bun run dev   # http://localhost:1420/dev/preview.html
 `~/Library/Application Support/Jarvis` на macOS): пороги тишины, длина
 окна детектора, температура модели. Файл перечитывается на лету.
 
+## Сборка для iPhone и iPad
+
+Приложение живёт и на iOS/iPadOS (Tauri 2 mobile): голосовой движок тот же —
+микрофон → STT → LLM → озвучка ZONOS3, tap-to-talk.
+
+```bash
+./scripts/build_ios.sh            # меню: симулятор или твой iPhone/iPad
+./scripts/build_ios.sh sim iPhone_17   # только симулятор
+./scripts/build_ios.sh device iPad      # только устройство (нужна подпись)
+./scripts/build_ios.sh dev              # открыть Xcode с живым Tauri CLI
+```
+
+Требования: Xcode с iOS SDK, `rustup target add aarch64-apple-ios
+aarch64-apple-ios-sim`, bun. Подпись устройства — своя команда Apple
+(Xcode → Settings → Accounts); ID команды подставляется сам, сертификат берётся
+из keychain.
+
+Сборка прямо из Xcode: build-фаза «Build Rust Code» сама Rust не собирает —
+она спрашивает у Tauri CLI адрес локального сервера опций, а тот живёт только
+пока CLI работает. Поэтому либо собирай скриптом (он зовёт CLI сам), либо держи
+`bun tauri ios dev --open` живым — тогда Run в Xcode работает.
+
+Иконка (реактор Mark V) рисуется скриптом `scripts/make_icon.py`: для macOS —
+со скруглёнными углами, для iOS — квадратная и без прозрачности (так требует
+iOS). Размеры в `gen/apple` обновляются при каждой сборке iOS.
+
 ## Модели и лицензии
 
 - Распознавание речи: FastConformer-Hybrid Large RU (NVIDIA, CC-BY-4.0),
   собственная реализация, работает на процессоре
-- Голос: Silero v5 (AGPL-3.0 / CC-BY-NC — для личного помощника), 29 голосов
+- Голос: ZONOS3-Mini (Zyphra) на candle — клон голоса Джарвиса по опорной
+  записи, 44.1 кГц, без Python; спикер-энкодер MECT-B2. Модель (~0.9 ГБ)
+  скачивается при первом запуске; вручную — `scripts/fetch_zonos3.sh`
+  (понимает `HF_ENDPOINT` для зеркала, если huggingface.co недоступен)
 - Ударения и омографы: модели ruaccent
 - Модель ответов: Qwen 3.5 (Apache-2.0) локально или любая облачная через API

@@ -2,49 +2,36 @@
   import { go, settings, store } from "../store.svelte";
   import AppIcon from "../components/AppIcon.svelte";
 
-  /** Помощь: как пользоваться, типовые проблемы, файлы данных. */
+  /** Помощь: как пользоваться и что делать, если что-то не работает. */
 
-  const name = $derived(settings.assistant_name || "Джарвис");
   const wake = $derived(settings.wake_word || "Джарвис");
 
   const steps = $derived([
-    {
-      icon: "mic",
-      title: "Скажите фразу-активацию",
-      body: `Скажите «${wake}» — ассистент откликнется, а индикатор оживёт.`,
-    },
-    {
-      icon: "commands",
-      title: "Назовите команду или спросите",
-      body: "«Открой ютуб», «запусти монтаж», «какая сегодня погода». Список команд — в разделе «Команды».",
-    },
-    {
-      icon: "stop",
-      title: "Скажите «замолчи», если нужно прервать",
-      body: "Ответ остановится сразу, и ассистент снова начнёт ждать обращения. Той же кнопкой «Остановить» на главной.",
-    },
+    { icon: "mic", title: `Скажите «${wake}»` },
+    { icon: "commands", title: "Назовите команду или задайте вопрос" },
+    { icon: "stop", title: "Скажите «замолчи», чтобы прервать ответ" },
   ]);
 
   const problems = $derived([
     {
       q: "Не реагирует на фразу-активацию",
-      a: "Проверьте, что приложению разрешён доступ к микрофону в системных настройках, и что в настройках задана та фраза, которую вы говорите.",
+      a: "Дайте доступ к микрофону в системных настройках",
     },
     {
       q: "Первый запуск идёт долго",
-      a: "При первом запуске скачиваются модели — около 4 ГБ. Дальше ассистент стартует за несколько секунд.",
+      a: "Скачиваются модели — это занимает до минуты",
     },
     {
       q: "Отвечает, но не слышно голоса",
-      a: "Голос загружается в первую минуту после старта.",
+      a: "Голос загружается в первую минуту после старта",
     },
     {
       q: "Не понимает нужную фразу",
-      a: "Откройте раздел «Команды» и добавьте свои слова-триггеры к нужной команде — они могут быть любыми.",
+      a: "Добавьте слова-триггеры в разделе «Команды»",
     },
     {
       q: "Срабатывает на чужую речь",
-      a: "Проверьте микрофон: слишком тихий или шумный вход мешает разбору речи. Порог чувствительности — в настройках.",
+      a: "Проверьте микрофон и чувствительность в настройках",
     },
   ]);
 
@@ -64,9 +51,6 @@
     </button>
     <div class="page-head__body">
       <h1 class="page-title">Помощь</h1>
-      <p class="page-sub">
-        Коротко о том, как всё устроено и что делать, если что-то не работает.
-      </p>
     </div>
   </div>
 
@@ -79,7 +63,6 @@
             <span class="step-icon"><AppIcon name={step.icon} size={16} /></span>
             <span class="row-item__text">
               <span class="row-item__title">{step.title}</span>
-              <span class="row-item__hint">{step.body}</span>
             </span>
           </div>
         {/each}
@@ -105,58 +88,6 @@
           </div>
         {/each}
       </div>
-
-      <div class="section-title">Где что лежит</div>
-      <div class="card card--flush card--outline">
-        <div class="row-item">
-          <span class="row-item__text">
-            <span class="row-item__title"><span class="mono">commands.toml</span> — команды</span>
-            <span class="row-item__hint">
-              Слова-триггеры и действия. Удобнее править на странице «Команды».
-            </span>
-          </span>
-        </div>
-        <div class="row-item">
-          <span class="row-item__text">
-            <span class="row-item__title"><span class="mono">settings.toml</span> — тонкая настройка</span>
-            <span class="row-item__hint">
-              Основные настройки есть в разделе «Настройки», остальное можно поправить
-              в файле — изменения подхватятся на лету.
-            </span>
-          </span>
-        </div>
-        <div class="row-item">
-          <span class="row-item__text">
-            <span class="row-item__title"><span class="mono">models/</span> — модели</span>
-            <span class="row-item__hint">
-              Распознавание речи, синтез голоса и модель ответов. Всё считается на этом компьютере.
-            </span>
-          </span>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="section-title">О программе</div>
-  <div class="card card--flush">
-    <div class="row-item">
-      <span class="row-item__icon"><AppIcon name="info" size={16} /></span>
-      <span class="row-item__text">
-        <span class="row-item__title">{name} 6.2 · Mark V</span>
-        <span class="row-item__hint">
-          Голосовой ассистент: речь распознаётся и синтезируется локально.
-          Ответы готовит модель на выбор — локальная на диске или облачная
-          через API.
-        </span>
-      </span>
-    </div>
-    <div class="row-item">
-      <span class="row-item__text">
-        <span class="row-item__title">Рабочая папка агента</span>
-        <span class="row-item__hint mono" style="user-select: text">
-          {store.status.cwd || "—"}
-        </span>
-      </span>
     </div>
   </div>
 </div>

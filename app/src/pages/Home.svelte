@@ -92,7 +92,6 @@
     {:else}
       {#if lastUser}
         <div class="transmission__row">
-          <span class="transmission__tag">IN</span>
           <span class="transmission__text">{lastUser.text}</span>
         </div>
       {/if}
@@ -102,7 +101,6 @@
           class:is-action={lastReply.source === "action"}
           class:is-error={lastReply.error}
         >
-          <span class="transmission__tag">OUT</span>
           <span class="transmission__text">
             {lastReply.text}
             {#if lastReply.streaming}<span class="caret"></span>{/if}
@@ -110,7 +108,6 @@
         </div>
       {:else if busy}
         <div class="transmission__row is-reply">
-          <span class="transmission__tag">OUT</span>
           <span class="transmission__text">
             <span class="thinking-row"><span class="spinner"></span>Обрабатываю запрос…</span>
           </span>
@@ -178,7 +175,7 @@
     {#if store.history.length}
       <div class="voice-links">
         <button class="link-btn" onclick={() => go("memory")}>
-          Полная история — в разделе «Память»
+          История
           <AppIcon name="chevronRight" size={11} />
         </button>
         <button

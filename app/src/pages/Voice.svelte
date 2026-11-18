@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { open as pickFile } from "@tauri-apps/plugin-dialog";
   import { settings, patchSettings, toast, go, store } from "../store.svelte";
   import { voiceGroups, voiceName } from "../voices";
   import AppIcon from "../components/AppIcon.svelte";
@@ -69,6 +70,37 @@
     await patchSettings({ tts_speed: settings.tts_speed });
   }
 
+  // ---------- Свой голос: клон из загруженной записи ----------
+
+  let cloning = $state(false);
+  let newVoiceName = $state("");
+
+  /** Выбрать запись (wav/mp3, 5–60 с чистой речи) и обучить на ней голос. */
+  async function uploadVoice() {
+    const name = newVoiceName.trim();
+    if (!name) {
+      toast("Придумай имя голоса — латиницей", "err");
+      return;
+    }
+    const file = await pickFile({
+      multiple: false,
+      title: "Опорная запись голоса",
+      filters: [{ name: "Аудио", extensions: ["wav", "mp3"] }],
+    });
+    if (!file) return;
+    cloning = true;
+    try {
+      await invoke("voice_clone", { path: file, name });
+      toast(`Голос «${name}» обучен — выбери его в списке`, "ok");
+      voices = await invoke<[string, string][]>("tts_voices");
+      newVoiceName = "";
+    } catch (e) {
+      toast(`Не удалось обучить голос: ${e}`, "err");
+    } finally {
+      cloning = false;
+    }
+  }
+
   /** Озвучить фразу голосом приложения. */
   function playTest() {
     if (!testText.trim()) return;
@@ -91,10 +123,6 @@
     </button>
     <div class="page-head__body">
       <h1 class="page-title">Голос</h1>
-      <p class="page-sub">
-        Каким голосом Джарвис отвечает. Пример можно послушать без смены голоса —
-        выбор подтверждается отдельно.
-      </p>
     </div>
   </div>
 
@@ -103,7 +131,7 @@
       <span class="voice-current__label">Сейчас говорит</span>
       <span class="voice-current__name">{currentName}</span>
       <span class="voice-current__note">
-        {voices.find(([id]) => id === settings.tts_voice)?.[1]?.split(",")[0] ?? "Silero"}
+        {voices.find(([id]) => id === settings.tts_voice)?.[1]?.split(",")[0] ?? "ZONOS3"}
         · скорость {settings.tts_speed.toFixed(2)}×
       </span>
     </div>
@@ -114,11 +142,36 @@
   </div>
 
   <div class="card card--outline">
-    <div class="card__title">Выбрать голос</div>
-    <p class="card__hint">
-      Нажмите на голос, чтобы подсветить его как кандидат, и прослушайте пример
-      кнопкой справа — пример не меняет голос приложения.
+    <div class="card__title">Синтез речи</div>
+    <p class="voice-engine__note">
+      ZONOS3-Mini говорит в 44.1 кГц — клонирование по опорной записи, без
+      Python и облака. Веса (~0.9 ГБ: движок + декодер + энкодер голоса)
+      скачаются автоматически при первом запуске. Другие голоса — превью
+      эмбеддингов из папки voices/.
     </p>
+  </div>
+
+  <div class="card card--outline">
+    <div class="card__title">Свой голос</div>
+    <p class="voice-engine__note">
+      Загрузи запись (wav или mp3, 5–60 секунд чистой речи одного человека) —
+      Джарвис обучится говорить этим голосом. Голос появится в списке.
+    </p>
+    <div class="voice-upload">
+      <input
+        class="input"
+        placeholder="Имя голоса, например evgeny"
+        bind:value={newVoiceName}
+        disabled={cloning}
+      />
+      <button class="btn btn--primary" disabled={cloning} onclick={uploadVoice}>
+        {cloning ? "Обучаю…" : "Выбрать запись…"}
+      </button>
+    </div>
+  </div>
+
+  <div class="card card--outline">
+    <div class="card__title">Выбрать голос</div>
 
     <div class="toolbar">
       <div class="search-box">
@@ -250,7 +303,6 @@
 
     <div class="card card--outline">
       <div class="card__title">Проверочная фраза</div>
-      <p class="card__hint">Ей же озвучиваются примеры голосов.</p>
       <textarea bind:value={testText} class="textarea" rows="2" aria-label="Проверочная фраза"></textarea>
       <button class="btn btn--secondary btn--sm" style="margin-top: 10px" onclick={playTest}>
         <AppIcon name="play" size={14} />

@@ -6,7 +6,7 @@
 
   const wordmark = $derived((settings.assistant_name || "Джарвис").toUpperCase());
   const linkOn = $derived(store.status.engineRunning);
-  const linkLabel = $derived(linkOn ? "ONLINE" : "LINK…");
+  const linkLabel = $derived(linkOn ? "Готов" : "Запускается…");
 </script>
 
 <header class="header">

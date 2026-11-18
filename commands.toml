@@ -251,6 +251,19 @@ action_value = "Finder"
 enabled = true
 
 [[commands]]
+name = "firefox"
+trigger_words = [
+    "файрфокс",
+    "файт фокс",
+    "firefox",
+    "фокс",
+]
+action_type = "app"
+action_value = "Firefox"
+action_fallback = "/Applications/Firefox.app"
+enabled = true
+
+[[commands]]
 name = "Замолчать"
 trigger_words = [
     "замолчи",

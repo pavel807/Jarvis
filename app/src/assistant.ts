@@ -73,9 +73,9 @@ export function voiceStatusLabel(): string {
   if (!store.status.engineRunning) return "Загрузка систем";
   if (store.status.paused) return "Микрофон выключен";
   if (store.status.llmStatus === "error") return "Ошибка ядра";
-  if (store.speaking) return "Передача";
-  if (store.chat.busy) return "Обработка запроса";
-  if (assistantBusy()) return "Анализ фразы";
+  if (store.speaking) return "Отвечаю";
+  if (store.chat.busy) return "Думаю";
+  if (assistantBusy()) return "Распознаю";
   if (store.engineState === "listening") return "Слушаю";
   return "Готов";
 }

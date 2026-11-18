@@ -21,3 +21,4 @@ anyhow.workspace = true
 # Кнопка «Открыть Системные настройки» в меню доступа к микрофону
 # (x-apple.systempreferences:…).
 open.workspace = true
+tauri-plugin-dialog = "2.8.4"

@@ -94,13 +94,13 @@
 
 <div class="page">
   <!-- История диалога -->
-  <div class="section-title">История диалога сессии</div>
+  <div class="section-title">История</div>
   {#if !store.history.length}
     <div class="card">
       <div class="empty">
         <AppIcon name="memory" size={22} />
         Диалога ещё не было.<br />
-        Скажите «Джарвис» или напишите на главной — история появится здесь.
+        Скажите «Джарвис» или напишите на главной.
       </div>
     </div>
   {:else}
@@ -216,7 +216,7 @@
 
     <button class="btn btn--ghost btn--sm" style="margin-top: 12px" onclick={openTasksFile}>
       <AppIcon name="book" size={14} />
-      Открыть tasks.md в редакторе
+      Открыть задачник в редакторе
     </button>
   </div>
 </div>
