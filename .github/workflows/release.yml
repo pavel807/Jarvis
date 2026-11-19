@@ -1,15 +1,32 @@
 name: release
 
+# Релиз собирается и уезжает в GitHub Releases автоматически:
+#  - при пуше в main — релиз с тегом из версии в Cargo.toml (архивы
+#    перезаписываются, установщик тянет самый свежий);
+#  - при пуше тега v* — релиз с этим тегом;
+#  - вручную — из вкладки Actions.
+#
+# Установщик берёт бинарники из releases/latest/download/<имя архива>,
+# поэтому имена архивов менять нельзя: они зашиты в installer/src/lib.rs.
+
 on:
   push:
+    branches: ["main"]
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# Два пуша подряд не должны мешать друг другу: публикация идёт по
+# очереди, отменять уже начатую сборку нельзя.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
+    name: Сборка ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
@@ -89,12 +106,65 @@ jobs:
           Copy-Item target/release/jarvis-app.exe dist/jarvis-app-windows-x64.exe
           Compress-Archive -Path dist/jarvis-app-windows-x64.exe, dist/jarvis-cli-windows-x64.exe -DestinationPath dist/jarvis-windows-x64.zip
 
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v2
+      # Архивы уезжают в общий шаг публикации: релиз создаётся один раз
+      # и сразу со всеми платформами.
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          files: |
-            dist/jarvis-macos-arm64.tar.gz
-            dist/jarvis-linux-x64.tar.gz
-            dist/jarvis-windows-x64.zip
-          generate_release_notes: true
-        if: startsWith(github.ref, 'refs/tags/')
+          name: jarvis-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Публикация в Releases
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Версия из манифеста: секция [workspace.package].
+          VERSION=$(awk '
+            /^\[workspace\.package\]/ { in_pkg = 1; next }
+            /^\[/ { in_pkg = 0 }
+            in_pkg && /^version[[:space:]]*=/ {
+              gsub(/[" ]/, "", $3); print $3; exit }
+          ' Cargo.toml)
+          if [ -z "$VERSION" ]; then
+            echo "❌ Не нашёл версию в Cargo.toml"; exit 1
+          fi
+          # Тег: пуш тега — сам тег, пуш в main — версия из манифеста.
+          if [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+          else
+            TAG="v$VERSION"
+          fi
+          echo "🏷 Публикую $TAG (версия $VERSION, коммит $SHA)"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Релиз уже есть: перезаписываем архивы свежей сборкой.
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --latest
+            echo "♻️ Архивы обновлены в релизе $TAG"
+          else
+            gh release create "$TAG" \
+              --target "$SHA" \
+              --title "Джарвис $TAG" \
+              --notes "Сборка $SHA (версия $VERSION)." \
+              --latest \
+              dist/*
+            echo "✅ Релиз $TAG создан"
+          fi
