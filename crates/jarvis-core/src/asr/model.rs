@@ -51,12 +51,19 @@ pub struct FastConformer {
 }
 
 impl FastConformer {
-    /// Загружает модель из `models_dir/fastconformer`.
+    /// Загружает модель из `models_dir/fastconformer` на устройство по
+    /// умолчанию (см. [`pick_device`]).
     ///
     /// Ожидаемые файлы (готовит `tools/convert_fastconformer.py` +
     /// `model_fetch::ensure_fastconformer`):
     /// `model.safetensors`, `config.json`, `tokenizer.vocab`.
     pub fn load(models_dir: &Path) -> Result<Self> {
+        Self::load_on(models_dir, pick_device())
+    }
+
+    /// Как [`load`], но на заданном устройстве. Нужно TTS-самопроверке:
+    /// короткие клипы на CPU считаются в разы быстрее, чем на Metal.
+    pub fn load_on(models_dir: &Path, device: Device) -> Result<Self> {
         // Автозагрузка ассетов (веса ~460 МБ из релиза jarvis-models).
         if let Err(e) = crate::model_fetch::ensure_fastconformer() {
             eprintln!("⚠️ Не удалось скачать FastConformer: {e:#}");
@@ -70,7 +77,6 @@ impl FastConformer {
         );
 
         let cfg = config::load(&dir.join("config.json"))?;
-        let device = pick_device();
 
         let start = Instant::now();
         let vb = unsafe {

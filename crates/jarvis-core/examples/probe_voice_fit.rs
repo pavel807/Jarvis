@@ -48,6 +48,17 @@ fn main() -> Result<()> {
     let target_ref = ref_npy.map(|p| read_npy_f32(std::path::Path::new(&p))).transpose()?;
 
     let cfg_scale: f32 = std::env::var("CFG").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    let mut sampling = jarvis_core::tts_zonos::Sampling::default();
+    if let Ok(v) = std::env::var("TEMP") {
+        sampling.temperature = v.parse().unwrap_or(sampling.temperature);
+    }
+    if let Ok(v) = std::env::var("SEED") {
+        sampling.seed = v.parse().unwrap_or(sampling.seed);
+    }
+    println!(
+        "параметры: cfg {cfg_scale}, temp {:.2}, seed {}",
+        sampling.temperature, sampling.seed
+    );
     let phrases = [
         "Привет, сэр. Все системы работают в штатном режиме.",
         "Курс установлен, скорость максимальная.",
@@ -57,7 +68,7 @@ fn main() -> Result<()> {
     let mut cos_t = 0.0f32;
     let mut cos_r = 0.0f32;
     for (i, text) in phrases.iter().enumerate() {
-        let out = engine.synthesize(text, Some(&voice), [10, 10, 30], &Default::default(), cfg_scale, Some(&dec))?;
+        let out = engine.synthesize(text, Some(&voice), [10, 10, 30], &sampling, cfg_scale, Some(&dec))?;
         let back = spk.embedding(&out.audio, 44100)?;
         let c1 = cosine(&back, &target);
         cos_t += c1;

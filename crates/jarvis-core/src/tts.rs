@@ -255,9 +255,11 @@ fn load_zonos_voice(voice: &str) -> Result<ZonosVoice> {
     let dir = crate::model_fetch::zonos3_dir();
     let backbone = crate::tts_zonos::GgufFile::open(&dir.join("backbone-ptq.gguf"))?;
     let device = crate::tts_zonos::engine::device();
-    let engine = crate::tts_zonos::ZonosEngine::load(&backbone, device.clone())?;
+    let engine = crate::tts_zonos::ZonosEngine::load(&backbone, device)?;
     // ZAC-декодер общий: он превращает коды кадров в звук 44.1 кГц.
-    let codec = crate::tts_zonos::ZacDecoder::open(&dir.join("zac-keep2.gguf"), &device)
+    // Декодер считаем на своём устройстве (Metal), генерацию — на CPU.
+    let decoder_device = crate::tts_zonos::engine::decoder_device();
+    let codec = crate::tts_zonos::ZacDecoder::open(&dir.join("zac-keep2.gguf"), &decoder_device)
         .context("Не удалось загрузить ZAC-декодер (zac-keep2.gguf)")?;
     // Голос из ассетов (192-мерный эмбеддинг), если он есть.
     let speaker = crate::tts_zonos::voice::load_voice_embedding(&dir, voice);

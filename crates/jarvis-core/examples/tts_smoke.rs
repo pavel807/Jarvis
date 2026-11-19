@@ -10,7 +10,8 @@ use jarvis_core::tts_zonos::SpeechEngine;
 fn main() -> Result<()> {
     jarvis_core::init_tuning();
     let started = std::time::Instant::now();
-    let engine = jarvis_core::tts::open_zonos_voice("jarvis")?;
+    let voice = std::env::var("JARVIS_SMOKE_VOICE").unwrap_or_else(|_| "jarvis".into());
+    let engine = jarvis_core::tts::open_zonos_voice(&voice)?;
     println!("✅ ZONOS3 загрузился за {:.1?}", started.elapsed());
 
     let text = std::env::var("JARVIS_SMOKE_TEXT")

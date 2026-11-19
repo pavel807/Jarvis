@@ -44,16 +44,26 @@ pub struct Synthesis {
 /// Частота дискретизации на выходе ZONOS3.
 pub const SAMPLE_RATE: u32 = 44100;
 
-/// Устройство вычислений: Metal на macOS, иначе CPU.
+/// Устройство вычислений для TTS. По умолчанию CPU: Metal быстрее, но на
+/// этом бэкбоне заметно портит генерацию (ASR теряет слова), поэтому он
+/// включается только явно — `JARVIS_TTS_METAL=1`.
 pub fn device() -> Device {
     #[cfg(target_os = "macos")]
-    {
-        Device::new_metal(0).unwrap_or(Device::Cpu)
+    if std::env::var_os("JARVIS_TTS_METAL").is_some() {
+        return Device::new_metal(0).unwrap_or(Device::Cpu);
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Device::Cpu
+    Device::Cpu
+}
+
+/// Устройство ZAC-декодера. Декодер превращает уже выбранные коды в звук и
+/// не влияет на текст, поэтому по умолчанию Metal: на нём декодер вдвое
+/// быстрее CPU. `JARVIS_TTS_DECODER_CPU=1` возвращает CPU.
+pub fn decoder_device() -> Device {
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("JARVIS_TTS_DECODER_CPU").is_none() {
+        return Device::new_metal(0).unwrap_or(Device::Cpu);
     }
+    Device::Cpu
 }
 
 /// Движок синтеза.
@@ -88,8 +98,9 @@ impl ZonosEngine {
     ///
     /// `speaker` — 192-мерный эмбеддинг голоса (из спикер-энкодера);
     /// `buckets` — бакеты условий: громкость, f_max, темп речи;
-    /// `cfg_scale` — усиление клонирования голоса (1.0 = выкл; веб-эталон
-    /// использует 1.5): guided = uncond + scale·(cond − uncond).
+    /// `cfg_scale` — офлайн-усилитель клонирования: guided = uncond +
+    /// scale·(cond − uncond). В бою не используется (всегда 1.0): даёт
+    /// +0.04–0.065 схожести голоса, но ~2× дороже и портит текст.
     pub fn synthesize(
         &mut self,
         text: &str,
@@ -176,6 +187,7 @@ impl ZonosEngine {
         let mut eos_frame: Option<usize> = None;
         let mut countdown = 0usize;
         let max_frames = 2000usize;
+        let gen_started = std::time::Instant::now();
 
         for step in 0..max_frames {
             let stream_row = silence_prefill + step;
@@ -242,6 +254,7 @@ impl ZonosEngine {
         let rows = stream_rows.len();
         let frame_count = rows.saturating_sub(ncb - 1);
         let limit = eos_frame.map(|f| f.min(frame_count)).unwrap_or(frame_count);
+        let gen_secs = gen_started.elapsed().as_secs_f32();
         let mut frames: Vec<Vec<u32>> = Vec::with_capacity(limit);
         for f in 0..limit {
             let mut frame = vec![cfg.audio_pad_id; ncb];
@@ -256,9 +269,16 @@ impl ZonosEngine {
 
         let (audio, sample_rate) = match decoder {
             Some(dec) => {
+                let dec_started = std::time::Instant::now();
                 let mut samples = dec
                     .decode(&frames)
                     .context("ZAC-декодер не справился")?;
+                let dec_secs = dec_started.elapsed().as_secs_f32();
+                if std::env::var_os("JARVIS_VOICE_DEBUG").is_some() {
+                    eprintln!(
+                        "⏱ zonos: генерация {gen_secs:.1}s, декодер {dec_secs:.1}s, кадров {limit}"
+                    );
+                }
                 let drop = silence_prefill * dec.samples_per_frame();
                 let drop = drop.min(samples.len());
                 samples.drain(..drop);
